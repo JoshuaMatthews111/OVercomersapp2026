@@ -35,8 +35,9 @@ Never put the Supabase service-role key in Expo, app config, JavaScript, or `.en
 2. Run `supabase/schema.sql`.
 3. Run `supabase/rls_policies.sql`.
 4. Run `supabase/seed.sql`.
-5. In Authentication settings, configure email confirmation for the release flow you want tonight.
-6. Add yourself as a leader/admin after creating your user:
+5. Run `supabase/storage_and_realtime.sql`.
+6. In Authentication settings, configure email confirmation for the release flow you want tonight.
+7. Add yourself as a leader/admin after creating your user:
 
 ```sql
 insert into user_roles (user_id, role)
