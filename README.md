@@ -71,6 +71,7 @@ Set the Expo token only in your shell or CI secret store:
 ```bash
 export EXPO_TOKEN=your-expo-access-token
 npx eas login
+npx eas init
 npx eas build:configure
 npx eas build --platform ios --profile preview
 npx eas build --platform android --profile preview
