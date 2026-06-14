@@ -1,0 +1,36 @@
+{
+  "name": "overcomers-global-network-app",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@expo/vector-icons": "latest",
+    "@react-native-async-storage/async-storage": "latest",
+    "@supabase/supabase-js": "latest",
+    "expo": "latest",
+    "expo-constants": "latest",
+    "expo-font": "^56.0.6",
+    "expo-linking": "^56.0.14",
+    "expo-location": "latest",
+    "expo-notifications": "latest",
+    "expo-router": "latest",
+    "expo-splash-screen": "^56.0.10",
+    "expo-status-bar": "latest",
+    "react": "latest",
+    "react-native": "latest",
+    "react-native-maps": "latest",
+    "react-native-safe-area-context": "latest",
+    "react-native-screens": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "typescript": "latest"
+  }
+}

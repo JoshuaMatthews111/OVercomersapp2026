@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "Overcomers Global Network",
+    "slug": "overcomers-global-network",
+    "scheme": "ognapp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/ogn-logo-transparent.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.overcomers.globalnetwork.app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "OGN uses your location to help record outreach territories, follow-up locations, and untapped neighborhoods for evangelism teams."
+      }
+    },
+    "android": {
+      "package": "com.overcomers.globalnetwork.app",
+      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/ogn-logo-transparent.png",
+        "backgroundColor": "#071B45"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-location",
+      "expo-notifications",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/ogn-logo-transparent.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#071B45"
+        }
+      ]
+    ],
+    "extra": {
+      "router": { "origin": false },
+      "eas": { "projectId": "replace-with-eas-project-id" }
+    }
+  }
+}

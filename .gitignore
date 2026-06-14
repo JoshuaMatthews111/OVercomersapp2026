@@ -1,0 +1,15 @@
+.expo/
+.expo-shared/
+node_modules/
+.npm-cache/
+dist/
+dist-*/
+build/
+coverage/
+*.log
+.env
+.env.local
+.env.*.local
+ios/
+android/
+eas-build-local/
