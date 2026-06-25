@@ -4,11 +4,11 @@ Expo React Native MVP for iOS and Android using the Concept 2 Global Broadcast d
 
 ## What Is Included
 
-- Home / Global Broadcast dashboard with live, giving, events, invite, and prayer submission.
-- Messages organized by series with sermon detail cards and filters.
-- Bible selector for KJV, ERV, NIV, and AMP with licensed-provider fallback handling.
+- Home / Global Broadcast dashboard with live, giving, events, stories, and prayer submission.
+- Media library for sermons, articles, videos, music, and downloads.
+- Bible selector for KJV, NLT, and AMP with licensed-provider fallback handling.
 - Mandatory community chat with Supabase Realtime helper.
-- Supabase Auth sign-in/sign-up in Profile.
+- Supabase Auth sign-in/sign-up from onboarding and Profile.
 - Evangelism map with global, country, region/state, city, neighborhood, street, and outreach-record drill-down.
 - Locate Me, map animation, pulsing location circle, territory search, colored territory zones, blue/purple outreach pins, add-record flow, and leader follow-up dashboard metrics.
 - Supabase schema, RLS policies, and seed data.
@@ -24,7 +24,11 @@ EXPO_PUBLIC_SUPABASE_ANON_KEY=your-public-anon-key
 EXPO_PUBLIC_LIVE_STREAM_URL=https://overcomersglobalnetwork.com/live
 EXPO_PUBLIC_GIVING_URL=https://overcomersglobalnetwork.com/give
 EXPO_PUBLIC_BIBLE_PROVIDER=api.bible
+EXPO_PUBLIC_BIBLE_API_ENDPOINT=https://rest.api.bible
 EXPO_PUBLIC_BIBLE_API_KEY=your-api-bible-key
+EXPO_PUBLIC_BIBLE_ID_KJV=de4e12af7f28f599-02
+EXPO_PUBLIC_BIBLE_ID_NLT=d6e14a625393b4da-01
+EXPO_PUBLIC_BIBLE_ID_AMP=a81b73293d3080c9-01
 ```
 
 Never put the Supabase service-role key in Expo, app config, JavaScript, or `.env.local`. Use it only in Supabase Edge Functions or secure CI secrets.
@@ -93,7 +97,7 @@ npx eas build --platform android --profile production
 - Chat rooms load and posting works after sign-in.
 - Realtime chat updates appear between two signed-in devices.
 - Messages display by series from Supabase or fallback seed data.
-- Bible selector switches KJV/ERV/NIV/AMP and does not hardcode copyrighted text.
+- Bible selector switches KJV/NLT/AMP and does not hardcode copyrighted text.
 - Prayer request submission writes to Supabase with consent.
 - Evangelism map opens, drills down to street level, locates user, searches territory, and saves outreach/follow-up records.
 - Leader dashboard shows follow-up metrics.
@@ -114,7 +118,7 @@ npx eas build --platform android --profile production
 ## Remaining 24-Hour Work
 
 - Apply SQL to the live Supabase project and promote your account to leader/admin.
-- Confirm API.Bible IDs for ERV, NIV, and AMP licensing under your provider account; the app currently protects those versions behind provider setup messaging.
+- Confirm API.Bible IDs for KJV, NLT, and AMP licensing under your provider account; the app protects unavailable versions behind provider setup messaging.
 - Replace placeholder live stream and online giving URLs.
 - Run two-device chat realtime QA.
 - Run EAS preview builds and fix any native dependency/version warnings from Expo.

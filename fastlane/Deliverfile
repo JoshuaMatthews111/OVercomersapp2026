@@ -1,0 +1,15 @@
+app_identifier("com.overcomers.globalnetwork.app")
+apple_id("mr.matthews2022@gmail.com")
+app_version("1.0.0")
+sku("OGN-APP-2026")
+platform("ios")
+
+metadata_path("./fastlane/metadata/ios")
+screenshots_path("./fastlane/screenshots")
+
+submit_for_review(false)
+automatic_release(false)
+force(true)
+overwrite_screenshots(true)
+precheck_include_in_app_purchases(false)
+run_precheck_before_submit(false)

@@ -1,5 +1,6 @@
 import React from 'react';
-import { SafeAreaView, ScrollView, StyleSheet, ViewStyle } from 'react-native';
+import { ScrollView, StyleSheet, ViewStyle } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors } from '../lib/theme';
 
 export function Screen({ children, scroll = true, style }: { children: React.ReactNode; scroll?: boolean; style?: ViewStyle }) {
@@ -10,4 +11,7 @@ export function Screen({ children, scroll = true, style }: { children: React.Rea
     </SafeAreaView>
   );
 }
-const styles = StyleSheet.create({ safe: { flex: 1, backgroundColor: colors.white }, scroll: { padding: 16, paddingBottom: 96 } });
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: colors.pearl },
+  scroll: { padding: 18, paddingBottom: 104 }
+});

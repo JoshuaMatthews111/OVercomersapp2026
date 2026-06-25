@@ -4,7 +4,7 @@
 create extension if not exists "uuid-ossp";
 create extension if not exists postgis;
 
-create type app_role as enum ('visitor','member','outreach','staff','leader','admin');
+create type app_role as enum ('visitor','member','outreach','staff','leader','admin','super_admin');
 create type message_status as enum ('draft','published','archived');
 create type prayer_status as enum ('new','praying','follow_up','answered','closed');
 create type territory_level as enum ('global','country','region','city','neighborhood','street');
@@ -60,6 +60,7 @@ create table sermons (
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+create index sermons_series_id_idx on sermons(series_id);
 
 create table chat_channels (
   id uuid primary key default uuid_generate_v4(),
@@ -72,6 +73,7 @@ create table chat_channels (
   created_by uuid references auth.users(id),
   created_at timestamptz default now()
 );
+create index chat_channels_created_by_idx on chat_channels(created_by);
 
 create table chat_members (
   channel_id uuid references chat_channels(id) on delete cascade,
@@ -81,6 +83,7 @@ create table chat_members (
   muted_until timestamptz,
   primary key(channel_id, user_id)
 );
+create index chat_members_user_id_idx on chat_members(user_id);
 
 create table chat_messages (
   id uuid primary key default uuid_generate_v4(),
@@ -93,6 +96,9 @@ create table chat_messages (
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+create index chat_messages_channel_id_idx on chat_messages(channel_id);
+create index chat_messages_user_id_idx on chat_messages(user_id);
+create index chat_messages_parent_message_id_idx on chat_messages(parent_message_id);
 
 create table prayer_requests (
   id uuid primary key default uuid_generate_v4(),
@@ -111,6 +117,8 @@ create table prayer_requests (
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+create index prayer_requests_created_by_idx on prayer_requests(created_by);
+create index prayer_requests_assigned_to_idx on prayer_requests(assigned_to);
 
 create table territories (
   id uuid primary key default uuid_generate_v4(),
@@ -169,6 +177,7 @@ create table outreach_contacts (
 create index outreach_contacts_location_idx on outreach_contacts using gist(location);
 create index outreach_contacts_territory_idx on outreach_contacts(territory_id);
 create index outreach_contacts_assigned_idx on outreach_contacts(assigned_to);
+create index outreach_contacts_created_by_idx on outreach_contacts(created_by);
 
 create table follow_up_tasks (
   id uuid primary key default uuid_generate_v4(),
@@ -182,6 +191,9 @@ create table follow_up_tasks (
   created_by uuid references auth.users(id),
   created_at timestamptz default now()
 );
+create index follow_up_tasks_contact_id_idx on follow_up_tasks(contact_id);
+create index follow_up_tasks_assigned_to_idx on follow_up_tasks(assigned_to);
+create index follow_up_tasks_created_by_idx on follow_up_tasks(created_by);
 
 create table events (
   id uuid primary key default uuid_generate_v4(),
@@ -211,6 +223,7 @@ create table push_tokens (
   platform text,
   created_at timestamptz default now()
 );
+create index push_tokens_user_id_idx on push_tokens(user_id);
 
 create table audit_logs (
   id uuid primary key default uuid_generate_v4(),
@@ -221,3 +234,4 @@ create table audit_logs (
   metadata jsonb default '{}'::jsonb,
   created_at timestamptz default now()
 );
+create index audit_logs_actor_id_idx on audit_logs(actor_id);

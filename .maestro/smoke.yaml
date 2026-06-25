@@ -1,0 +1,6 @@
+appId: com.overcomers.globalnetwork.app
+---
+- launchApp
+- assertVisible: "Get Started"
+- tapOn: "Get Started"
+- assertVisible: "Sign In"

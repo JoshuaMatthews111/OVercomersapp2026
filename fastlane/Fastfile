@@ -1,0 +1,15 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Upload App Store Connect metadata and screenshots without submitting for review"
+  lane :metadata do
+    deliver
+  end
+end
+
+platform :android do
+  desc "Upload Google Play listing metadata, icon, feature graphic, and screenshots"
+  lane :metadata do
+    supply
+  end
+end

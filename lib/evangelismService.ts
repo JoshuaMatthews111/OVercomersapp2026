@@ -98,6 +98,70 @@ export async function saveOutreachContact(input: Partial<OutreachContact> & { te
   return data;
 }
 
+export async function updateOutreachContact(contactId: string, input: Partial<OutreachContact>) {
+  if (!hasSupabase) return { id: contactId };
+  const patch: Record<string, unknown> = {};
+  if (input.name !== undefined) patch.full_name = input.name;
+  if (input.phone !== undefined) patch.phone = input.phone || null;
+  if (input.whatsapp !== undefined) patch.whatsapp = input.whatsapp || null;
+  if (input.email !== undefined) patch.email = input.email || null;
+  if (input.prayerRequest !== undefined) patch.prayer_request = input.prayerRequest || null;
+  if (input.gospelShared !== undefined) patch.gospel_shared = input.gospelShared;
+  if (input.invitedToChurch !== undefined) patch.invited_to_church = input.invitedToChurch;
+  if (input.bibleStudyStarted !== undefined) patch.bible_study_started = input.bibleStudyStarted;
+  if (input.savedAcceptedChrist !== undefined) patch.saved_accepted_christ = input.savedAcceptedChrist;
+  if (input.followUpNeeded !== undefined) patch.follow_up_needed = input.followUpNeeded;
+  if (input.assignedTo !== undefined) patch.assigned_leader_name = input.assignedTo || null;
+  if (input.nextFollowUpAt !== undefined) patch.next_follow_up_at = input.nextFollowUpAt || null;
+  if (input.notes !== undefined) patch.notes = input.notes || null;
+  if (input.status !== undefined) patch.status = input.status;
+
+  const { data, error } = await supabase
+    .from('outreach_contacts')
+    .update(patch)
+    .eq('id', contactId)
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateTerritoryMetrics(
+  territoryId: string,
+  metrics: Partial<{
+    reached: number;
+    followUps: number;
+    soulsSaved: number;
+    prayerRequests: number;
+    bibleStudiesActive: number;
+    discipleshipProgress: number;
+    coveredStreets: number;
+    inProgressStreets: number;
+    untappedTerritory: number;
+  }>
+) {
+  if (!hasSupabase) return { id: territoryId };
+  const patch: Record<string, number> = {};
+  if (metrics.reached !== undefined) patch.reached_count = metrics.reached;
+  if (metrics.followUps !== undefined) patch.follow_up_count = metrics.followUps;
+  if (metrics.soulsSaved !== undefined) patch.souls_saved_count = metrics.soulsSaved;
+  if (metrics.prayerRequests !== undefined) patch.prayer_request_count = metrics.prayerRequests;
+  if (metrics.bibleStudiesActive !== undefined) patch.bible_studies_active = metrics.bibleStudiesActive;
+  if (metrics.discipleshipProgress !== undefined) patch.discipleship_progress = metrics.discipleshipProgress;
+  if (metrics.coveredStreets !== undefined) patch.covered_streets_count = metrics.coveredStreets;
+  if (metrics.inProgressStreets !== undefined) patch.in_progress_streets_count = metrics.inProgressStreets;
+  if (metrics.untappedTerritory !== undefined) patch.streets_untapped_count = metrics.untappedTerritory;
+
+  const { data, error } = await supabase
+    .from('territories')
+    .update(patch)
+    .eq('id', territoryId)
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 function extractPoint(value: any): { latitude: number; longitude: number } | null {
   if (!value) return null;
   if (typeof value === 'object' && typeof value.latitude === 'number') return value;

@@ -1,25 +1,40 @@
 {
   "expo": {
     "name": "Overcomers Global Network",
-    "slug": "overcomers-global-network",
+    "slug": "overcomers-global-network-app",
     "scheme": "ognapp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/ogn-logo-transparent.png",
+    "icon": "./assets/images/ogn-app-icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.overcomers.globalnetwork.app",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "OGN uses your location to help record outreach territories, follow-up locations, and untapped neighborhoods for evangelism teams."
+        "NSLocationWhenInUseUsageDescription": "OGN uses your location to help record outreach territories, follow-up locations, and untapped neighborhoods for evangelism teams.",
+        "NSPhotoLibraryUsageDescription": "OGN lets you choose photos and videos for your profile, ministry stories, media thumbnails, and admin uploads.",
+        "NSCameraUsageDescription": "OGN lets you take photos for your profile, ministry stories, and ministry uploads.",
+        "NSMicrophoneUsageDescription": "OGN uses microphone access only when you choose to upload or record media.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": [
+          "audio"
+        ]
       }
     },
     "android": {
       "package": "com.overcomers.globalnetwork.app",
-      "permissions": ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"],
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ],
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/ogn-logo-transparent.png",
-        "backgroundColor": "#071B45"
+        "foregroundImage": "./assets/images/ogn-adaptive-icon.png",
+        "backgroundColor": "#000000"
       }
     },
     "plugins": [
@@ -33,10 +48,40 @@
           "resizeMode": "contain",
           "backgroundColor": "#071B45"
         }
-      ]
+      ],
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "OGN lets you choose photos and videos for your profile, ministry stories, media thumbnails, and admin uploads.",
+          "cameraPermission": "OGN lets you take photos for your profile, ministry stories, and ministry uploads.",
+          "microphonePermission": "OGN uses microphone access only when you choose to upload or record media."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "recordAudioAndroid": false,
+          "enableBackgroundPlayback": true
+        }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsBackgroundPlayback": true,
+          "supportsPictureInPicture": true
+        }
+      ],
+      "expo-asset"
     ],
     "extra": {
-      "router": { "origin": false }
-    }
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "8e9b3da8-b8dc-4275-a247-e226a4eca99a"
+      }
+    },
+    "owner": "joshflaww"
   }
 }

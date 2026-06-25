@@ -1,0 +1,10 @@
+name: release-checks
+on:
+  push:
+    branches: ["release/**", "main"]
+jobs:
+  checks:
+    type: build
+    params:
+      platform: all
+      profile: production

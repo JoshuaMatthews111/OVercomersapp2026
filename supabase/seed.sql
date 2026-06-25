@@ -21,9 +21,8 @@ on conflict do nothing;
 
 insert into giving_links (label, instructions, url, sort_order)
 values
-  ('Cash App', '$OvercomersGN', null, 1),
-  ('Zelle', 'support@overcomersglobalnetwork.com', null, 2),
-  ('Online Giving', 'Secure giving page placeholder', 'https://overcomersglobalnetwork.com/give', 3)
+  ('Custom Amount', 'Secure Stripe Checkout', 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b', 1),
+  ('Online Giving', 'Give $25, $50, $100, $500, or a custom amount securely online.', 'https://overcomersglobalnetwork.com/give', 2)
 on conflict do nothing;
 
 insert into events (title, description, location, starts_at, registration_url)

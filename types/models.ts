@@ -1,4 +1,15 @@
-export type BibleVersion = 'KJV' | 'ERV' | 'NIV' | 'AMP';
+export type BibleVersion = 'KJV' | 'NLT' | 'AMP';
+export type AppRole =
+  | 'visitor'
+  | 'member'
+  | 'prayer_team'
+  | 'media_admin'
+  | 'moderator'
+  | 'outreach'
+  | 'staff'
+  | 'leader'
+  | 'admin'
+  | 'super_admin';
 
 export type Series = {
   id: string;
@@ -104,6 +115,7 @@ export type Event = {
   description: string;
   location: string;
   startsAt: string;
+  imageUrl?: string;
   registrationUrl?: string;
 };
 
@@ -112,4 +124,33 @@ export type GivingLink = {
   label: string;
   url?: string;
   instructions: string;
+};
+
+export type MediaKind = 'sermon' | 'article' | 'video' | 'music' | 'live' | 'devotional';
+
+export type MediaItem = {
+  id: string;
+  mediaType: MediaKind;
+  title: string;
+  description?: string;
+  speaker?: string;
+  scriptureReference?: string;
+  thumbnailUrl?: string;
+  fileUrl?: string;
+  externalUrl?: string;
+  durationSeconds?: number;
+  isDownloadable: boolean;
+  isFeatured: boolean;
+  publishedAt?: string;
+};
+
+export type AppStory = {
+  id: string;
+  title: string;
+  category?: string;
+  body?: string;
+  region?: string;
+  imageUrl?: string;
+  actionUrl?: string;
+  publishedAt?: string;
 };

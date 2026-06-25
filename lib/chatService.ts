@@ -12,6 +12,22 @@ export type ChatMessage = {
   body: string;
   displayName: string;
   createdAt: string;
+  isFlagged?: boolean;
+};
+
+export type ChatProfileSearchResult = {
+  id: string;
+  displayName: string;
+  phone?: string;
+  email?: string;
+};
+
+export type ChatMember = {
+  userId: string;
+  displayName: string;
+  phone?: string;
+  role?: string;
+  joinedAt?: string;
 };
 
 export async function getChatRooms(): Promise<ChatRoom[]> {
@@ -45,13 +61,15 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     .limit(50);
 
   if (error || !data) return [];
+  const profiles = await getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean));
   return data.map((row: any) => ({
     id: row.id,
     channelId: row.channel_id,
     userId: row.user_id,
     body: row.body,
-    displayName: row.profiles?.display_name || 'OGN Member',
-    createdAt: row.created_at
+    displayName: profiles.get(row.user_id)?.displayName || row.profiles?.display_name || 'OGN Member',
+    createdAt: row.created_at,
+    isFlagged: row.is_flagged
   }));
 }
 
@@ -60,7 +78,7 @@ export async function sendChatMessage(channelId: string, body: string) {
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) throw new Error('Sign in before posting to chat.');
 
-  await supabase.from('chat_members').upsert({ channel_id: channelId, user_id: userResult.user.id });
+  await ensureChatMember(channelId, userResult.user.id);
   const { data, error } = await supabase
     .from('chat_messages')
     .insert({ channel_id: channelId, user_id: userResult.user.id, body })
@@ -68,6 +86,24 @@ export async function sendChatMessage(channelId: string, body: string) {
     .single();
   if (error) throw error;
   return data;
+}
+
+export async function forwardMediaToChat(input: {
+  title: string;
+  url?: string;
+  kind?: string;
+  targetChannelId?: string;
+}) {
+  const rooms = await getChatRooms();
+  const target = input.targetChannelId
+    ? rooms.find((room) => room.id === input.targetChannelId)
+    : rooms.find((room) => room.type === 'announcement') || rooms.find((room) => room.type === 'global') || rooms[0];
+  if (!target) throw new Error('No chat channel is available for forwarding.');
+  const body = [
+    `Forwarded ${input.kind || 'media'}: ${input.title}`,
+    input.url ? input.url : undefined,
+  ].filter(Boolean).join('\n');
+  return sendChatMessage(target.id, body);
 }
 
 export function subscribeToChat(channelId: string, onMessage: (message: ChatMessage) => void): RealtimeChannel | undefined {
@@ -91,4 +127,145 @@ export function subscribeToChat(channelId: string, onMessage: (message: ChatMess
     )
     .subscribe();
   return channel;
+}
+
+export async function moderateChatMessage(messageId: string, action: 'remove' | 'flag' = 'remove') {
+  if (!hasSupabase) return { id: messageId };
+  const patch = action === 'remove' ? { deleted_at: new Date().toISOString(), is_flagged: true } : { is_flagged: true };
+  const { data, error } = await supabase
+    .from('chat_messages')
+    .update(patch)
+    .eq('id', messageId)
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function reportChatMessage(messageId: string, reason = 'In-app report') {
+  if (!hasSupabase) return { id: `local-report-${Date.now()}` };
+  const { data: userResult } = await supabase.auth.getUser();
+  if (!userResult.user) throw new Error('Sign in before reporting content.');
+  const { data, error } = await supabase
+    .from('content_reports')
+    .insert({
+      reporter_id: userResult.user.id,
+      target_type: 'chat_message',
+      target_id: messageId,
+      reason,
+      status: 'new',
+    })
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function blockChatUser(blockedUserId: string) {
+  if (!hasSupabase) return { blocked_user_id: blockedUserId };
+  const { data: userResult } = await supabase.auth.getUser();
+  if (!userResult.user) throw new Error('Sign in before blocking users.');
+  if (userResult.user.id === blockedUserId) throw new Error('You cannot block yourself.');
+  const { data, error } = await supabase
+    .from('user_blocks')
+    .upsert({ blocker_id: userResult.user.id, blocked_user_id: blockedUserId })
+    .select('blocked_user_id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function searchChatProfiles(query: string): Promise<ChatProfileSearchResult[]> {
+  if (!hasSupabase || query.trim().length < 2) return [];
+  const needle = `%${query.trim()}%`;
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, display_name, phone')
+    .or(`display_name.ilike.${needle},phone.ilike.${needle}`)
+    .limit(10);
+  if (error || !data) return [];
+  return data.map((row) => ({ id: row.id, displayName: row.display_name || 'OGN Member', phone: row.phone || undefined }));
+}
+
+export async function getChatMembers(channelId: string): Promise<ChatMember[]> {
+  if (!hasSupabase) return [];
+  const { data, error } = await supabase
+    .from('chat_members')
+    .select('user_id, role, joined_at')
+    .eq('channel_id', channelId)
+    .order('joined_at', { ascending: false })
+    .limit(80);
+  if (error || !data) return [];
+  const profiles = await getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean));
+  return data.map((row: any) => ({
+    userId: row.user_id,
+    role: row.role || 'member',
+    joinedAt: row.joined_at || undefined,
+    displayName: profiles.get(row.user_id)?.displayName || 'OGN Member',
+    phone: profiles.get(row.user_id)?.phone,
+  }));
+}
+
+export async function addChatMember(channelId: string, userId: string) {
+  if (!hasSupabase) return { channel_id: channelId, user_id: userId };
+  const existing = await supabase
+    .from('chat_members')
+    .select('channel_id, user_id')
+    .eq('channel_id', channelId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (existing.error) throw existing.error;
+  if (existing.data) return existing.data;
+
+  const { data, error } = await supabase
+    .from('chat_members')
+    .insert({ channel_id: channelId, user_id: userId, role: 'member' })
+    .select('channel_id, user_id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function removeChatMember(channelId: string, userId: string) {
+  if (!hasSupabase) return { channel_id: channelId, user_id: userId };
+  const { error } = await supabase
+    .from('chat_members')
+    .delete()
+    .eq('channel_id', channelId)
+    .eq('user_id', userId);
+  if (error) throw error;
+  return { channel_id: channelId, user_id: userId };
+}
+
+async function ensureChatMember(channelId: string, userId: string) {
+  const existing = await supabase
+    .from('chat_members')
+    .select('channel_id, user_id')
+    .eq('channel_id', channelId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (existing.error) throw existing.error;
+  if (existing.data) return existing.data;
+
+  const inserted = await supabase
+    .from('chat_members')
+    .insert({ channel_id: channelId, user_id: userId, role: 'member' })
+    .select('channel_id, user_id')
+    .single();
+  if (inserted.error) throw inserted.error;
+  return inserted.data;
+}
+
+async function getProfilesByIds(userIds: string[]) {
+  const uniqueIds = [...new Set(userIds)].filter(Boolean);
+  const profiles = new Map<string, { displayName: string; phone?: string }>();
+  if (!hasSupabase || !uniqueIds.length) return profiles;
+  const { data } = await supabase
+    .from('profiles')
+    .select('id, display_name, phone')
+    .in('id', uniqueIds);
+  (data || []).forEach((row) => {
+    profiles.set(row.id, { displayName: row.display_name || 'OGN Member', phone: row.phone || undefined });
+  });
+  return profiles;
 }

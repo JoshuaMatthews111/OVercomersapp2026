@@ -1,0 +1,6 @@
+app_identifier("com.overcomers.globalnetwork.app")
+apple_id("mr.matthews2022@gmail.com")
+itc_team_id("TK2Z4ZUNC6")
+
+json_key_file("./google-play-service-account.json")
+package_name("com.overcomers.globalnetwork.app")

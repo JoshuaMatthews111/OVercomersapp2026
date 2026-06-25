@@ -8,7 +8,7 @@
 - Demo reviewer account ready.
 - Location permission explains evangelism map purpose.
 - Bible copyright handled through provider/API; no illegal NIV/AMP text stored.
-- Chat has moderation and report/delete controls.
+- Chat has leader moderation and message removal controls.
 - Private outreach/contact data is protected by auth and RLS.
 - App screenshots generated for iPhone and Android.
 - App description does not claim features not built yet.

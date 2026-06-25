@@ -2,13 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import MapView, { Circle, Marker } from 'react-native-maps';
 import * as Location from 'expo-location';
-import { AppHeader } from '../../components/AppHeader';
-import { Card } from '../../components/Card';
-import { PrimaryButton } from '../../components/PrimaryButton';
-import { Screen } from '../../components/Screen';
-import { getOutreachContacts, getTerritories, saveOutreachContact } from '../../lib/evangelismService';
-import { colors } from '../../lib/theme';
-import { OutreachContact, Territory } from '../../types/models';
+import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { AppHeader } from '../components/AppHeader';
+import { Card } from '../components/Card';
+import { PrimaryButton } from '../components/PrimaryButton';
+import { Screen } from '../components/Screen';
+import { useAccessProfile } from '../lib/accessControl';
+import { getOutreachContacts, getTerritories, saveOutreachContact, updateTerritoryMetrics } from '../lib/evangelismService';
+import { friendlyError } from '../lib/errorMessages';
+import { colors } from '../lib/theme';
+import { OutreachContact, Territory } from '../types/models';
 
 const statusColor: Record<Territory['status'], string> = {
   untapped: colors.red,
@@ -29,6 +33,7 @@ const levelDelta: Record<Territory['level'], number> = {
 };
 
 export default function MapsScreen() {
+  const { access } = useAccessProfile();
   const mapRef = useRef<MapView | null>(null);
   const [territoryList, setTerritoryList] = useState<Territory[]>([]);
   const [contactList, setContactList] = useState<OutreachContact[]>([]);
@@ -37,6 +42,12 @@ export default function MapsScreen() {
   const [pulseRadius, setPulseRadius] = useState(80);
   const [myLocation, setMyLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [record, setRecord] = useState({ name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', assignedTo: '', nextFollowUpAt: '', notes: '', gospelShared: true, invitedToChurch: true, bibleStudyStarted: false, savedAcceptedChrist: false, followUpNeeded: true });
+  const [metricEdits, setMetricEdits] = useState({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
+
+  function goBack() {
+    if (router.canGoBack()) router.back();
+    else router.replace('/(tabs)/profile' as any);
+  }
 
   useEffect(() => {
     Promise.all([getTerritories(), getOutreachContacts()]).then(([territories, contacts]) => {
@@ -143,17 +154,62 @@ export default function MapsScreen() {
       setRecord((current) => ({ ...current, name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', notes: '' }));
       Alert.alert('Outreach record saved', 'The follow-up record is now attached to this territory.');
     } catch (err) {
-      Alert.alert('Record not saved', err instanceof Error ? err.message : 'Please check Supabase permissions and try again.');
+      Alert.alert('Record not saved', friendlyError(err, 'Your account may need evangelism permission before saving outreach records.'));
     }
   }
 
+  async function saveMetricOverrides() {
+    if (!selected) return;
+    try {
+      await updateTerritoryMetrics(selected.id, {
+        reached: metricEdits.reached ? Number(metricEdits.reached) : undefined,
+        soulsSaved: metricEdits.soulsSaved ? Number(metricEdits.soulsSaved) : undefined,
+        prayerRequests: metricEdits.prayerRequests ? Number(metricEdits.prayerRequests) : undefined,
+        followUps: metricEdits.followUps ? Number(metricEdits.followUps) : undefined
+      });
+      setSelected((current) => current ? {
+        ...current,
+        reached: metricEdits.reached ? Number(metricEdits.reached) : current.reached,
+        soulsSaved: metricEdits.soulsSaved ? Number(metricEdits.soulsSaved) : current.soulsSaved,
+        followUps: metricEdits.followUps ? Number(metricEdits.followUps) : current.followUps,
+        metrics: {
+          ...current.metrics,
+          peopleReached: metricEdits.reached ? Number(metricEdits.reached) : current.metrics.peopleReached,
+          soulsSaved: metricEdits.soulsSaved ? Number(metricEdits.soulsSaved) : current.metrics.soulsSaved,
+          prayerRequests: metricEdits.prayerRequests ? Number(metricEdits.prayerRequests) : current.metrics.prayerRequests,
+          followUpsDue: metricEdits.followUps ? Number(metricEdits.followUps) : current.metrics.followUpsDue
+        }
+      } : current);
+      setMetricEdits({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
+      Alert.alert('Territory data updated', 'Super admin changes were saved to Supabase.');
+    } catch (err) {
+      Alert.alert('Metrics not updated', friendlyError(err, 'Only approved admins can update territory metrics.'));
+    }
+  }
+
+  if (!access.canUseEvangelism) {
+    return (
+      <Screen>
+        <EvangelismBackButton onPress={goBack} />
+        <AppHeader title="Evangelism" subtitle="Leader access required." showMenu />
+        <Card>
+          <Text style={styles.title}>Leader Area</Text>
+          <Text style={styles.body}>Evangelism maps, follow-up records, and territory reports are visible to leaders and super admins only.</Text>
+        </Card>
+      </Screen>
+    );
+  }
+
   if (!selected) {
-    return <Screen><AppHeader title="Evangelism Maps" /><Card><Text style={styles.body}>Loading territories...</Text></Card></Screen>;
+    return <Screen><EvangelismBackButton onPress={goBack} /><AppHeader title="Evangelism Map" /><Card><Text style={styles.body}>Loading territories...</Text></Card></Screen>;
   }
 
   return (
     <Screen scroll={false}>
-      <View style={styles.header}><AppHeader title="Evangelism Maps" subtitle="Global to street-level follow-up" /></View>
+      <View style={styles.header}>
+        <EvangelismBackButton onPress={goBack} />
+        <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." showMenu />
+      </View>
       <MapView
         ref={mapRef}
         style={styles.map}
@@ -251,6 +307,20 @@ export default function MapsScreen() {
         </View>
         <Text style={styles.body}>Territory progress, worker activity, discipleship pipeline, and exportable reports are modeled here and backed by Supabase tables.</Text>
 
+        {access.canOverrideLeaderData ? (
+          <>
+            <Text style={styles.section}>Super Admin Data Override</Text>
+            <Card style={styles.form}>
+              <Text style={styles.body}>Correct territory data entered by leaders for {selected.name}.</Text>
+              <TextInput style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((current) => ({ ...current, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={colors.slate} />
+              <TextInput style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((current) => ({ ...current, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={colors.slate} />
+              <TextInput style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((current) => ({ ...current, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={colors.slate} />
+              <TextInput style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((current) => ({ ...current, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={colors.slate} />
+              <PrimaryButton label="Save Super Admin Corrections" variant="gold" onPress={saveMetricOverrides} />
+            </Card>
+          </>
+        ) : null}
+
         <Text style={styles.section}>Outreach Records</Text>
         {relatedContacts.map((contact) => (
           <Card key={contact.id} style={styles.contact}>
@@ -295,6 +365,15 @@ function Flag({ label, value, onPress }: { label: string; value: boolean; onPres
   );
 }
 
+function EvangelismBackButton({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel="Back to More" onPress={onPress} style={styles.backButton}>
+      <Ionicons name="chevron-back" size={22} color={colors.royalBlue} />
+      <Text style={styles.backText}>Back</Text>
+    </Pressable>
+  );
+}
+
 function nearestTerritory(point: { latitude: number; longitude: number }, items: Territory[]) {
   return items
     .filter((item) => item.level !== 'global')
@@ -316,6 +395,8 @@ function isTodayOrOverdue(value: string) {
 }
 
 const styles = StyleSheet.create({
+  backButton: { alignSelf: 'flex-start', minHeight: 42, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 13, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 4 },
+  backText: { color: colors.royalBlue, fontWeight: '900' },
   header: { padding: 16, paddingBottom: 8 },
   map: { flex: 1 },
   panel: { maxHeight: '58%', backgroundColor: colors.white, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, borderTopColor: colors.line, borderTopWidth: 1 },

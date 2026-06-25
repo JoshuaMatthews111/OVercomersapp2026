@@ -315,9 +315,8 @@ export const events: Event[] = [
 ];
 
 export const givingLinks: GivingLink[] = [
-  { id: 'cashapp', label: 'Cash App', instructions: '$OvercomersGN' },
-  { id: 'zelle', label: 'Zelle', instructions: 'support@overcomersglobalnetwork.com' },
-  { id: 'online', label: 'Online Giving', url: 'https://overcomersglobalnetwork.com/give', instructions: 'Secure giving page placeholder' }
+  { id: 'stripe-custom', label: 'Custom Amount', url: 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b', instructions: 'Secure Stripe Checkout' },
+  { id: 'online', label: 'Online Giving', url: 'https://overcomersglobalnetwork.com/give', instructions: 'Give $25, $50, $100, $500, or a custom amount securely online.' }
 ];
 
 export const liveTimes = [
