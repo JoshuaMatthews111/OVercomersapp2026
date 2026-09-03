@@ -87,6 +87,15 @@ async function tree() {
 
 const labelOf = (n) => (n.text + " " + n.desc).trim();
 
+/** On the visible screen, not merely in the scroll view. See the iOS lane for why. */
+let SCREEN = { width: 1080, height: 2400 };
+const onScreen = (n) => {
+  if (!n.box) return false;
+  const cx = (n.box[0] + n.box[2]) / 2;
+  const cy = (n.box[1] + n.box[3]) / 2;
+  return cx > 0 && cy > 0 && cx < SCREEN.width && cy < SCREEN.height;
+};
+
 /**
  * What the screen looks like to a comparison, and why labels alone are not it.
  *
@@ -146,6 +155,7 @@ const report = {
   liveControls: 0,
   notPressed: [],
   notJudged: [],
+  notReached: [],
   sessionFlow: null
 };
 /**
@@ -250,6 +260,14 @@ async function signIn(tag) {
   return await looksSignedIn();
 }
 
+try {
+  const wm = await adbText(["shell", "wm", "size"]);
+  const m = wm.match(/(\d+)x(\d+)/);
+  if (m) SCREEN = { width: Number(m[1]), height: Number(m[2]) };
+} catch {
+  // The default is a Pixel 6, which is what the workflow boots.
+}
+
 // ── Launch ─────────────────────────────────────────────────────────────────
 await sh(["am", "force-stop", BUNDLE]).catch(() => undefined);
 await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
@@ -311,6 +329,10 @@ for (const route of ROUTES) {
 
   const pressable = [];
   for (const n of nodes.filter((x) => x.clickable && x.box && labelOf(x))) {
+    if (!onScreen(n)) {
+      report.notReached.push({ route, control: labelOf(n), why: "below the fold — needs scrolling, which this run does not do yet" });
+      continue;
+    }
     const verdict = mayPress(labelOf(n), PERMISSIONS);
     // The session-ending ones are gathered for the end of the run, not skipped.
     if (verdict.allowed && verdict.cls === "recoverable") continue;
@@ -357,7 +379,13 @@ if (report.signedIn) {
   await sh(["am", "start", "-a", "android.intent.action.VIEW", "-d", SCHEME + "://profile"]).catch(() => undefined);
   await sleep(4000);
 
-  const signOut = (await tree()).find((n) => n.box && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable");
+  let signOut = null;
+  for (let hop = 0; hop < 4 && !signOut; hop++) {
+    signOut = (await tree()).find((n) => n.clickable && onScreen(n) && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable") ?? null;
+    if (signOut) break;
+    await sh(["input", "swipe", "540", "1900", "540", "600", "400"]).catch(() => undefined);
+    await sleep(1200);
+  }
   if (!signOut) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
     note("sign-out", "not found on the profile screen");

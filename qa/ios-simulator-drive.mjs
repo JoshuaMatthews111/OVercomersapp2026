@@ -68,6 +68,8 @@ const report = {
   notPressed: [],
   notJudged: [],
   notAssessed: [],
+  /** Controls that exist but sit off screen. Not pressed, not judged, named. */
+  notReached: [],
   sessionFlow: null,
   /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
   idbRawSample: null
@@ -225,6 +227,23 @@ const isControl = (el) => {
   const traits = Array.isArray(el.traits) ? el.traits : [];
   return traits.some((t) => /^(Button|Link|SearchField|Selected|Adjustable)$/i.test(String(t)));
 };
+
+/**
+ * Is the control actually on the screen a person can see?
+ *
+ * The accessibility tree lists everything in a scroll view, including rows
+ * far below the fold. Tapping the centre of an off-screen row lands on
+ * whatever is visible at that spot — usually nothing — and the row is then
+ * reported dead. Five profile rows were, on a run where all five work. A
+ * control that needs scrolling is named as not reached, never as broken.
+ */
+const SCREEN = { width: 402, height: 874 };
+const onScreen = (el) =>
+  !!el.frame &&
+  el.frame.y + el.frame.height / 2 > 0 &&
+  el.frame.y + el.frame.height / 2 < SCREEN.height &&
+  el.frame.x + el.frame.width / 2 > 0 &&
+  el.frame.x + el.frame.width / 2 < SCREEN.width;
 
 const isTextField = (el) =>
   el?.role === "AXTextField" || el?.role === "AXSecureTextField" || el?.role === "AXSearchField";
@@ -437,6 +456,10 @@ for (const route of ROUTES) {
 
   const pressable = [];
   for (const n of nodes.filter((x) => isControl(x) && labelOf(x))) {
+    if (!onScreen(n)) {
+      report.notReached.push({ route, control: labelOf(n), why: "below the fold — needs scrolling, which this run does not do yet" });
+      continue;
+    }
     const verdict = mayPress(labelOf(n), PERMISSIONS);
     // Session-ending controls are saved for the end of the run, not skipped.
     if (verdict.allowed && verdict.cls === "recoverable") continue;
@@ -484,7 +507,15 @@ if (canTap && report.signedIn) {
   await tapLabelled(/^open$/i);
   await sleep(3000);
 
-  const signOut = (await tree()).find((n) => n.frame && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable");
+  // Sign out sits at the very bottom of the profile. Scroll for it, up to
+  // four screens, reading the tree after each swipe.
+  let signOut = null;
+  for (let hop = 0; hop < 4 && !signOut; hop++) {
+    signOut = (await tree()).find((n) => isControl(n) && onScreen(n) && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable") ?? null;
+    if (signOut) break;
+    await idbRun(["ui", "swipe", "200", "700", "200", "200", "--duration", "0.4"]).catch(() => undefined);
+    await sleep(1200);
+  }
   if (!signOut) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
     note("sign-out", "not found on the profile screen");

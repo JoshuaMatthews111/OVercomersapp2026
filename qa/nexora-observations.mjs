@@ -127,6 +127,9 @@ export function toNexora(drive, platform) {
   for (const n of drive.notPressed ?? []) {
     notAssessed.push(`"${n.control}" on ${n.route} — ${n.why}`);
   }
+  for (const n of drive.notReached ?? []) {
+    notAssessed.push(`"${n.control}" on ${n.route} — ${n.why}`);
+  }
 
   // Coverage is measured, never assumed. A screen counts only if it was opened
   // and something was readable on it; a control counts only if it was pressed.
