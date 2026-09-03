@@ -230,7 +230,32 @@ const isTextField = (el) =>
   el?.role === "AXTextField" || el?.role === "AXSecureTextField" || el?.role === "AXSearchField";
 
 const labelOf = (el) => ((el.AXLabel ?? "") + " " + (el.AXValue ?? "")).trim();
-const fingerprint = (nodes) => nodes.map(labelOf).filter(Boolean).join(" ");
+
+/**
+ * What the screen looks like to a comparison, and why labels alone are not it.
+ *
+ * The first honest run judged every Bible control dead — KJV, NLT, AMP, the
+ * book picker — because it compared labels only. Choosing NLT does change the
+ * screen: the highlighted pill moves and the passage reloads. It does not
+ * change one single label, so the two reads were identical and four working
+ * controls were reported broken.
+ *
+ * Selection lives in the traits, and layout changes live in the frames, so
+ * both are in the fingerprint now. Frames are rounded to whole points because
+ * sub-pixel drift is not a change anybody can see, and the ambient-movement
+ * check still runs first — a screen that will not sit still is not judged at
+ * all rather than judged with a more sensitive ruler.
+ */
+const fingerprint = (nodes) =>
+  nodes
+    .filter((n) => n.frame)
+    .map((n) => {
+      const traits = Array.isArray(n.traits) ? n.traits.join(",") : "";
+      const f = n.frame;
+      const box = [f.x, f.y, f.width, f.height].map((v) => Math.round(v)).join(",");
+      return [n.role ?? "", labelOf(n), traits, box].join("|");
+    })
+    .join(" ~ ");
 
 async function shot(name) {
   const path = join(OUT, name + ".png");
@@ -266,11 +291,24 @@ async function looksSignedIn() {
 async function signIn(tag) {
   if (!canTap || !PERMISSIONS.hasTestIdentity) return false;
 
-  // The form sits behind a welcome step, exactly as it does on the web.
-  for (const door of [/get started/i, /^sign in$/i]) {
-    const r = await tapLabelled(door);
-    note(tag + " door", r.ok ? 'pressed "' + r.tapped + '"' : r.why);
-    await sleep(2500);
+  /**
+   * The form sits behind a welcome step. Only that step is a door.
+   *
+   * Treating "Sign in" as a door too pressed the SUBMIT button on an empty
+   * form, which raised "Details needed — enter your email and password
+   * first". That alert is modal, so the very fields the next step went looking
+   * for were not reachable, and the run reported the sign-in as broken when
+   * the only thing broken was the order it pressed things in.
+   */
+  const door = await tapLabelled(/get started/i);
+  note(tag + " door", door.ok ? 'pressed "' + door.tapped + '"' : door.why);
+  await sleep(2500);
+
+  // Clear anything modal left over before reading the form.
+  const leftover = await tapLabelled(/^(ok|dismiss|close)$/i);
+  if (leftover.ok) {
+    note(tag + " alert", 'dismissed "' + leftover.tapped + '" before reading the form');
+    await sleep(1200);
   }
 
   /**
@@ -393,10 +431,16 @@ for (const route of ROUTES) {
     await sleep(2400);
     const after = fingerprint(await tree());
     if (before === after) {
+      // Proof, not just an assertion. A dead-control finding that cannot be
+      // looked at is one nobody acts on.
+      const proof = await shot("dead-" + name + "-" + report.deadControls.length).catch(() => null);
       report.deadControls.push({
         route,
         control: labelOf(control),
-        evidence: "the screen read identically before and after the press, on a screen that does not move on its own"
+        shot: proof,
+        evidence:
+          "the screen read identically before and after the press — same controls, same selection, same layout — " +
+          "on a screen measured not to move on its own"
       });
       note("DEAD", route + ' — "' + labelOf(control) + '" did nothing');
     } else {

@@ -74,6 +74,8 @@ async function tree() {
         text: attr("text"),
         desc: attr("content-desc"),
         clickable: attr("clickable") === "true",
+        selected: attr("selected") === "true",
+        checked: attr("checked") === "true",
         box: bounds ? bounds.slice(1).map(Number) : null
       });
     }
@@ -84,8 +86,20 @@ async function tree() {
 }
 
 const labelOf = (n) => (n.text + " " + n.desc).trim();
-/** A stable fingerprint of what is on screen: labels only, order kept. */
-const fingerprint = (nodes) => nodes.map(labelOf).filter(Boolean).join(" ");
+
+/**
+ * What the screen looks like to a comparison, and why labels alone are not it.
+ *
+ * The iOS lane judged every Bible control dead — KJV, NLT, AMP — because it
+ * compared labels only. Choosing NLT moves the highlight and reloads the
+ * passage; it changes no label at all, so four working controls were reported
+ * broken. Selection and layout are what actually move, so both are in here.
+ */
+const fingerprint = (nodes) =>
+  nodes
+    .filter((n) => n.box)
+    .map((n) => [labelOf(n), n.selected ? "sel" : "", n.checked ? "chk" : "", n.box.join(",")].join("|"))
+    .join(" ~ ");
 
 async function shot(name) {
   const path = join(OUT, name + ".png");
@@ -192,10 +206,19 @@ async function signIn(tag) {
   if (!PERMISSIONS.hasTestIdentity) return false;
 
   // The form sits behind a welcome step, exactly as it does on the web.
-  for (const door of [/get started/i, /^sign in$/i]) {
-    const r = await tapLabelled(door);
-    note(tag + " door", r.ok ? 'pressed "' + r.tapped + '"' : r.why);
-    await sleep(2500);
+  /**
+   * Only the welcome step is a door. Treating "Sign in" as one pressed the
+   * SUBMIT button on an empty form, raising a modal alert that then hid the
+   * very fields the next step went looking for — so the run blamed the app
+   * for a fault that was entirely in the order it pressed things.
+   */
+  const door = await tapLabelled(/get started/i);
+  note(tag + " door", door.ok ? 'pressed "' + door.tapped + '"' : door.why);
+  await sleep(2500);
+  const leftover = await tapLabelled(/^(ok|dismiss|close)$/i);
+  if (leftover.ok) {
+    note(tag + " alert", 'dismissed "' + leftover.tapped + '" before reading the form');
+    await sleep(1200);
   }
 
   const email = await tapLabelled(/email|phone/i);
