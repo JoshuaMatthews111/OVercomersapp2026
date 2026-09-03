@@ -96,9 +96,23 @@ jobs:
           echo "installing $APP_PATH"
           xcrun simctl install "$SIM_UDID" "$APP_PATH"
 
+      - name: The rules about what may be pressed must hold before anything is
+        run: node --test qa/control-policy.test.mjs
+
       - name: Install idb, so controls are found by name and not by pixel
+        # Homebrew refuses formulae from a third-party tap until the tap is
+        # trusted by name. facebook/fb is Meta's own tap and idb is their iOS
+        # automation tool; trusting it explicitly is the whole fix.
+        #
+        # Allowed to fail on purpose: without idb the run can still install,
+        # launch, deep-link and photograph through simctl, which is most of
+        # the value. What it must never do is quietly become a
+        # screenshots-only run that reads like a full one — the drive script
+        # asks whether idb is there and records everything it could not press.
+        continue-on-error: true
         run: |
           brew tap facebook/fb
+          brew trust facebook/fb || brew trust --formula facebook/fb/idb-companion
           brew install idb-companion
           python3 -m pip install --break-system-packages fb-idb || python3 -m pip install fb-idb
           idb list-targets | head -5
@@ -110,6 +124,9 @@ jobs:
           APP_BUNDLE_ID: com.overcomers.globalnetwork.app
           APP_SCHEME: ognapp
           SHOT_DIR: qa/ios-shots
+          # The OGN app is wired to the live Supabase project, so deletion
+          # stays blocked no matter which account signs in.
+          BACKEND_IS_DISPOSABLE: "false"
         run: node qa/ios-simulator-drive.mjs
 
       - name: Collect the app's own log, whatever happened
