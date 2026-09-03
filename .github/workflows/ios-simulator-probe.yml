@@ -7,7 +7,12 @@
 name: iOS simulator probe
 
 on:
+  # workflow_dispatch only works once a workflow is on the default branch, so
+  # this one also runs on every push to its own branch. That keeps main clean
+  # while the lane is being proven.
   workflow_dispatch:
+  push:
+    branches: [nexora/cloud-ios-lane]
 
 jobs:
   probe:
