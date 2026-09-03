@@ -73,6 +73,8 @@ async function tree() {
       nodes.push({
         text: attr("text"),
         desc: attr("content-desc"),
+        cls: attr("class"),
+        isPassword: attr("password") === "true",
         clickable: attr("clickable") === "true",
         selected: attr("selected") === "true",
         checked: attr("checked") === "true",
@@ -223,14 +225,20 @@ const note = (step, detail) => {
  * denied path is the one that is never tested by hand), and carry on.
  */
 const PERMISSION_WORDS = /would like (full )?access|would like to (send|use|access)|allow .* to access|access to your|photo library|camera|microphone|location|notifications|contacts/i;
-const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|no thanks|limit access|only while using|allow once|allow|ok)$/i;
+/**
+ * Only the operating system offers these answers. An app's own alert offers
+ * "OK", and the Android run filed the app's "Notifications" message as a
+ * permission request because "notifications" was in the text. The words in
+ * a dialog say what it is about; the buttons say who is asking.
+ */
+const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|limit access|only while using|while using the app|allow once|allow full access|allow)$/i;
 async function handlePermissionSheet(route, control) {
   const nodes = await tree();
   const words = nodes.map(labelOf).filter(Boolean).join(" | ");
-  const asks = nodes.filter((n) => /alert|sheet|dialog/i.test(String("")) || PERMISSION_WORDS.test(labelOf(n)));
   const answer = nodes.find((n) => n.box && /^(don.?t allow|deny|not now)$/i.test(labelOf(n)))
     ?? nodes.find((n) => n.box && PERMISSION_ANSWERS.test(labelOf(n)));
-  if (asks.length === 0 || !answer) return false;
+  // No system answer button, no permission sheet — whatever the words say.
+  if (!answer) return false;
   const what = (words.match(/[^|]*(?:would like|access to|allow)[^|]*/i) ?? [words.slice(0, 160)])[0].trim();
   report.permissionsRequested.push({ route, control, asked: what.slice(0, 200), answered: labelOf(answer) });
   note("permission", route + ' — pressing "' + control + '" made the system ask: "' + what.slice(0, 90) + '" — answered "' + labelOf(answer) + '"');
@@ -265,25 +273,57 @@ async function signIn(tag) {
     await sleep(1200);
   }
 
-  const email = await tapLabelled(/email|phone/i);
-  if (email.ok) {
-    await sh(["input", "text", forInputText(EMAIL)]);
-    await sleep(700);
-  }
-  note(tag + " email field", email.ok ? 'typed into "' + email.tapped + '"' : email.why);
+  /**
+   * The box, not the words above it. Matching /email|phone/ tapped the label
+   * "Email or Phone" — a TextView — so nothing had focus and both boxes were
+   * still empty in the screenshot. Android names an input by its class, and
+   * marks a password box as one, so those are what this asks for. Then the
+   * box is read back, because a tap that "worked" proves nothing.
+   */
+  const inputs = (await tree()).filter((n) => /EditText/.test(n.cls) && n.box);
+  const passwordBox = inputs.find((n) => n.isPassword) ?? inputs[1] ?? null;
+  const emailBox = inputs.find((n) => n !== passwordBox) ?? null;
 
-  const pw = await tapLabelled(/password/i);
-  if (pw.ok) {
-    await sh(["input", "text", forInputText(PASSWORD)]);
-    await sleep(700);
-  }
-  note(tag + " password field", pw.ok ? 'typed into "' + pw.tapped + '"' : pw.why);
+  const typeInto = async (box, text, label, secret) => {
+    if (!box) return { ok: false, why: "no " + label + " box on this screen" };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await tapBox(box.box);
+      await sleep(500);
+      if (attempt > 0) {
+        await sh(["input", "keyevent", "KEYCODE_MOVE_END"]).catch(() => undefined);
+        for (let i = 0; i < text.length + 8; i++) await sh(["input", "keyevent", "67"]).catch(() => undefined);
+      }
+      await sh(["input", "text", forInputText(text)]);
+      await sleep(700);
+      const now = (await tree()).find((n) => /EditText/.test(n.cls) && n.box && Math.abs(n.box[1] - box.box[1]) < 6);
+      const value = String(now?.text ?? "");
+      const ok = secret ? value.length === text.length : value === text;
+      if (ok) return { ok: true, why: attempt ? "read back correctly on the second try" : "read back correctly" };
+      if (attempt === 1) return { ok: false, why: "box reads " + JSON.stringify(secret ? value.length + " chars" : value) + " after two tries" };
+    }
+    return { ok: false, why: "unreachable" };
+  };
+
+  const e = await typeInto(emailBox, EMAIL, "email", false);
+  note(tag + " email field", e.why);
+  const pw = await typeInto(passwordBox, PASSWORD, "password", true);
+  note(tag + " password field", pw.why);
 
   await sh(["input", "keyevent", "111"]).catch(() => undefined); // close the keyboard
   await sleep(500);
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
   await sleep(9000);
+
+  // A rejected sign-in raises a modal alert; record what it said and clear
+  // it, or every later press lands on its OK button. Same guard as iOS.
+  const alertText = fingerprint(await tree());
+  const alert = await tapLabelled(/^(ok|dismiss|close|try again)$/i);
+  if (alert.ok) {
+    const said = (alertText.match(/[^|~]*(?:needed|invalid|incorrect|failed|wrong|error)[^|~]*/i) ?? [""])[0].trim();
+    note(tag + " alert", 'the app answered with an alert' + (said ? ': "' + said.slice(0, 120) + '"' : "") + " — dismissed");
+    await sleep(1200);
+  }
 
   return await looksSignedIn();
 }

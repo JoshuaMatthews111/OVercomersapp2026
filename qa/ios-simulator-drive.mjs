@@ -316,14 +316,20 @@ async function looksSignedIn() {
  * denied path is the one that is never tested by hand), and carry on.
  */
 const PERMISSION_WORDS = /would like (full )?access|would like to (send|use|access)|allow .* to access|access to your|photo library|camera|microphone|location|notifications|contacts/i;
-const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|no thanks|limit access|only while using|allow once|allow|ok)$/i;
+/**
+ * Only the operating system offers these answers. An app's own alert offers
+ * "OK", and the Android run filed the app's "Notifications" message as a
+ * permission request because "notifications" was in the text. The words in
+ * a dialog say what it is about; the buttons say who is asking.
+ */
+const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|limit access|only while using|while using the app|allow once|allow full access|allow)$/i;
 async function handlePermissionSheet(route, control) {
   const nodes = await tree();
   const words = nodes.map(labelOf).filter(Boolean).join(" | ");
-  const asks = nodes.filter((n) => /alert|sheet|dialog/i.test(String(n.role ?? n.type ?? "")) || PERMISSION_WORDS.test(labelOf(n)));
   const answer = nodes.find((n) => n.frame && /^(don.?t allow|deny|not now)$/i.test(labelOf(n)))
     ?? nodes.find((n) => n.frame && PERMISSION_ANSWERS.test(labelOf(n)));
-  if (asks.length === 0 || !answer) return false;
+  // No system answer button, no permission sheet — whatever the words say.
+  if (!answer) return false;
   const what = (words.match(/[^|]*(?:would like|access to|allow)[^|]*/i) ?? [words.slice(0, 160)])[0].trim();
   report.permissionsRequested.push({ route, control, asked: what.slice(0, 200), answered: labelOf(answer) });
   note("permission", route + ' — pressing "' + control + '" made the system ask: "' + what.slice(0, 90) + '" — answered "' + labelOf(answer) + '"');
@@ -381,21 +387,42 @@ async function signIn(tag) {
   const passwordField = fields.find(saysPassword) ?? (fields.length >= 2 ? fields[1] : null);
   const emailField = fields.find((f) => f !== passwordField) ?? null;
 
-  if (emailField) {
-    await tapFrame(emailField.frame);
-    await sleep(500);
-    await idbRun(["ui", "text", EMAIL]);
-    await sleep(700);
-  }
-  note(tag + " email field", emailField ? "typed into the text field" : "no plain text field on this screen");
+  /**
+   * Type, then read it back.
+   *
+   * idb drops characters from a long string: "fableqa@overcomersglobalnetwork.com"
+   * arrived as "fableqarsglobalnetwork.com", the sign-in failed, and the run
+   * blamed the app. Typing in short chunks avoids most of it; reading the box
+   * back afterwards catches the rest. A password box cannot be read back, so
+   * it is judged by length only.
+   */
+  const typeInto = async (field, text, label, secret) => {
+    if (!field) return { ok: false, why: "no " + label + " box on this screen" };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await tapFrame(field.frame);
+      await sleep(500);
+      if (attempt > 0) {
+        for (let i = 0; i < text.length + 8; i++) await idbRun(["ui", "key", "42"]).catch(() => undefined);
+        await sleep(400);
+      }
+      for (let i = 0; i < text.length; i += 5) {
+        await idbRun(["ui", "text", text.slice(i, i + 5)]);
+        await sleep(120);
+      }
+      await sleep(600);
+      const now = (await tree()).find((n) => isTextField(n) && Math.abs(n.frame.y - field.frame.y) < 4);
+      const value = String(now?.AXValue ?? "");
+      const ok = secret ? value.length === text.length : value === text;
+      if (ok) return { ok: true, why: attempt ? "read back correctly on the second try" : "read back correctly" };
+      if (attempt === 1) return { ok: false, why: "box reads " + JSON.stringify(secret ? value.length + " chars" : value) + " after two tries" };
+    }
+    return { ok: false, why: "unreachable" };
+  };
 
-  if (passwordField) {
-    await tapFrame(passwordField.frame);
-    await sleep(500);
-    await idbRun(["ui", "text", PASSWORD]);
-    await sleep(700);
-  }
-  note(tag + " password field", passwordField ? "typed into the secure field" : "no secure text field on this screen");
+  const e = await typeInto(emailField, EMAIL, "email", false);
+  note(tag + " email field", e.why);
+  const pw = await typeInto(passwordField, PASSWORD, "password", true);
+  note(tag + " password field", pw.why);
 
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
