@@ -1,0 +1,109 @@
+# Build the OGN app and drive it on a real Android emulator.
+#
+# The companion to the iOS lane. Android needs no Mac, so this runs on a free
+# Linux runner with hardware acceleration switched on — which is why an
+# emulator boots here in minutes rather than never.
+#
+# Unlike the iOS lane this one does not only photograph screens: it presses
+# controls and reads the screen back to find the ones that do nothing. See
+# qa/android-emulator-drive.mjs for why ambient movement is measured first.
+name: Android emulator audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [nexora/cloud-android-lane]
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Let the emulator use hardware acceleration
+        # Without KVM the emulator runs in pure software and is too slow to
+        # finish inside any sane timeout.
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Write the app's public configuration
+        run: |
+          cat > .env.local <<ENV
+          EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_BIBLE_PROVIDER=${{ secrets.EXPO_PUBLIC_BIBLE_PROVIDER }}
+          EXPO_PUBLIC_BIBLE_API_ENDPOINT=${{ secrets.EXPO_PUBLIC_BIBLE_API_ENDPOINT }}
+          EXPO_PUBLIC_BIBLE_API_KEY=${{ secrets.EXPO_PUBLIC_BIBLE_API_KEY }}
+          EXPO_PUBLIC_BIBLE_ID_KJV=${{ secrets.EXPO_PUBLIC_BIBLE_ID_KJV }}
+          EXPO_PUBLIC_BIBLE_ID_NLT=${{ secrets.EXPO_PUBLIC_BIBLE_ID_NLT }}
+          EXPO_PUBLIC_BIBLE_ID_AMP=${{ secrets.EXPO_PUBLIC_BIBLE_ID_AMP }}
+          EXPO_PUBLIC_GIVING_URL=${{ secrets.EXPO_PUBLIC_GIVING_URL }}
+          EXPO_PUBLIC_LIVE_STREAM_URL=${{ secrets.EXPO_PUBLIC_LIVE_STREAM_URL }}
+          ENV
+          echo "wrote $(grep -c . .env.local) settings"
+
+      - name: Generate the native Android project
+        # android/ is not committed, so it is regenerated from app.json every
+        # time and can never drift from it.
+        run: npx expo prebuild --platform android --no-install
+
+      - name: Build a release APK
+        # Release so the JavaScript is bundled in. A debug build expects Metro
+        # and would show a red error screen instead of the app. Expo's template
+        # signs release with the debug key, which is all an emulator needs.
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon -x lint
+          find . -name "*.apk" -path "*release*" | head -5
+
+      - name: Drive the app on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          QA_EMAIL: ${{ secrets.QA_EMAIL }}
+          QA_PASSWORD: ${{ secrets.QA_PASSWORD }}
+          APP_BUNDLE_ID: com.overcomers.globalnetwork.app
+          APP_SCHEME: ognapp
+          SHOT_DIR: qa/android-shots
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb wait-for-device
+            APK=$(find android -name "*.apk" -path "*release*" | head -1)
+            echo "installing $APK"
+            adb install -r "$APK"
+            node qa/android-emulator-drive.mjs
+
+      - name: Keep the device log whatever happened
+        if: always()
+        run: |
+          mkdir -p qa/android-shots
+          adb logcat -d > qa/android-shots/device.log 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-screenshots
+          path: qa/android-shots/
