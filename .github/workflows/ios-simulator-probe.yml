@@ -1,0 +1,55 @@
+# What is actually on a free GitHub macOS runner?
+#
+# The OGN repo is public, so macOS runners cost nothing and are unlimited.
+# Every one of them ships Xcode and the iOS Simulator — which is the only
+# thing this project was missing. This job asks the runner what it has
+# rather than assuming, because Expo 56 needs a specific Xcode.
+name: iOS simulator probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: What Xcode is here
+        run: |
+          sw_vers
+          xcode-select -p
+          xcodebuild -version
+          echo "--- all installed Xcodes ---"
+          ls /Applications | grep -i xcode || true
+
+      - name: What simulators are here
+        run: |
+          xcrun simctl list runtimes
+          echo "--- iPhone devices ---"
+          xcrun simctl list devices available | grep -i iphone | head -20
+
+      - name: Can a simulator boot, install and screenshot
+        run: |
+          UDID=$(xcrun simctl list devices available -j \
+            | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; \
+              print([x['udid'] for r in d for x in d[r] if 'iPhone' in x['name']][0])")
+          echo "booting $UDID"
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl io "$UDID" screenshot /tmp/blank.png
+          ls -la /tmp/blank.png
+          echo "SIMULATOR LANE WORKS"
+
+      - name: Node and the project
+        run: |
+          node -v
+          npm -v
+          echo "--- expo version in package.json ---"
+          node -e "console.log(require('./package.json').dependencies.expo)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-screenshot
+          path: /tmp/blank.png
