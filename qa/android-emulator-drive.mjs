@@ -341,11 +341,20 @@ async function signIn(tag) {
   const pw = await typeInto(passwordBox, PASSWORD, "password", true);
   note(tag + " password field", pw.why);
 
-  await sh(["input", "keyevent", "111"]).catch(() => undefined); // close the keyboard
-  await sleep(500);
+  // The keyboard raised by the password box covers the Sign In button. The
+  // dump still lists the button at its logical place, so the tap "succeeds"
+  // and lands on a key — the screenshot showed both boxes filled correctly
+  // and the form simply still there. Put the keyboard away, then press.
+  await sh(["input", "keyevent", "111"]).catch(() => undefined);
+  await sleep(900);
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
-  await sleep(9000);
+  // An emulator on a shared runner reaches Supabase slowly. Poll instead of
+  // guessing a delay, up to twenty seconds.
+  for (let waited = 0; waited < 20000; waited += 2000) {
+    await sleep(2000);
+    if (await looksSignedIn()) break;
+  }
 
   // A rejected sign-in raises a modal alert; record what it said and clear
   // it, or every later press lands on its OK button. Same guard as iOS.
