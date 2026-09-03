@@ -79,6 +79,12 @@ jobs:
         run: node --test qa/control-policy.test.mjs
 
       - name: Drive the app on an emulator
+        # Bounded and non-fatal on purpose. The emulator action has hung on
+        # teardown after a failure, and cancelling the job to unstick it threw
+        # away every screenshot already taken; the drive script now always
+        # writes its report, so the artifacts are worth uploading either way.
+        timeout-minutes: 35
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         env:
           QA_EMAIL: ${{ secrets.QA_EMAIL }}

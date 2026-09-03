@@ -118,6 +118,8 @@ jobs:
           idb list-targets | head -5
 
       - name: Drive the app and photograph every screen
+        timeout-minutes: 30
+        continue-on-error: true
         env:
           QA_EMAIL: ${{ secrets.QA_EMAIL }}
           QA_PASSWORD: ${{ secrets.QA_PASSWORD }}

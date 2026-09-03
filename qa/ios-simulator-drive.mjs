@@ -72,6 +72,53 @@ const report = {
   /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
   idbRawSample: null
 };
+/**
+ * Write everything down, whatever happened.
+ *
+ * A run that crashes halfway has still seen things worth keeping, and the
+ * first Android run proved the cost of losing them: it failed, its logs were
+ * held until the job finished, the job then hung on emulator teardown, and
+ * cancelling it threw away every screenshot already taken. Nothing was left
+ * to diagnose from.
+ *
+ * So one function writes the report, called on the happy path and from the
+ * crash handlers alike, and a crash is recorded as a fact in the report
+ * rather than as an absence of one.
+ */
+let finalized = false;
+function finalize() {
+  if (finalized) return;
+  finalized = true;
+  try {
+    report.finishedAt = new Date().toISOString();
+    writeFileSync(join(OUT, "ios-drive-report.json"), JSON.stringify(report, null, 2));
+    // Hand the run back in Nexora's own shape. The crawler decides what it
+    // saw; Nexora decides what it means.
+    const forNexora = toNexora(report, "ios");
+    writeFileSync(join(OUT, "nexora-observations.json"), JSON.stringify(forNexora, null, 2));
+    console.log(
+      "observations for Nexora: " + forNexora.observations.length +
+      ", screens covered: " + forNexora.coverage.routesChecked +
+      ", controls pressed: " + forNexora.coverage.controlsTested
+    );
+  } catch (e) {
+    console.error("could not write the report: " + String(e));
+  }
+}
+
+for (const signal of ["uncaughtException", "unhandledRejection"]) {
+  process.on(signal, (e) => {
+    report.crashed = String(e && e.stack ? e.stack : e).slice(0, 800);
+    report.notAssessed = [
+      ...(report.notAssessed ?? []),
+      "Everything after the point this run crashed — " + String(e).slice(0, 160)
+    ];
+    console.error("RUN CRASHED: " + report.crashed);
+    finalize();
+    process.exit(1);
+  });
+}
+
 const note = (step, detail) => {
   report.steps.push({ step, detail });
   console.log("· " + step + ": " + detail);
@@ -343,15 +390,7 @@ if (canTap && report.signedIn) {
   }
 }
 
-report.finishedAt = new Date().toISOString();
-writeFileSync(join(OUT, "ios-drive-report.json"), JSON.stringify(report, null, 2));
-
-// Hand the run back in Nexora's own shape. The crawler decides what it saw;
-// Nexora decides what it means — severity, score, memory and dismissals all
-// stay on its side, so a phone finding and a web finding mean the same thing.
-const forNexora = toNexora(report, "ios");
-writeFileSync(join(OUT, "nexora-observations.json"), JSON.stringify(forNexora, null, 2));
-console.log("observations for Nexora: " + forNexora.observations.length + ", screens covered: " + forNexora.coverage.routesChecked + ", controls pressed: " + forNexora.coverage.controlsTested);
+finalize();
 
 console.log("\n=== iOS simulator run ===");
 console.log("controls could be pressed: " + report.canPressControls);

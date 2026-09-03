@@ -128,6 +128,54 @@ const report = {
   notJudged: [],
   sessionFlow: null
 };
+/**
+ * Write everything down, whatever happened.
+ *
+ * A run that crashes halfway has still seen things worth keeping, and the
+ * first Android run proved the cost of losing them: it failed, its logs were
+ * held until the job finished, the job hung on emulator teardown, and the
+ * whole run had to be cancelled — which threw away every screenshot it had
+ * already taken. There was nothing left to diagnose from.
+ *
+ * So the report is written by one function, called on the happy path and from
+ * the crash handlers alike, and a crash is recorded as a fact in the report
+ * rather than as an absence of one.
+ */
+let finalized = false;
+function finalize() {
+  if (finalized) return;
+  finalized = true;
+  try {
+    report.blankScreens = (report.screens ?? [])
+      .filter((s) => !s.labels || s.labels.length < 3)
+      .map((s) => s.route);
+    report.finishedAt = new Date().toISOString();
+    writeFileSync(join(OUT, "android-drive-report.json"), JSON.stringify(report, null, 2));
+    const forNexora = toNexora(report, "android");
+    writeFileSync(join(OUT, "nexora-observations.json"), JSON.stringify(forNexora, null, 2));
+    console.log(
+      "observations for Nexora: " + forNexora.observations.length +
+      ", screens covered: " + forNexora.coverage.routesChecked +
+      ", controls pressed: " + forNexora.coverage.controlsTested
+    );
+  } catch (e) {
+    console.error("could not write the report: " + String(e));
+  }
+}
+
+for (const signal of ["uncaughtException", "unhandledRejection"]) {
+  process.on(signal, (e) => {
+    report.crashed = String(e && e.stack ? e.stack : e).slice(0, 800);
+    report.notAssessed = [
+      ...(report.notAssessed ?? []),
+      "Everything after the point this run crashed — " + String(e).slice(0, 160)
+    ];
+    console.error("RUN CRASHED: " + report.crashed);
+    finalize();
+    process.exit(1);
+  });
+}
+
 const note = (step, detail) => {
   report.steps.push({ step, detail });
   console.log("· " + step + ": " + detail);
@@ -308,16 +356,7 @@ if (report.signedIn) {
   report.sessionFlow = { attempted: false, why: "never got signed in, so there was no session to end" };
 }
 
-report.blankScreens = report.screens.filter((s) => (s.labels?.length ?? 0) < 3).map((s) => s.route);
-report.finishedAt = new Date().toISOString();
-writeFileSync(join(OUT, "android-drive-report.json"), JSON.stringify(report, null, 2));
-
-// Hand the run back in Nexora's own shape. The crawler decides what it saw;
-// Nexora decides what it means — severity, score, memory and dismissals all
-// stay on its side, so a phone finding and a web finding mean the same thing.
-const forNexora = toNexora(report, "android");
-writeFileSync(join(OUT, "nexora-observations.json"), JSON.stringify(forNexora, null, 2));
-console.log("observations for Nexora: " + forNexora.observations.length + ", screens covered: " + forNexora.coverage.routesChecked + ", controls pressed: " + forNexora.coverage.controlsTested);
+finalize();
 
 console.log("\n=== Android emulator run ===");
 console.log("signed in: " + report.signedIn);
