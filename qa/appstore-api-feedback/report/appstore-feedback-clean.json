@@ -1,0 +1,680 @@
+[
+  {
+    "feedbackId": "AEMOG3yRURmTv0izq2uFiHw",
+    "createdDate": "2026-06-24T07:50:45.032Z",
+    "comment": "Give support tab on more need to be fixed to take user to give tab on the app",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 55,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 1492000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/A-o/I3E/JHE/CEg/AZc/M_0jE42WBGU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=2cY%2BWVHnNgGIh79KhZ5DN%2BR8Fos%3D&p_sig=UYnbOtARRlM6RMIgAl7tknBPDD8",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "5f525c1a5d112e07a55b62d38f8f5167c246d963d3c5bd69fa77f355a3b947b5",
+        "bytes": 344395,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AEMOG3yRURmTv0izq2uFiHw-01-5f525c1a5d11.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AEMOG3yRURmTv0izq2uFiHw-01-5f525c1a5d11.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEMOG3yRURmTv0izq2uFiHw",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "2a80da6aedb54fdd68fc2ca9a19ae22b3856f72b756f49faf134364dcd8b58e1",
+        "bytes": 1605,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AEMOG3yRURmTv0izq2uFiHw-02-2a80da6aedb5.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AMal-W5xT0-8FDW1HwgoR5Q",
+    "createdDate": "2026-06-24T07:49:38.541Z",
+    "comment": "Hi evangelism map neeed color coded system and real functionality and ui that can be useable we will need to redesign the ui for many pages on teh app because the functionality is just difficult",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 55,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 1407000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/CYo/I6w/JwU/CPs/C2I/51GoWg5KINU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=AEs0OfCbyvBMulV9AukdnaC0WIA%3D&p_sig=aAylC0cSWFE7qmLNo5KPGjHwU6c",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "94f7667d24a64b0104d092d7de5f756b309db1d3778c4a6016a0634d0203757d",
+        "bytes": 390262,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AMal-W5xT0-8FDW1HwgoR5Q-01-94f7667d24a6.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AMal-W5xT0-8FDW1HwgoR5Q-01-94f7667d24a6.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMal-W5xT0-8FDW1HwgoR5Q",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "6a24d4b0e0f2ecffc32c2d312034d380607055eeaa2a5b182b641fbd6f7ded01",
+        "bytes": 1718,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AMal-W5xT0-8FDW1HwgoR5Q-02-6a24d4b0e0f2.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AL7E7qsEP2XFpZS56iBBKb0",
+    "createdDate": "2026-06-24T07:43:30.392Z",
+    "comment": "Most of these tabs on more age aren’t clickable and ui is not build out with functionality admin dashboard is super confusing not useful",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 1057000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/A7c/JYY/A-M/D7U/CO4/rw89yeCKFBU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=L5Nvr%2Bm8h5QwgR8PCbuvjF5KIsA%3D&p_sig=G_Fe5zMsMr7cu8ZEBiJ8mTHUjMg",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "1155a3dc1db1a1c11f195b46eac6b6d5438bf8810871566d8cb20d275e46820c",
+        "bytes": 332124,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AL7E7qsEP2XFpZS56iBBKb0-01-1155a3dc1db1.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AL7E7qsEP2XFpZS56iBBKb0-01-1155a3dc1db1.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AL7E7qsEP2XFpZS56iBBKb0",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "4028c8d36259be077199e6d5f48a7e0e5e21a53f369ca8e6e21541bf72540e8c",
+        "bytes": 1664,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AL7E7qsEP2XFpZS56iBBKb0-02-4028c8d36259.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AAnLASLH6XyelPUXKX1tVBI",
+    "createdDate": "2026-06-24T07:42:16.869Z",
+    "comment": "Got this when I click stories ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 1010000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/IQE/FFU/E-E/Brs/Fxg/VpbJ4YCb0Is/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=lpqpIVxl%2BEwHKtM30qNcvUxZN60%3D&p_sig=eGVcHEkNJr7LXVbAM8MI0xCt0AA",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "c5af85fff6dae0f9d211a4f0f57b8831798ea5dfa6915f26f43ee8cbbe0de281",
+        "bytes": 182235,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AAnLASLH6XyelPUXKX1tVBI-01-c5af85fff6da.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AAnLASLH6XyelPUXKX1tVBI-01-c5af85fff6da.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAnLASLH6XyelPUXKX1tVBI",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "0bac32d549e70a7a5924fc688c8478d20826761c75c2246d52d80c0783853ba2",
+        "bytes": 1556,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AAnLASLH6XyelPUXKX1tVBI-02-0bac32d549e7.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "ADZg25gI_Syxx5jfQqNkclY",
+    "createdDate": "2026-06-24T07:41:35.204Z",
+    "comment": "Uploading articles avideos music in admin panels doesn’t work I get an error after selecting file ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 954000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/D50/HlQ/DSo/IC0/BSA/lkgcmmCG-KI/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=hQQxovXd1S%2Bx5%2B%2FAMq6YQOwSh%2BU%3D&p_sig=p9j1lWUrEEEzTe2l15oNg_tJVaE",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "9b392d5401dbf932d278c362227fa1e199538a0cb7be61ab31d4d8badd201864",
+        "bytes": 332294,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/ADZg25gI_Syxx5jfQqNkclY-01-9b392d5401db.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/ADZg25gI_Syxx5jfQqNkclY-01-9b392d5401db.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/ADZg25gI_Syxx5jfQqNkclY",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "869b25507bebb549720727e1f05d6a9473d23c7c02183d3341418dd65228d611",
+        "bytes": 1631,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/ADZg25gI_Syxx5jfQqNkclY-02-869b25507beb.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AE2rOyx9-vCxkBO6FkVqA5c",
+    "createdDate": "2026-06-24T07:38:50.569Z",
+    "comment": "The words in header is to blue blending with globe on more tab for admin make the font white on more  tab ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 785000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/FcM/DxQ/EZc/IZk/IOY/TPaCqJAo_2k/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=wV1KsPYU%2BlaSN9XXvnMxM03XFCU%3D&p_sig=Ap7zh3Vnu8DrdZ0m4x_bd5C4RH4",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "555f6f997d6e2fe0e686e6cd1b9a685e94aa88bcc7c39fd9f0eaccef20c6c5c5",
+        "bytes": 424167,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AE2rOyx9-vCxkBO6FkVqA5c-01-555f6f997d6e.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AE2rOyx9-vCxkBO6FkVqA5c-01-555f6f997d6e.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AE2rOyx9-vCxkBO6FkVqA5c",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "ad773e1e3ee9492ddafbf49ae818588a6b5334a1c02de89f74abd2eb40694bdf",
+        "bytes": 1631,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AE2rOyx9-vCxkBO6FkVqA5c-02-ad773e1e3ee9.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "ADzf6cJGzXUN7scLauTnckY",
+    "createdDate": "2026-06-24T07:38:06.125Z",
+    "comment": "Notes don’t work  and save button don’t work they give error on Bible b page for supa base message ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 745000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/EpM/Dig/GAM/IWM/AHg/048ehsrk_VI/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=WsmovPuJZTrN%2FyTYNy7PAWa%2B7Ng%3D&p_sig=lKS9t_bW2YPXfZ3UinmszijnM6k",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "28d89f994a00946430069a10acb2eac6ff5eb61dc5a62c7b7b436f31328d8a3d",
+        "bytes": 371946,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/ADzf6cJGzXUN7scLauTnckY-01-28d89f994a00.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/ADzf6cJGzXUN7scLauTnckY-01-28d89f994a00.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/ADzf6cJGzXUN7scLauTnckY",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "89fb4fbdb04a12f41935870f3b94816fbc38d7469b4a657180245e8b9225619f",
+        "bytes": 1630,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/ADzf6cJGzXUN7scLauTnckY-02-89fb4fbdb04a.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AA4gb76uB8nRCyJy7irb_BQ",
+    "createdDate": "2026-06-24T07:34:44.193Z",
+    "comment": "Chat group announcement ui is bunched up and no real interface need to be something more proffesional consistent with them and each tab does nothing jo group or chat interface no group photos that can be selected that is definitely a problem ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 520000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/DNw/I2E/BGo/JdQ/EVY/26dth2w6pDk/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=P59RYHYkOnLEn%2BwWI0RHDKeIEsM%3D&p_sig=BdNSC1LSsZfZfmfhU0d0E4XLWDU",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "deb1d390b9c8a086d243935dd69d29691d1bf9da0e8c71e2f6a642e209c7926f",
+        "bytes": 491359,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AA4gb76uB8nRCyJy7irb_BQ-01-deb1d390b9c8.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AA4gb76uB8nRCyJy7irb_BQ-01-deb1d390b9c8.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA4gb76uB8nRCyJy7irb_BQ",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "479601744738a5d7e48b790b8c0e0c7c2a033b0f4a56fb193ea6fd87fdd5c6f5",
+        "bytes": 1767,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AA4gb76uB8nRCyJy7irb_BQ-02-479601744738.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AA942TA4V15cAkOtlRiz3t8",
+    "createdDate": "2026-06-24T07:33:35.358Z",
+    "comment": "The $ amount options not working they lead us to site giving page instead of fixed amounts of the the current keys only support custom giving let them lead them where they type the amount in and it’s rule filled also hop that it taking them to the page off the app  won’t effect anything to stripe portal ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 433000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/DqQ/G-4/IMI/EfU/BU4/WkmraG4FMJE/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=2VpWnBtdtT8IfyFpk0nUIDZgIu8%3D&p_sig=ftwnY0Z1fb0VsMuz37IfaJ2GUEk",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "e27cbf810c4f5de55702167dd138873879644fec008c0c68dbad7cfeb1f207b2",
+        "bytes": 445670,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AA942TA4V15cAkOtlRiz3t8-01-e27cbf810c4f.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AA942TA4V15cAkOtlRiz3t8-01-e27cbf810c4f.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA942TA4V15cAkOtlRiz3t8",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "529888d81b6db29f6aa7fa2c19dda55ac02da20d336b43f2a52f4f48874cd467",
+        "bytes": 1832,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AA942TA4V15cAkOtlRiz3t8-02-529888d81b6d.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AHni4f0CDMQGWeMyDRdsDyY",
+    "createdDate": "2026-06-24T07:32:05.146Z",
+    "comment": "Test  story didn’t load the pic the user uploaded and the words at top of card looks smashed up need cleaner ui also prayer card looking so small",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 367000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/GfQ/Hck/ASg/Bj8/G4Y/cl6JZaA-wBQ/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=Vc6A8Yq6LvPi4fKf5XUmK4cKuuc%3D&p_sig=ARgqY54oPkjuu_bWGFZeYNDlacw",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "f761375b3509253aed3c5049f4c1693b876f13fda4fd5759adbc1956e32bca00",
+        "bytes": 576031,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AHni4f0CDMQGWeMyDRdsDyY-01-f761375b3509.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AHni4f0CDMQGWeMyDRdsDyY-01-f761375b3509.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AHni4f0CDMQGWeMyDRdsDyY",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "e425ace9268fd810d5860fe9091b5fafb865b9756c472c4479bf50eac0bd699e",
+        "bytes": 1670,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AHni4f0CDMQGWeMyDRdsDyY-02-e425ace9268f.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AMWmGZT4mNPjMrGpwNBES_g",
+    "createdDate": "2026-06-24T07:31:09.847Z",
+    "comment": "Can’t click any of the event and I should be able to click it and event should populate with flyer attending in person or watch online option and add to calendar feature for user should be here so people can save church event s",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 264000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/EpU/APs/Ci0/FG4/FGI/4NcFanEdEqA/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=7dt1TFMcPfNtYnuUpfY%2BkIeOMQU%3D&p_sig=A4XwAqj0tgzFwN4VYxpXTN_mgLs",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "3e4e9beb7d05dd3e68ba196bceee897888e5319729320e179e939bd308f91549",
+        "bytes": 421544,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AMWmGZT4mNPjMrGpwNBES_g-01-3e4e9beb7d05.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AMWmGZT4mNPjMrGpwNBES_g-01-3e4e9beb7d05.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMWmGZT4mNPjMrGpwNBES_g",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "8f913dfabc208462926dd2475d03a520db51e937899ea54ef5766348ecfaa83b",
+        "bytes": 1754,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AMWmGZT4mNPjMrGpwNBES_g-02-8f913dfabc20.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "APMzvI_oQ1K--3KRiIWNiBo",
+    "createdDate": "2026-06-24T07:29:18.716Z",
+    "comment": "No back button on prayer request screen just see like a profile icon and Overcomers logo and the page is overly crowded not professionally uniformed page with at keeps ui clean ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 205000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/BD8/Ijo/HaY/Jj8/Jww/hN3qJFf5hvk/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=49cgjbN14mSGPm0VujR3f6UZXSw%3D&p_sig=2ivhpo-V2A9QV25bK__XtN5OwLI",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "ed1bbd44e5ed0cc063fe733b24c790265caf1f16ae7d6c48de79eea459640c37",
+        "bytes": 386562,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/APMzvI_oQ1K--3KRiIWNiBo-01-ed1bbd44e5ed.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/APMzvI_oQ1K--3KRiIWNiBo-01-ed1bbd44e5ed.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APMzvI_oQ1K--3KRiIWNiBo",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "5368d7ef14bfc6f52914fa2f8ba5d7dafb43270284b5e54c727a0c881cec0492",
+        "bytes": 1700,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/APMzvI_oQ1K--3KRiIWNiBo-02-5368d7ef14bf.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "APOx1hsxJ0ROzE66-tWIkNQ",
+    "createdDate": "2026-06-24T07:27:58.94Z",
+    "comment": "My request button doesn’t work ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 149000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/E90/GVA/IHA/CIM/APs/Uww5Si7OifQ/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=YqjWYUiIms9uU%2BNmg3aconjguiI%3D&p_sig=qGc20rQ1mn35xkynWmOb0W70Afo",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "a2ea4dad82ab82d8e6f716292def2c7f3583b5b2d0e3cd4ed0520217b6678f36",
+        "bytes": 376041,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/APOx1hsxJ0ROzE66-tWIkNQ-01-a2ea4dad82ab.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/APOx1hsxJ0ROzE66-tWIkNQ-01-a2ea4dad82ab.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APOx1hsxJ0ROzE66-tWIkNQ",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "3d35a7128f09a6e2c5b6dccda0c2209f64267b149e40131d06bffa46e247da72",
+        "bytes": 1557,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/APOx1hsxJ0ROzE66-tWIkNQ-02-3d35a7128f09.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "APpJcJz27BLqltaw4ZsxEg0",
+    "createdDate": "2026-06-24T07:27:37.582Z",
+    "comment": "Can’t see previous prayer request detail not clickable ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 125000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/GyE/H_4/IkI/BFo/B18/B82dLeOyf_0/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=e93Ozw2q5XgIV%2BtmFvXbd9wDnDY%3D&p_sig=Gy0CiDPLI75lr7bE6V-tte9iChw",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "0265fb973e0128a8f1255fbe12bc9bc438560264fa9968018cb0a1a910ea87c6",
+        "bytes": 310107,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/APpJcJz27BLqltaw4ZsxEg0-01-0265fb973e01.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/APpJcJz27BLqltaw4ZsxEg0-01-0265fb973e01.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APpJcJz27BLqltaw4ZsxEg0",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "0040bc1763477e250af1be292a9e3ea516e1d1940037806e5c0eaaafa15bfff3",
+        "bytes": 1582,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/APpJcJz27BLqltaw4ZsxEg0-02-0040bc176347.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AAsOCNjo9DybCq1h6LY_Oo8",
+    "createdDate": "2026-06-24T07:26:43.882Z",
+    "comment": "Just opened the app I see the overlapping card with eagle when I clicked it took me to Overcomers website instead of page this is a place instead maybe video content should of been for recently uploaded message ",
+    "testerEmail": "mr.matthews2022@gmail.com",
+    "testerName": "Joshua Matthews",
+    "deviceModel": "iPhone18_2",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 60,
+    "screenWidthInPoints": 440,
+    "screenHeightInPoints": 956,
+    "appUptimeInMilliseconds": 20000,
+    "screenshotImages": [
+      {
+        "url": "https://tf-feedback.itunes.apple.com/eimg/AbQ/GEI/Edw/HdE/BdU/w-WrVGX9OgY/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=nBe0OxlmoccLDNktrvROJkxQtDE%3D&p_sig=OCeZsoJDfjCxgLu7YQb18nAvcGw",
+        "ok": true,
+        "contentType": "image/jpeg",
+        "hash": "0f98644ecabb7b0cc8702e90d12481fb0590e6a08224c469f077f5a87a71e077",
+        "bytes": 542097,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AAsOCNjo9DybCq1h6LY_Oo8-01-0f98644ecabb.jpg",
+        "cleanFilePath": "qa/appstore-api-feedback/screenshots-real-only/AAsOCNjo9DybCq1h6LY_Oo8-01-0f98644ecabb.jpg"
+      }
+    ],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAsOCNjo9DybCq1h6LY_Oo8",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "b98d8c29325aafa33a4b73463b23ab407405e9bb710d41b6dd85cd669669546a",
+        "bytes": 1733,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AAsOCNjo9DybCq1h6LY_Oo8-02-b98d8c29325a.bin"
+      }
+    ]
+  },
+  {
+    "feedbackId": "AEbBVa5Lpge9PgcyimjTeUQ",
+    "createdDate": "2026-06-24T04:36:48.286Z",
+    "comment": "Malfunctions \n\nThe upcoming events button isn’t working\n\nNo back button on the Evangelism page \n\nLanguage , Account settings button isn’t clickable \n\nNo back button on prayer request page\n\nNo back button on App support page \n\nAbout OGN button isn’t clickable\n\nChat page needs to look like chats \n\nGive page needs a back button \n\nBack button on profile page \n\nLanguage button isn’t clickable ",
+    "testerEmail": "wildagermain35@gmail.com",
+    "testerName": "Wilda germain",
+    "deviceModel": "iPhone18_3",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "timeZone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionType": "WIFI",
+    "appPlatform": "IOS",
+    "devicePlatform": "IOS",
+    "deviceFamily": "IPHONE",
+    "buildBundleId": "com.overcomers.globalnetwork.app",
+    "buildVersion": "20",
+    "batteryPercentage": 85,
+    "screenWidthInPoints": 402,
+    "screenHeightInPoints": 874,
+    "appUptimeInMilliseconds": null,
+    "screenshotImages": [],
+    "sidecarAssets": [
+      {
+        "url": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEbBVa5Lpge9PgcyimjTeUQ",
+        "ok": true,
+        "contentType": "application/json",
+        "hash": "202bbe0b3d49e5ebb78d83646c9847409f71706d86d7650b5d4692b74bcfdc99",
+        "bytes": 1577,
+        "filePath": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/appstore-api-feedback/screenshots/AEbBVa5Lpge9PgcyimjTeUQ-01-202bbe0b3d49.bin"
+      }
+    ]
+  }
+]

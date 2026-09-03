@@ -1,0 +1,120 @@
+{
+  "feedback_count": 1,
+  "unique_feedback_ids": [
+    "AEbBVa5Lpge9PgcyimjTeUQ"
+  ],
+  "duplicate_failed_zip_count": 12,
+  "duplicate_failed_zip_sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+  "usable_zip": "/Users/presdinetaloffice/Downloads/testflight_feedback.zip",
+  "screenshot": "/Volumes/mindfulssd/dev/OVercomersapp2026/qa/testflight-feedback/report/testflight-home-screenshot.jpg",
+  "feedback": {
+    "id": "AEbBVa5Lpge9PgcyimjTeUQ",
+    "timestamp": "2026-06-24T04:36:48.286Z[UTC]",
+    "appAppleId": 6781967244,
+    "cfBundleShortVersion": "1.0.0",
+    "cfBundleVersion": "20",
+    "deviceModel": "iPhone18,3",
+    "osVersion": "26.5.1",
+    "locale": "en-US",
+    "carrier": "--",
+    "timezone": "America/New_York",
+    "architecture": "arm64e",
+    "connectionStatus": "WI_FI",
+    "pairedAppleWatch": "",
+    "appUptimeMillis": null,
+    "availableDiskBytes": 101981786112,
+    "totalDiskBytes": 255370809344,
+    "networkType": null,
+    "batteryPercentage": 85,
+    "screenWidth": 402,
+    "screenHeight": 874,
+    "emailAddress": "wildagermain35@gmail.com",
+    "comment": "Malfunctions \n\nThe upcoming events button isn\u2019t working\n\nNo back button on the Evangelism page \n\nLanguage , Account settings button isn\u2019t clickable \n\nNo back button on prayer request page\n\nNo back button on App support page \n\nAbout OGN button isn\u2019t clickable\n\nChat page needs to look like chats \n\nGive page needs a back button \n\nBack button on profile page \n\nLanguage button isn\u2019t clickable "
+  },
+  "unique_issues": [
+    "The upcoming events button isn\u2019t working",
+    "No back button on the Evangelism page",
+    "Language , Account settings button isn\u2019t clickable",
+    "No back button on prayer request page",
+    "No back button on App support page",
+    "About OGN button isn\u2019t clickable",
+    "Chat page needs to look like chats",
+    "Give page needs a back button",
+    "Back button on profile page",
+    "Language button isn\u2019t clickable"
+  ],
+  "failed_downloads": [
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AL7E7qsEP2XFpZS56iBBKb0.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AMal-W5xT0-8FDW1HwgoR5Q.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/APMzvI_oQ1K--3KRiIWNiBo.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AA4gb76uB8nRCyJy7irb_BQ.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AA942TA4V15cAkOtlRiz3t8.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AAnLASLH6XyelPUXKX1tVBI.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AAsOCNjo9DybCq1h6LY_Oo8.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/ADzf6cJGzXUN7scLauTnckY.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/ADZg25gI_Syxx5jfQqNkclY.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AE2rOyx9-vCxkBO6FkVqA5c.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AEMOG3yRURmTv0izq2uFiHw.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    },
+    {
+      "file": "/Users/presdinetaloffice/Downloads/AHni4f0CDMQGWeMyDRdsDyY.zip",
+      "sha256": "3b3e27b3118e2424530ecb78cab5d5c54ba25f5cc605af7bc7d1c5d78e220c4b",
+      "size": 908,
+      "kind": "html_internal_server_error"
+    }
+  ]
+}

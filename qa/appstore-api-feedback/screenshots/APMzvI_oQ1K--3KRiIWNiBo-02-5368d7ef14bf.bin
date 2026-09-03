@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "APMzvI_oQ1K--3KRiIWNiBo",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:29:18.716Z",
+      "comment" : "No back button on prayer request screen just see like a profile icon and Overcomers logo and the page is overly crowded not professionally uniformed page with at keeps ui clean ",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 205000,
+      "diskBytesAvailable" : 128577425408,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/BD8/Ijo/HaY/Jj8/Jww/hN3qJFf5hvk/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=49cgjbN14mSGPm0VujR3f6UZXSw%3D&p_sig=2ivhpo-V2A9QV25bK__XtN5OwLI",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APMzvI_oQ1K--3KRiIWNiBo"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APMzvI_oQ1K--3KRiIWNiBo"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AL7E7qsEP2XFpZS56iBBKb0",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:43:30.392Z",
+      "comment" : "Most of these tabs on more age aren’t clickable and ui is not build out with functionality admin dashboard is super confusing not useful",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 1057000,
+      "diskBytesAvailable" : 128529879040,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/A7c/JYY/A-M/D7U/CO4/rw89yeCKFBU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=L5Nvr%2Bm8h5QwgR8PCbuvjF5KIsA%3D&p_sig=G_Fe5zMsMr7cu8ZEBiJ8mTHUjMg",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AL7E7qsEP2XFpZS56iBBKb0"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AL7E7qsEP2XFpZS56iBBKb0"
+  }
+}

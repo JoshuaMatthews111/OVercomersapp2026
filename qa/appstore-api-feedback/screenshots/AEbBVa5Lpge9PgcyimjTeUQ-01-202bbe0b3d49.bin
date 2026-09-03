@@ -1,0 +1,35 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AEbBVa5Lpge9PgcyimjTeUQ",
+    "attributes" : {
+      "createdDate" : "2026-06-24T04:36:48.286Z",
+      "comment" : "Malfunctions \n\nThe upcoming events button isn’t working\n\nNo back button on the Evangelism page \n\nLanguage , Account settings button isn’t clickable \n\nNo back button on prayer request page\n\nNo back button on App support page \n\nAbout OGN button isn’t clickable\n\nChat page needs to look like chats \n\nGive page needs a back button \n\nBack button on profile page \n\nLanguage button isn’t clickable ",
+      "email" : "wildagermain35@gmail.com",
+      "deviceModel" : "iPhone18_3",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : null,
+      "diskBytesAvailable" : 101981786112,
+      "diskBytesTotal" : 255370809344,
+      "batteryPercentage" : 85,
+      "screenWidthInPoints" : 402,
+      "screenHeightInPoints" : 874,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEbBVa5Lpge9PgcyimjTeUQ"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEbBVa5Lpge9PgcyimjTeUQ"
+  }
+}

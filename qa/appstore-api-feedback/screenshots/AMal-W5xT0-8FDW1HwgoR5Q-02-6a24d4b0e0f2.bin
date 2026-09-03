@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AMal-W5xT0-8FDW1HwgoR5Q",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:49:38.541Z",
+      "comment" : "Hi evangelism map neeed color coded system and real functionality and ui that can be useable we will need to redesign the ui for many pages on teh app because the functionality is just difficult",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 1407000,
+      "diskBytesAvailable" : 128457760768,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 55,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/CYo/I6w/JwU/CPs/C2I/51GoWg5KINU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=AEs0OfCbyvBMulV9AukdnaC0WIA%3D&p_sig=aAylC0cSWFE7qmLNo5KPGjHwU6c",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMal-W5xT0-8FDW1HwgoR5Q"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMal-W5xT0-8FDW1HwgoR5Q"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "data": {
+    "type": "betaFeedbackScreenshotSubmissions",
+    "id": "AA942TA4V15cAkOtlRiz3t8",
+    "attributes": {
+      "createdDate": "2026-06-24T07:33:35.358Z",
+      "comment": "The $ amount options not working they lead us to site giving page instead of fixed amounts of the the current keys only support custom giving let them lead them where they type the amount in and it’s rule filled also hop that it taking them to the page off the app  won’t effect anything to stripe portal ",
+      "email": "mr.matthews2022@gmail.com",
+      "deviceModel": "iPhone18_2",
+      "osVersion": "26.5.1",
+      "locale": "en-US",
+      "timeZone": "America/New_York",
+      "architecture": "arm64e",
+      "connectionType": "WIFI",
+      "pairedAppleWatch": null,
+      "appUptimeInMilliseconds": 433000,
+      "diskBytesAvailable": 128552329216,
+      "diskBytesTotal": 511355080704,
+      "batteryPercentage": 60,
+      "screenWidthInPoints": 440,
+      "screenHeightInPoints": 956,
+      "appPlatform": "IOS",
+      "devicePlatform": "IOS",
+      "deviceFamily": "IPHONE",
+      "buildBundleId": "com.overcomers.globalnetwork.app",
+      "screenshots": [
+        {
+          "url": "https://tf-feedback.itunes.apple.com/eimg/DqQ/G-4/IMI/EfU/BU4/WkmraG4FMJE/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=2VpWnBtdtT8IfyFpk0nUIDZgIu8%3D&p_sig=ftwnY0Z1fb0VsMuz37IfaJ2GUEk",
+          "width": 1320,
+          "height": 2868,
+          "expirationDate": "2026-06-30T00:00:00Z"
+        }
+      ]
+    },
+    "links": {
+      "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA942TA4V15cAkOtlRiz3t8"
+    }
+  },
+  "links": {
+    "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA942TA4V15cAkOtlRiz3t8"
+  }
+}

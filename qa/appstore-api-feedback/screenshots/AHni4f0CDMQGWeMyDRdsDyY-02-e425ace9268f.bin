@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AHni4f0CDMQGWeMyDRdsDyY",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:32:05.146Z",
+      "comment" : "Test  story didn’t load the pic the user uploaded and the words at top of card looks smashed up need cleaner ui also prayer card looking so small",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 367000,
+      "diskBytesAvailable" : 128565817344,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/GfQ/Hck/ASg/Bj8/G4Y/cl6JZaA-wBQ/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=Vc6A8Yq6LvPi4fKf5XUmK4cKuuc%3D&p_sig=ARgqY54oPkjuu_bWGFZeYNDlacw",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AHni4f0CDMQGWeMyDRdsDyY"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AHni4f0CDMQGWeMyDRdsDyY"
+  }
+}

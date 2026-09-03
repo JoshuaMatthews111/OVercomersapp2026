@@ -1,0 +1,814 @@
+{
+  "data": [
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AEMOG3yRURmTv0izq2uFiHw",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/A-o/I3E/JHE/CEg/AZc/M_0jE42WBGU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=2cY%2BWVHnNgGIh79KhZ5DN%2BR8Fos%3D&p_sig=UYnbOtARRlM6RMIgAl7tknBPDD8",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:50:45.032Z",
+        "osVersion": "26.5.1",
+        "comment": "Give support tab on more need to be fixed to take user to give tab on the app",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 55,
+        "appUptimeInMilliseconds": 1492000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEMOG3yRURmTv0izq2uFiHw"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AMal-W5xT0-8FDW1HwgoR5Q",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/CYo/I6w/JwU/CPs/C2I/51GoWg5KINU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=AEs0OfCbyvBMulV9AukdnaC0WIA%3D&p_sig=aAylC0cSWFE7qmLNo5KPGjHwU6c",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:49:38.541Z",
+        "osVersion": "26.5.1",
+        "comment": "Hi evangelism map neeed color coded system and real functionality and ui that can be useable we will need to redesign the ui for many pages on teh app because the functionality is just difficult",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 55,
+        "appUptimeInMilliseconds": 1407000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMal-W5xT0-8FDW1HwgoR5Q"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AL7E7qsEP2XFpZS56iBBKb0",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/A7c/JYY/A-M/D7U/CO4/rw89yeCKFBU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=L5Nvr%2Bm8h5QwgR8PCbuvjF5KIsA%3D&p_sig=G_Fe5zMsMr7cu8ZEBiJ8mTHUjMg",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:43:30.392Z",
+        "osVersion": "26.5.1",
+        "comment": "Most of these tabs on more age aren’t clickable and ui is not build out with functionality admin dashboard is super confusing not useful",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 1057000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AL7E7qsEP2XFpZS56iBBKb0"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AAnLASLH6XyelPUXKX1tVBI",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/IQE/FFU/E-E/Brs/Fxg/VpbJ4YCb0Is/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=lpqpIVxl%2BEwHKtM30qNcvUxZN60%3D&p_sig=eGVcHEkNJr7LXVbAM8MI0xCt0AA",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:42:16.869Z",
+        "osVersion": "26.5.1",
+        "comment": "Got this when I click stories ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 1010000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAnLASLH6XyelPUXKX1tVBI"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "ADZg25gI_Syxx5jfQqNkclY",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/D50/HlQ/DSo/IC0/BSA/lkgcmmCG-KI/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=hQQxovXd1S%2Bx5%2B%2FAMq6YQOwSh%2BU%3D&p_sig=p9j1lWUrEEEzTe2l15oNg_tJVaE",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:41:35.204Z",
+        "osVersion": "26.5.1",
+        "comment": "Uploading articles avideos music in admin panels doesn’t work I get an error after selecting file ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 954000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/ADZg25gI_Syxx5jfQqNkclY"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AE2rOyx9-vCxkBO6FkVqA5c",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/FcM/DxQ/EZc/IZk/IOY/TPaCqJAo_2k/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=wV1KsPYU%2BlaSN9XXvnMxM03XFCU%3D&p_sig=Ap7zh3Vnu8DrdZ0m4x_bd5C4RH4",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:38:50.569Z",
+        "osVersion": "26.5.1",
+        "comment": "The words in header is to blue blending with globe on more tab for admin make the font white on more  tab ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 785000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AE2rOyx9-vCxkBO6FkVqA5c"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "ADzf6cJGzXUN7scLauTnckY",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/EpM/Dig/GAM/IWM/AHg/048ehsrk_VI/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=WsmovPuJZTrN%2FyTYNy7PAWa%2B7Ng%3D&p_sig=lKS9t_bW2YPXfZ3UinmszijnM6k",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:38:06.125Z",
+        "osVersion": "26.5.1",
+        "comment": "Notes don’t work  and save button don’t work they give error on Bible b page for supa base message ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 745000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/ADzf6cJGzXUN7scLauTnckY"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AA4gb76uB8nRCyJy7irb_BQ",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/DNw/I2E/BGo/JdQ/EVY/26dth2w6pDk/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=P59RYHYkOnLEn%2BwWI0RHDKeIEsM%3D&p_sig=BdNSC1LSsZfZfmfhU0d0E4XLWDU",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:34:44.193Z",
+        "osVersion": "26.5.1",
+        "comment": "Chat group announcement ui is bunched up and no real interface need to be something more proffesional consistent with them and each tab does nothing jo group or chat interface no group photos that can be selected that is definitely a problem ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 520000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA4gb76uB8nRCyJy7irb_BQ"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AA942TA4V15cAkOtlRiz3t8",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/DqQ/G-4/IMI/EfU/BU4/WkmraG4FMJE/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=2VpWnBtdtT8IfyFpk0nUIDZgIu8%3D&p_sig=ftwnY0Z1fb0VsMuz37IfaJ2GUEk",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:33:35.358Z",
+        "osVersion": "26.5.1",
+        "comment": "The $ amount options not working they lead us to site giving page instead of fixed amounts of the the current keys only support custom giving let them lead them where they type the amount in and it’s rule filled also hop that it taking them to the page off the app  won’t effect anything to stripe portal ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 433000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA942TA4V15cAkOtlRiz3t8"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AHni4f0CDMQGWeMyDRdsDyY",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/GfQ/Hck/ASg/Bj8/G4Y/cl6JZaA-wBQ/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=Vc6A8Yq6LvPi4fKf5XUmK4cKuuc%3D&p_sig=ARgqY54oPkjuu_bWGFZeYNDlacw",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:32:05.146Z",
+        "osVersion": "26.5.1",
+        "comment": "Test  story didn’t load the pic the user uploaded and the words at top of card looks smashed up need cleaner ui also prayer card looking so small",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 367000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AHni4f0CDMQGWeMyDRdsDyY"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AMWmGZT4mNPjMrGpwNBES_g",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/EpU/APs/Ci0/FG4/FGI/4NcFanEdEqA/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=7dt1TFMcPfNtYnuUpfY%2BkIeOMQU%3D&p_sig=A4XwAqj0tgzFwN4VYxpXTN_mgLs",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:31:09.847Z",
+        "osVersion": "26.5.1",
+        "comment": "Can’t click any of the event and I should be able to click it and event should populate with flyer attending in person or watch online option and add to calendar feature for user should be here so people can save church event s",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 264000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMWmGZT4mNPjMrGpwNBES_g"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "APMzvI_oQ1K--3KRiIWNiBo",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/BD8/Ijo/HaY/Jj8/Jww/hN3qJFf5hvk/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=49cgjbN14mSGPm0VujR3f6UZXSw%3D&p_sig=2ivhpo-V2A9QV25bK__XtN5OwLI",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:29:18.716Z",
+        "osVersion": "26.5.1",
+        "comment": "No back button on prayer request screen just see like a profile icon and Overcomers logo and the page is overly crowded not professionally uniformed page with at keeps ui clean ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 205000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APMzvI_oQ1K--3KRiIWNiBo"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "APOx1hsxJ0ROzE66-tWIkNQ",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/E90/GVA/IHA/CIM/APs/Uww5Si7OifQ/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=YqjWYUiIms9uU%2BNmg3aconjguiI%3D&p_sig=qGc20rQ1mn35xkynWmOb0W70Afo",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:27:58.94Z",
+        "osVersion": "26.5.1",
+        "comment": "My request button doesn’t work ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 149000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APOx1hsxJ0ROzE66-tWIkNQ"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "APpJcJz27BLqltaw4ZsxEg0",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/GyE/H_4/IkI/BFo/B18/B82dLeOyf_0/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=e93Ozw2q5XgIV%2BtmFvXbd9wDnDY%3D&p_sig=Gy0CiDPLI75lr7bE6V-tte9iChw",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:27:37.582Z",
+        "osVersion": "26.5.1",
+        "comment": "Can’t see previous prayer request detail not clickable ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 125000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APpJcJz27BLqltaw4ZsxEg0"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AAsOCNjo9DybCq1h6LY_Oo8",
+      "attributes": {
+        "screenWidthInPoints": 440,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [
+          {
+            "url": "https://tf-feedback.itunes.apple.com/eimg/AbQ/GEI/Edw/HdE/BdU/w-WrVGX9OgY/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=nBe0OxlmoccLDNktrvROJkxQtDE%3D&p_sig=OCeZsoJDfjCxgLu7YQb18nAvcGw",
+            "width": 1320,
+            "height": 2868,
+            "expirationDate": "2026-06-30T00:00:00Z"
+          }
+        ],
+        "createdDate": "2026-06-24T07:26:43.882Z",
+        "osVersion": "26.5.1",
+        "comment": "Just opened the app I see the overlapping card with eagle when I clicked it took me to Overcomers website instead of page this is a place instead maybe video content should of been for recently uploaded message ",
+        "deviceModel": "iPhone18_2",
+        "batteryPercentage": 60,
+        "appUptimeInMilliseconds": 20000,
+        "screenHeightInPoints": 956,
+        "email": "mr.matthews2022@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAsOCNjo9DybCq1h6LY_Oo8"
+      }
+    },
+    {
+      "type": "betaFeedbackScreenshotSubmissions",
+      "id": "AEbBVa5Lpge9PgcyimjTeUQ",
+      "attributes": {
+        "screenWidthInPoints": 402,
+        "appPlatform": "IOS",
+        "buildBundleId": "com.overcomers.globalnetwork.app",
+        "timeZone": "America/New_York",
+        "devicePlatform": "IOS",
+        "deviceFamily": "IPHONE",
+        "locale": "en-US",
+        "connectionType": "WIFI",
+        "screenshots": [],
+        "createdDate": "2026-06-24T04:36:48.286Z",
+        "osVersion": "26.5.1",
+        "comment": "Malfunctions \n\nThe upcoming events button isn’t working\n\nNo back button on the Evangelism page \n\nLanguage , Account settings button isn’t clickable \n\nNo back button on prayer request page\n\nNo back button on App support page \n\nAbout OGN button isn’t clickable\n\nChat page needs to look like chats \n\nGive page needs a back button \n\nBack button on profile page \n\nLanguage button isn’t clickable ",
+        "deviceModel": "iPhone18_3",
+        "batteryPercentage": 85,
+        "appUptimeInMilliseconds": null,
+        "screenHeightInPoints": 874,
+        "email": "wildagermain35@gmail.com",
+        "architecture": "arm64e"
+      },
+      "relationships": {
+        "tester": {
+          "data": {
+            "type": "betaTesters",
+            "id": "2dc4d7ba-0e92-4cf0-a616-64bacd6eaf96"
+          }
+        },
+        "build": {
+          "data": {
+            "type": "builds",
+            "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f"
+          }
+        }
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEbBVa5Lpge9PgcyimjTeUQ"
+      }
+    }
+  ],
+  "included": [
+    {
+      "type": "betaTesters",
+      "id": "b06d3d28-5ce5-463a-ac62-7372b3ac35f2",
+      "attributes": {
+        "lastName": "Matthews",
+        "firstName": "Joshua",
+        "state": null,
+        "email": "mr.matthews2022@gmail.com"
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaTesters/b06d3d28-5ce5-463a-ac62-7372b3ac35f2"
+      }
+    },
+    {
+      "type": "betaTesters",
+      "id": "2dc4d7ba-0e92-4cf0-a616-64bacd6eaf96",
+      "attributes": {
+        "lastName": "germain",
+        "firstName": "Wilda",
+        "state": null,
+        "email": "wildagermain35@gmail.com"
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/betaTesters/2dc4d7ba-0e92-4cf0-a616-64bacd6eaf96"
+      }
+    },
+    {
+      "type": "builds",
+      "id": "6862231b-dbfd-4c88-85ae-6920ebf0123f",
+      "attributes": {
+        "uploadedDate": "2026-06-20T22:04:51-07:00",
+        "version": "20",
+        "processingState": "VALID"
+      },
+      "links": {
+        "self": "https://api.appstoreconnect.apple.com/v1/builds/6862231b-dbfd-4c88-85ae-6920ebf0123f"
+      }
+    }
+  ],
+  "links": {
+    "self": "https://api.appstoreconnect.apple.com/v1/apps/6781967244/betaFeedbackScreenshotSubmissions?fields%5Bbuilds%5D=processingState%2CuploadedDate%2Cversion&fields%5BbetaFeedbackScreenshotSubmissions%5D=screenWidthInPoints%2CappPlatform%2CbuildBundleId%2Ctester%2CtimeZone%2CdevicePlatform%2CdeviceFamily%2Clocale%2CconnectionType%2Cscreenshots%2CcreatedDate%2CosVersion%2Cbuild%2Ccomment%2CdeviceModel%2CbatteryPercentage%2CappUptimeInMilliseconds%2CscreenHeightInPoints%2Cemail%2Carchitecture&fields%5BbetaTesters%5D=firstName%2ClastName%2Cstate%2Cemail&include=build%2Ctester&limit=200"
+  },
+  "meta": {
+    "paging": {
+      "total": 16,
+      "limit": 200
+    }
+  }
+}

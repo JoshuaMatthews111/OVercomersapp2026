@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AEMOG3yRURmTv0izq2uFiHw",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:50:45.032Z",
+      "comment" : "Give support tab on more need to be fixed to take user to give tab on the app",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 1492000,
+      "diskBytesAvailable" : 128456949760,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 55,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/A-o/I3E/JHE/CEg/AZc/M_0jE42WBGU/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=2cY%2BWVHnNgGIh79KhZ5DN%2BR8Fos%3D&p_sig=UYnbOtARRlM6RMIgAl7tknBPDD8",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEMOG3yRURmTv0izq2uFiHw"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AEMOG3yRURmTv0izq2uFiHw"
+  }
+}

@@ -1,7 +1,45 @@
 const fs = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 
 const root = path.join(__dirname, "..");
+
+/**
+ * Which Swift is on THIS machine, and does it need the downgrade?
+ *
+ * Expo SDK 56 ships Package.swift files declaring swift-tools-version 6.2.
+ * The Office Mac has Xcode 16.4 / Swift 6.1, which rejects that outright, so
+ * these patches rewrite 6.2 down to 6.1 and work around the C++ interop that
+ * only Swift 6.2 understands.
+ *
+ * On a machine that HAS Swift 6.2 — a GitHub macOS runner carries Xcode 26 —
+ * applying the same patches is not a fix, it is damage: it rewrites correct
+ * sources into the shape an older compiler needed. Asking the compiler its
+ * version costs one call and lets the same repo build in both places.
+ */
+function swiftMajorMinor() {
+  try {
+    const out = execFileSync("swift", ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const m = out.match(/Swift version (\d+)\.(\d+)/);
+    if (!m) return null;
+    return { major: Number(m[1]), minor: Number(m[2]) };
+  } catch {
+    // No Swift at all (Linux, a bare container). Nothing here applies.
+    return null;
+  }
+}
+
+const swift = swiftMajorMinor();
+const needsDowngrade = swift !== null && (swift.major < 6 || (swift.major === 6 && swift.minor < 2));
+
+if (swift === null) {
+  console.log("No Swift toolchain found; skipping the Apple patches.");
+} else if (!needsDowngrade) {
+  console.log(
+    `Swift ${swift.major}.${swift.minor} understands Expo SDK 56 as shipped; ` +
+      "skipping the Swift 6.1 downgrade patches."
+  );
+}
 const packageFiles = [
   "node_modules/expo-modules-jsi/apple/Package.swift",
   "node_modules/@expo/expo-modules-macros-plugin/apple/Package.swift",
@@ -25,7 +63,7 @@ if (fs.existsSync(reactNativeGradleSettings)) {
   }
 }
 
-for (const relativeFile of packageFiles) {
+for (const relativeFile of needsDowngrade ? packageFiles : []) {
   const file = path.join(root, relativeFile);
 
   if (!fs.existsSync(file)) {
@@ -63,7 +101,7 @@ function walkSwiftFiles(directory) {
   });
 }
 
-for (const file of walkSwiftFiles(expoModulesJsiSources)) {
+for (const file of needsDowngrade ? walkSwiftFiles(expoModulesJsiSources) : []) {
   const source = fs.readFileSync(file, "utf8");
   const patched = source
     .replace(/\bweak let\b/g, "weak var")
@@ -180,7 +218,7 @@ inline NativeState *makeNativeState(
   },
 ];
 
-for (const patch of cxxPatches) {
+for (const patch of needsDowngrade ? cxxPatches : []) {
   const file = path.join(root, patch.file);
   if (!fs.existsSync(file)) {
     continue;
@@ -203,7 +241,7 @@ const expoModulesJsiBuildScript = path.join(
   "node_modules/expo-modules-jsi/apple/scripts/build-xcframework.sh"
 );
 
-if (fs.existsSync(expoModulesJsiBuildScript)) {
+if (needsDowngrade && fs.existsSync(expoModulesJsiBuildScript)) {
   const source = fs.readFileSync(expoModulesJsiBuildScript, "utf8");
   const patched = source
     .replace(

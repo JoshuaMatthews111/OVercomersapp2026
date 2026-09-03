@@ -1,0 +1,42 @@
+{
+  "data": {
+    "type": "betaFeedbackScreenshotSubmissions",
+    "id": "APpJcJz27BLqltaw4ZsxEg0",
+    "attributes": {
+      "createdDate": "2026-06-24T07:27:37.582Z",
+      "comment": "Can’t see previous prayer request detail not clickable ",
+      "email": "mr.matthews2022@gmail.com",
+      "deviceModel": "iPhone18_2",
+      "osVersion": "26.5.1",
+      "locale": "en-US",
+      "timeZone": "America/New_York",
+      "architecture": "arm64e",
+      "connectionType": "WIFI",
+      "pairedAppleWatch": null,
+      "appUptimeInMilliseconds": 125000,
+      "diskBytesAvailable": 128717365248,
+      "diskBytesTotal": 511355080704,
+      "batteryPercentage": 60,
+      "screenWidthInPoints": 440,
+      "screenHeightInPoints": 956,
+      "appPlatform": "IOS",
+      "devicePlatform": "IOS",
+      "deviceFamily": "IPHONE",
+      "buildBundleId": "com.overcomers.globalnetwork.app",
+      "screenshots": [
+        {
+          "url": "https://tf-feedback.itunes.apple.com/eimg/GyE/H_4/IkI/BFo/B18/B82dLeOyf_0/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=e93Ozw2q5XgIV%2BtmFvXbd9wDnDY%3D&p_sig=Gy0CiDPLI75lr7bE6V-tte9iChw",
+          "width": 1320,
+          "height": 2868,
+          "expirationDate": "2026-06-30T00:00:00Z"
+        }
+      ]
+    },
+    "links": {
+      "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APpJcJz27BLqltaw4ZsxEg0"
+    }
+  },
+  "links": {
+    "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/APpJcJz27BLqltaw4ZsxEg0"
+  }
+}

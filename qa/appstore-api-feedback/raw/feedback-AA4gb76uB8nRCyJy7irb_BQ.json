@@ -1,0 +1,42 @@
+{
+  "data": {
+    "type": "betaFeedbackScreenshotSubmissions",
+    "id": "AA4gb76uB8nRCyJy7irb_BQ",
+    "attributes": {
+      "createdDate": "2026-06-24T07:34:44.193Z",
+      "comment": "Chat group announcement ui is bunched up and no real interface need to be something more proffesional consistent with them and each tab does nothing jo group or chat interface no group photos that can be selected that is definitely a problem ",
+      "email": "mr.matthews2022@gmail.com",
+      "deviceModel": "iPhone18_2",
+      "osVersion": "26.5.1",
+      "locale": "en-US",
+      "timeZone": "America/New_York",
+      "architecture": "arm64e",
+      "connectionType": "WIFI",
+      "pairedAppleWatch": null,
+      "appUptimeInMilliseconds": 520000,
+      "diskBytesAvailable": 128545144832,
+      "diskBytesTotal": 511355080704,
+      "batteryPercentage": 60,
+      "screenWidthInPoints": 440,
+      "screenHeightInPoints": 956,
+      "appPlatform": "IOS",
+      "devicePlatform": "IOS",
+      "deviceFamily": "IPHONE",
+      "buildBundleId": "com.overcomers.globalnetwork.app",
+      "screenshots": [
+        {
+          "url": "https://tf-feedback.itunes.apple.com/eimg/DNw/I2E/BGo/JdQ/EVY/26dth2w6pDk/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=P59RYHYkOnLEn%2BwWI0RHDKeIEsM%3D&p_sig=BdNSC1LSsZfZfmfhU0d0E4XLWDU",
+          "width": 1320,
+          "height": 2868,
+          "expirationDate": "2026-06-30T00:00:00Z"
+        }
+      ]
+    },
+    "links": {
+      "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA4gb76uB8nRCyJy7irb_BQ"
+    }
+  },
+  "links": {
+    "self": "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AA4gb76uB8nRCyJy7irb_BQ"
+  }
+}

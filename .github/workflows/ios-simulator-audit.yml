@@ -1,0 +1,127 @@
+# Build the OGN app and drive it on a real iPhone simulator.
+#
+# This repo is public, so GitHub's macOS runners are free and unlimited — and
+# each one already carries Xcode 26 and iOS 26 simulators. That is precisely
+# what this project could not have locally: the Mac has six gigabytes free and
+# every external drive is ExFAT, which Xcode cannot run from.
+#
+# Nothing secret lives in this file. The EXPO_PUBLIC_* values ship inside the
+# app binary by design, and are kept in repository secrets so the file stays
+# readable by anyone without handing them over in one place.
+name: iOS simulator audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [nexora/cloud-ios-lane]
+
+jobs:
+  audit:
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Which toolchain this runner has
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Write the app's public configuration
+        # Without these the app builds but cannot reach Supabase, and every
+        # screen behind the sign-in would be photographed empty — which would
+        # look like a broken app rather than a missing key.
+        run: |
+          cat > .env.local <<ENV
+          EXPO_PUBLIC_SUPABASE_URL=${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_BIBLE_PROVIDER=${{ secrets.EXPO_PUBLIC_BIBLE_PROVIDER }}
+          EXPO_PUBLIC_BIBLE_API_ENDPOINT=${{ secrets.EXPO_PUBLIC_BIBLE_API_ENDPOINT }}
+          EXPO_PUBLIC_BIBLE_API_KEY=${{ secrets.EXPO_PUBLIC_BIBLE_API_KEY }}
+          EXPO_PUBLIC_BIBLE_ID_KJV=${{ secrets.EXPO_PUBLIC_BIBLE_ID_KJV }}
+          EXPO_PUBLIC_BIBLE_ID_NLT=${{ secrets.EXPO_PUBLIC_BIBLE_ID_NLT }}
+          EXPO_PUBLIC_BIBLE_ID_AMP=${{ secrets.EXPO_PUBLIC_BIBLE_ID_AMP }}
+          EXPO_PUBLIC_GIVING_URL=${{ secrets.EXPO_PUBLIC_GIVING_URL }}
+          EXPO_PUBLIC_LIVE_STREAM_URL=${{ secrets.EXPO_PUBLIC_LIVE_STREAM_URL }}
+          ENV
+          echo "wrote $(grep -c . .env.local) settings"
+
+      - name: Generate the native iOS project
+        # ios/ is deliberately not committed, so it is regenerated from
+        # app.json every time and can never drift from it.
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install pods
+        run: |
+          cd ios
+          pod install
+
+      - name: Build for the simulator
+        # Release so the JavaScript is bundled into the app: a Debug build
+        # expects Metro to be running and would show a red error screen.
+        # No signing is needed or wanted for a simulator build.
+        run: |
+          SCHEME=$(ls ios | grep '\.xcworkspace$' | sed 's/\.xcworkspace//')
+          echo "scheme: $SCHEME"
+          xcodebuild \
+            -workspace "ios/$SCHEME.xcworkspace" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tail -40
+          echo "APP_PATH=$(find ios/build/Build/Products -name '*.app' -maxdepth 2 | head -1)" >> $GITHUB_ENV
+
+      - name: Boot an iPhone
+        run: |
+          UDID=$(xcrun simctl list devices available -j \
+            | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; \
+              print([x['udid'] for r in d for x in d[r] if x['name']=='iPhone 17 Pro'][0])")
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          echo "SIM_UDID=$UDID" >> $GITHUB_ENV
+
+      - name: Install the app
+        run: |
+          echo "installing $APP_PATH"
+          xcrun simctl install "$SIM_UDID" "$APP_PATH"
+
+      - name: Install idb, so controls are found by name and not by pixel
+        run: |
+          brew tap facebook/fb
+          brew install idb-companion
+          python3 -m pip install --break-system-packages fb-idb || python3 -m pip install fb-idb
+          idb list-targets | head -5
+
+      - name: Drive the app and photograph every screen
+        env:
+          QA_EMAIL: ${{ secrets.QA_EMAIL }}
+          QA_PASSWORD: ${{ secrets.QA_PASSWORD }}
+          APP_BUNDLE_ID: com.overcomers.globalnetwork.app
+          APP_SCHEME: ognapp
+          SHOT_DIR: qa/ios-shots
+        run: node qa/ios-simulator-drive.mjs
+
+      - name: Collect the app's own log, whatever happened
+        if: always()
+        run: |
+          mkdir -p qa/ios-shots
+          xcrun simctl spawn "$SIM_UDID" log show --last 3m --predicate 'processImagePath CONTAINS "Overcomers"' \
+            > qa/ios-shots/device.log 2>&1 || true
+          xcrun simctl io "$SIM_UDID" screenshot qa/ios-shots/99-final.png || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-screenshots
+          path: qa/ios-shots/

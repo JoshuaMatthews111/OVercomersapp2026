@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AAnLASLH6XyelPUXKX1tVBI",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:42:16.869Z",
+      "comment" : "Got this when I click stories ",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 1010000,
+      "diskBytesAvailable" : 128538755072,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/IQE/FFU/E-E/Brs/Fxg/VpbJ4YCb0Is/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=lpqpIVxl%2BEwHKtM30qNcvUxZN60%3D&p_sig=eGVcHEkNJr7LXVbAM8MI0xCt0AA",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAnLASLH6XyelPUXKX1tVBI"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAnLASLH6XyelPUXKX1tVBI"
+  }
+}

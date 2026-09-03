@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "ADZg25gI_Syxx5jfQqNkclY",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:41:35.204Z",
+      "comment" : "Uploading articles avideos music in admin panels doesn’t work I get an error after selecting file ",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 954000,
+      "diskBytesAvailable" : 128539795456,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/D50/HlQ/DSo/IC0/BSA/lkgcmmCG-KI/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=hQQxovXd1S%2Bx5%2B%2FAMq6YQOwSh%2BU%3D&p_sig=p9j1lWUrEEEzTe2l15oNg_tJVaE",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/ADZg25gI_Syxx5jfQqNkclY"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/ADZg25gI_Syxx5jfQqNkclY"
+  }
+}

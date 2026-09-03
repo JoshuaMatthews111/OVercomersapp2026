@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AMWmGZT4mNPjMrGpwNBES_g",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:31:09.847Z",
+      "comment" : "Can’t click any of the event and I should be able to click it and event should populate with flyer attending in person or watch online option and add to calendar feature for user should be here so people can save church event s",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 264000,
+      "diskBytesAvailable" : 128579420160,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/EpU/APs/Ci0/FG4/FGI/4NcFanEdEqA/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=7dt1TFMcPfNtYnuUpfY%2BkIeOMQU%3D&p_sig=A4XwAqj0tgzFwN4VYxpXTN_mgLs",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMWmGZT4mNPjMrGpwNBES_g"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AMWmGZT4mNPjMrGpwNBES_g"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "data" : {
+    "type" : "betaFeedbackScreenshotSubmissions",
+    "id" : "AAsOCNjo9DybCq1h6LY_Oo8",
+    "attributes" : {
+      "createdDate" : "2026-06-24T07:26:43.882Z",
+      "comment" : "Just opened the app I see the overlapping card with eagle when I clicked it took me to Overcomers website instead of page this is a place instead maybe video content should of been for recently uploaded message ",
+      "email" : "mr.matthews2022@gmail.com",
+      "deviceModel" : "iPhone18_2",
+      "osVersion" : "26.5.1",
+      "locale" : "en-US",
+      "timeZone" : "America/New_York",
+      "architecture" : "arm64e",
+      "connectionType" : "WIFI",
+      "pairedAppleWatch" : null,
+      "appUptimeInMilliseconds" : 20000,
+      "diskBytesAvailable" : 128726183936,
+      "diskBytesTotal" : 511355080704,
+      "batteryPercentage" : 60,
+      "screenWidthInPoints" : 440,
+      "screenHeightInPoints" : 956,
+      "appPlatform" : "IOS",
+      "devicePlatform" : "IOS",
+      "deviceFamily" : "IPHONE",
+      "buildBundleId" : "com.overcomers.globalnetwork.app",
+      "screenshots" : [ {
+        "url" : "https://tf-feedback.itunes.apple.com/eimg/AbQ/GEI/Edw/HdE/BdU/w-WrVGX9OgY/original.jpg?i_for=6781967244&AWSAccessKeyId=MKIA9C0TVRX1ZL0VZ1YK&Expires=1782777600&Signature=nBe0OxlmoccLDNktrvROJkxQtDE%3D&p_sig=OCeZsoJDfjCxgLu7YQb18nAvcGw",
+        "width" : 1320,
+        "height" : 2868,
+        "expirationDate" : "2026-06-30T00:00:00Z"
+      } ]
+    },
+    "links" : {
+      "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAsOCNjo9DybCq1h6LY_Oo8"
+    }
+  },
+  "links" : {
+    "self" : "https://api.appstoreconnect.apple.com/v1/betaFeedbackScreenshotSubmissions/AAsOCNjo9DybCq1h6LY_Oo8"
+  }
+}
