@@ -106,6 +106,20 @@ const onScreen = (n) => {
  * passage; it changes no label at all, so four working controls were reported
  * broken. Selection and layout are what actually move, so both are in here.
  */
+/** Coarse ruler for "is this still the screen I meant?" — see the iOS lane. */
+const structure = (nodes) =>
+  nodes
+    .filter((n) => n.box && (n.clickable || n.text))
+    .map((n) => (n.cls ?? "").split(".").pop() + ":" + labelOf(n).slice(0, 40))
+    .join("~");
+const sameScreen = (a, b) => {
+  if (a === b) return true;
+  const A = new Set(a.split("~")), B = new Set(b.split("~"));
+  let shared = 0;
+  for (const k of A) if (B.has(k)) shared++;
+  return shared / Math.max(A.size, B.size, 1) >= 0.85;
+};
+
 const fingerprint = (nodes) =>
   nodes
     .filter((n) => n.box)
@@ -471,7 +485,7 @@ for (const route of ROUTES) {
 
   // Six per screen keeps a long list from eating the whole run.
   // Put the screen back before every press, and prove it. See the iOS lane.
-  const baseline = fingerprint(nodes);
+  const baseline = structure(nodes);
   const restore = async () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 1) await sh(["input", "keyevent", "4"]).catch(() => undefined);
@@ -482,13 +496,13 @@ for (const route of ROUTES) {
       }
       await openRoute();
       await sleep(2000);
-      if (fingerprint(await tree()) === baseline) return true;
+      if (sameScreen(structure(await tree()), baseline)) return true;
     }
     return false;
   };
 
   for (const control of pressable.slice(0, 6)) {
-    if (fingerprint(await tree()) !== baseline && !(await restore())) {
+    if (!sameScreen(structure(await tree()), baseline) && !(await restore())) {
       report.notJudged.push({ route, why: "the screen could not be put back to how it was, so the remaining controls here were not judged" });
       note("not judged", route + " — could not restore the screen; stopping here");
       break;

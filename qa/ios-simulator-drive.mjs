@@ -285,6 +285,30 @@ const labelOf = (el) => ((el.AXLabel ?? "") + " " + (el.AXValue ?? "")).trim();
  * check still runs first — a screen that will not sit still is not judged at
  * all rather than judged with a more sensitive ruler.
  */
+/**
+ * Two questions, two rulers.
+ *
+ * "Did this press change anything?" needs the fine ruler: selection and
+ * layout, which is what the fingerprint below carries. "Is this still the
+ * screen I meant to test?" needs a coarse one — a list that lazy-loads a row
+ * or a spinner that settles moves frames by a few points, and with the fine
+ * ruler every route read as "could not be restored" and was skipped whole.
+ * The structure — what controls exist, in what order — is the identity of a
+ * screen; where exactly they sit is not.
+ */
+const structure = (nodes) =>
+  nodes
+    .filter((n) => n.frame && (isControl(n) || n.role === "AXStaticText"))
+    .map((n) => (n.role ?? "") + ":" + labelOf(n).slice(0, 40))
+    .join("~");
+const sameScreen = (a, b) => {
+  if (a === b) return true;
+  const A = new Set(a.split("~")), B = new Set(b.split("~"));
+  let shared = 0;
+  for (const k of A) if (B.has(k)) shared++;
+  return shared / Math.max(A.size, B.size, 1) >= 0.85;
+};
+
 const fingerprint = (nodes) =>
   nodes
     .filter((n) => n.frame)
@@ -426,18 +450,32 @@ async function signIn(tag) {
    * back afterwards catches the rest. A password box cannot be read back, so
    * it is judged by length only.
    */
-  const typeInto = async (field, text, label, secret) => {
+  const typeInto = async (fieldIn, text, label, secret) => {
+    let field = fieldIn;
     if (!field) return { ok: false, why: "no " + label + " box on this screen" };
     for (let attempt = 0; attempt < 2; attempt++) {
       await tapFrame(field.frame);
       await sleep(500);
       if (attempt > 0) {
-        for (let i = 0; i < text.length + 8; i++) await idbRun(["ui", "key", "42"]).catch(() => undefined);
-        await sleep(400);
+        // Backspacing did not reliably empty the box, so a retry starts from
+        // a fresh form instead: relaunch, walk the door again, find the box.
+        await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
+        await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
+        await sleep(7000);
+        await tapLabelled(/get started/i);
+        await sleep(2500);
+        const again = (await tree()).filter(isTextField);
+        const fresh = again.find((f) => Math.abs(f.frame.y - field.frame.y) < 40) ?? again[0];
+        if (!fresh) return { ok: false, why: "no " + label + " box after relaunching" };
+        field = fresh;
+        await tapFrame(field.frame);
+        await sleep(500);
       }
-      for (let i = 0; i < text.length; i += 5) {
-        await idbRun(["ui", "text", text.slice(i, i + 5)]);
-        await sleep(120);
+      // Even five at a time idb dropped letters. One at a time is slow —
+      // about five seconds for an email — and has not dropped one yet.
+      for (const ch of text) {
+        await idbRun(["ui", "text", ch]);
+        await sleep(90);
       }
       await sleep(600);
       const now = (await tree()).find((n) => isTextField(n) && Math.abs(n.frame.y - field.frame.y) < 4);
@@ -578,7 +616,7 @@ for (const route of ROUTES) {
    * route was first opened, backed out of if it differs, and relaunched if it
    * still differs. A press is only judged on the screen it was meant for.
    */
-  const baseline = fingerprint(nodes);
+  const baseline = structure(nodes);
   const restore = async () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 1) await tapLabelled(/^(back|go back|close|cancel|done)\b/i);
@@ -589,13 +627,13 @@ for (const route of ROUTES) {
       }
       await openRoute();
       await sleep(2000);
-      if (fingerprint(await tree()) === baseline) return true;
+      if (sameScreen(structure(await tree()), baseline)) return true;
     }
     return false;
   };
 
   for (const control of pressable.slice(0, 6)) {
-    if (fingerprint(await tree()) !== baseline && !(await restore())) {
+    if (!sameScreen(structure(await tree()), baseline) && !(await restore())) {
       report.notJudged.push({ route, why: "the screen could not be put back to how it was, so the remaining controls here were not judged" });
       note("not judged", route + " — could not restore the screen; stopping here");
       break;
