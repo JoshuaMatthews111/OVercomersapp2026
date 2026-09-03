@@ -13,7 +13,7 @@ name: iOS simulator audit
 on:
   workflow_dispatch:
   push:
-    branches: [nexora/cloud-ios-lane]
+    branches: [nexora/cloud-device-lanes]
 
 jobs:
   audit:

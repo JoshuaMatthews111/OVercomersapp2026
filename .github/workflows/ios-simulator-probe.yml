@@ -12,7 +12,7 @@ on:
   # while the lane is being proven.
   workflow_dispatch:
   push:
-    branches: [nexora/cloud-ios-lane]
+    branches: [nexora/cloud-device-lanes]
 
 jobs:
   probe:

@@ -1,0 +1,147 @@
+/**
+ * Turn what happened on a real phone into things Nexora can judge.
+ *
+ * The device lanes are Nexora's crawler, sent somewhere Nexora itself cannot
+ * go: a Mac with Xcode, and a Linux box with an Android emulator. But a
+ * crawler that invents its own report format is a second product with a second
+ * set of opinions, and two tools that disagree about what "ready" means are
+ * worse than one tool.
+ *
+ * So the crawler decides nothing. It records what it saw in Nexora's own
+ * shape — an Observation carries a rule id, where it happened, what was
+ * expected, what actually happened, and the steps to see it again — and hands
+ * that back. Nexora applies the severity, the category, the knowledge packs,
+ * the score, the memory of previous runs, and the dismissals. The division is
+ * the same one Nexora already keeps with a coding agent: the crawler decides
+ * what it saw, Nexora decides what it means.
+ *
+ * Coverage travels with it, because a run that pressed nothing must never read
+ * as a clean one.
+ */
+
+/**
+ * @param {object} drive The report a device lane produced.
+ * @param {"ios"|"android"} platform
+ * @returns {{observations: Array<object>, coverage: object, notAssessed: string[]}}
+ */
+export function toNexora(drive, platform) {
+  const observations = [];
+  const where = platform === "ios" ? "iPhone" : "Android phone";
+
+  const repro = (step, action, expected, observed) => [{ step, action, expected, observed }];
+
+  // ── Controls that did nothing ────────────────────────────────────────────
+  for (const d of drive.deadControls ?? []) {
+    observations.push({
+      ruleId: "device.dead-control",
+      route: d.route,
+      controlText: d.control,
+      title: `"${d.control}" does nothing on ${where}`,
+      expected: "Pressing a control changes something a person can see.",
+      actual:
+        `${d.evidence} A control that looks pressable and answers with nothing is read as the app being broken, ` +
+        "and it is the single most reported kind of defect.",
+      reproSteps: repro(
+        1,
+        `Open ${d.route} on ${where} and press "${d.control}"`,
+        "Something on screen changes",
+        "the screen read identically before and after"
+      ),
+      evidence: []
+    });
+  }
+
+  // ── Screens that came up with nothing on them ────────────────────────────
+  for (const route of drive.blankScreens ?? []) {
+    observations.push({
+      ruleId: "device.blank-screen",
+      route,
+      title: `${route} comes up empty on ${where}`,
+      expected: "Every screen shows either its content, or a message saying why it cannot.",
+      actual:
+        "Nothing readable was on this screen. A person cannot tell an empty screen from a broken one, " +
+        "and neither can a store reviewer.",
+      reproSteps: repro(1, `Open ${route} on ${where}`, "Content, or an explanation", "nothing readable"),
+      evidence: []
+    });
+  }
+
+  // ── Getting in ───────────────────────────────────────────────────────────
+  if (drive.permissions?.hasTestIdentity && drive.canPressControls !== false && drive.signedIn === false) {
+    observations.push({
+      ruleId: "device.sign-in-failed",
+      route: "/",
+      title: `The stored account could not sign in on ${where}`,
+      expected: "The stored account signs in, so everything behind the sign-in can be checked.",
+      actual:
+        "The sign-in did not complete, so every screen behind it went unchecked. " +
+        "Nothing in this run says anything about the signed-in app.",
+      reproSteps: repro(1, `Sign in on ${where} with the stored account`, "the home screen", "still signed out"),
+      evidence: []
+    });
+  }
+
+  // ── Leaving, and getting back in ─────────────────────────────────────────
+  const flow = drive.sessionFlow;
+  if (flow?.attempted) {
+    if (flow.signedOut === false) {
+      observations.push({
+        ruleId: "device.signout-ineffective",
+        route: "/profile",
+        controlText: "Sign Out",
+        title: `Pressing sign out did not end the session on ${where}`,
+        expected: "Pressing sign out ends the session.",
+        actual:
+          "The app still showed signed-in screens afterwards. On a shared or lost phone, " +
+          "somebody who was handed it stays signed in as the previous person.",
+        reproSteps: repro(1, `Press sign out on ${where}`, "signed out", "still signed in"),
+        evidence: []
+      });
+    }
+    if (flow.signedOut === true && flow.signedBackIn === false) {
+      observations.push({
+        ruleId: "device.signout-no-return",
+        route: "/",
+        controlText: "Sign Out",
+        title: `The app signs out and cannot be signed back into on ${where}`,
+        expected: "Signing out and signing back in returns the person to their account.",
+        actual:
+          "The session ended and the same stored account could not get back in. " +
+          "This is the worst state an app can be in — a person who signs out has lost the app — " +
+          "and no tester that refuses to press sign out will ever find it.",
+        reproSteps: [
+          { step: 1, action: `Sign in on ${where}`, expected: "the home screen", observed: "signed in" },
+          { step: 2, action: "Press sign out", expected: "signed out", observed: "signed out" },
+          { step: 3, action: "Sign in again with the same account", expected: "the home screen", observed: "could not get back in" }
+        ],
+        evidence: []
+      });
+    }
+  }
+
+  // ── What this run did not look at ────────────────────────────────────────
+  const notAssessed = [...(drive.notAssessed ?? [])];
+  for (const n of drive.notJudged ?? []) {
+    notAssessed.push(`Controls on ${n.route} — ${n.why}`);
+  }
+  for (const n of drive.notPressed ?? []) {
+    notAssessed.push(`"${n.control}" on ${n.route} — ${n.why}`);
+  }
+
+  // Coverage is measured, never assumed. A screen counts only if it was opened
+  // and something was readable on it; a control counts only if it was pressed.
+  const screens = (drive.screens ?? []).filter((s) => s.route && !String(s.route).startsWith("("));
+  const coverage = {
+    routesChecked: screens.length,
+    controlsTested: (drive.liveControls ?? 0) + (drive.deadControls?.length ?? 0),
+    desktopChecked: false,
+    controlsSkipped: (drive.notPressed?.length ?? 0) + (drive.notJudged?.length ?? 0),
+    behindSignIn: drive.permissions?.hasTestIdentity
+      ? drive.signedIn
+        ? "reached"
+        : "not-reached"
+      : "not-attempted"
+  };
+
+  return { observations, coverage, notAssessed, platform, screens: screens.length };
+}

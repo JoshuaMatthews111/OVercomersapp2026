@@ -24,6 +24,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { mayPress } from "./control-policy.mjs";
+import { toNexora } from "./nexora-observations.mjs";
 
 const run = promisify(execFile);
 const UDID = process.env.SIM_UDID;
@@ -289,6 +290,13 @@ if (canTap && report.signedIn) {
 
 report.finishedAt = new Date().toISOString();
 writeFileSync(join(OUT, "ios-drive-report.json"), JSON.stringify(report, null, 2));
+
+// Hand the run back in Nexora's own shape. The crawler decides what it saw;
+// Nexora decides what it means — severity, score, memory and dismissals all
+// stay on its side, so a phone finding and a web finding mean the same thing.
+const forNexora = toNexora(report, "ios");
+writeFileSync(join(OUT, "nexora-observations.json"), JSON.stringify(forNexora, null, 2));
+console.log("observations for Nexora: " + forNexora.observations.length + ", screens covered: " + forNexora.coverage.routesChecked + ", controls pressed: " + forNexora.coverage.controlsTested);
 
 console.log("\n=== iOS simulator run ===");
 console.log("controls could be pressed: " + report.canPressControls);
