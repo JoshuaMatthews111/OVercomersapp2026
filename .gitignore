@@ -24,3 +24,6 @@ eas-build-local/
 qa/screenshots/
 google-play-service-account.json
 *-service-account.json
+
+# Nexora audit workspace — evidence and reports, not source
+.nexora/

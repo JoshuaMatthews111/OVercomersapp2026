@@ -519,7 +519,7 @@ const styles = StyleSheet.create({
   noticeDark: { backgroundColor: 'rgba(212,175,55,0.1)' },
   noticeText: { flex: 1, color: colors.royalBlue, lineHeight: 19 },
   noticeTextDark: { color: 'rgba(255,255,255,0.78)' },
-  copyright: { color: colors.muted, fontSize: 11, marginTop: 14 },
+  copyright: { color: colors.muted, fontSize: 12, marginTop: 14 },
   copyrightDark: { color: 'rgba(255,255,255,0.54)' },
   chapterNav: { marginTop: 16, minHeight: 64, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, flexDirection: 'row', alignItems: 'center', overflow: 'hidden', ...shadows.soft },
   chapterNavDark: { backgroundColor: 'rgba(255,255,255,0.04)', borderColor: 'rgba(212,175,55,0.24)' },

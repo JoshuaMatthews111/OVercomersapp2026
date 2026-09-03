@@ -277,7 +277,7 @@ export default function ProfileScreen() {
                 </View>
                 <View style={styles.profileCopy}>
                   <Text style={[styles.name, dark && styles.nameDark]}>{session.user.user_metadata.display_name || access.displayName || 'John Overcomer'}</Text>
-                  <Text style={[styles.email, dark && styles.emailDark]}>{session.user.email}</Text>
+                  <Text style={[styles.email, dark && styles.emailDark]} numberOfLines={1} ellipsizeMode="middle">{session.user.email}</Text>
                   <View style={styles.rolePill}>
                     <Ionicons name={access.level === 'member' ? 'person' : 'shield-checkmark'} size={14} color={colors.gold} />
                     <Text style={styles.roleText}>{roleLabel(access.level)}</Text>
@@ -523,9 +523,9 @@ const styles = StyleSheet.create({
   brandHeroDark: { backgroundColor: '#020817' },
   brandGlobe: { position: 'absolute', left: '-9%', top: 0, width: '118%', opacity: 0.94 },
   brandGlobeDark: { opacity: 0.82 },
-  brandSeal: { width: 116, height: 92, zIndex: 2 },
+  brandSeal: { width: 92, height: 74, zIndex: 2 },
   brandCopy: { flex: 1, zIndex: 2, marginLeft: 8 },
-  brandName: { color: colors.royalBlue, fontSize: 24, lineHeight: 27, fontWeight: '900', textTransform: 'uppercase' },
+  brandName: { color: colors.royalBlue, fontSize: 21, lineHeight: 24, fontWeight: '900', textTransform: 'uppercase' },
   brandNameDark: { color: colors.white },
   brandMotto: { color: colors.deepGold, fontSize: 12, fontWeight: '900', letterSpacing: 0, marginTop: 5, textTransform: 'uppercase' },
   brandMottoDark: { color: colors.gold },
@@ -539,7 +539,7 @@ const styles = StyleSheet.create({
   profileCopy: { flex: 1 },
   name: { color: colors.royalBlue, fontWeight: '900', fontSize: 23 },
   nameDark: { color: colors.white },
-  email: { color: colors.muted, marginTop: 5, fontSize: 15 },
+  email: { color: colors.muted, marginTop: 5, fontSize: 14 },
   emailDark: { color: 'rgba(255,255,255,0.68)' },
   rolePill: { marginTop: 9, alignSelf: 'flex-start', borderRadius: 999, borderWidth: 1, borderColor: colors.gold, paddingHorizontal: 12, paddingVertical: 5, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.royalBlue },
   roleText: { color: colors.gold, fontWeight: '900' },

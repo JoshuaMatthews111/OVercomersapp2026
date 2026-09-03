@@ -27,8 +27,10 @@ const tabs: { key: MediaTab; label: string; icon: keyof typeof Ionicons.glyphMap
 
 const art = {
   seal: require('../../assets/images/ogn-logo-transparent.png'),
-  heroDark: require('../../assets/images/ogn-layers/media-feature-card-dark.png'),
-  heroLight: require('../../assets/images/ref/media_hero_light.jpg'),
+  // Globe art only. The earlier full banners carried other ministries' names
+  // and faces baked into the picture; the words now come from OGN's own data.
+  heroGlobeDark: require('../../assets/images/ogn-layers/media-hero-globe-dark.png'),
+  heroGlobeLight: require('../../assets/images/ogn-layers/media-hero-globe-light.png'),
 };
 
 const fallbackSeries = [
@@ -61,6 +63,11 @@ export default function MediaScreen() {
 
   const featured = useMemo(() => sermons.find((sermon) => sermon.isFeatured) || sermons[0], [sermons]);
   const featuredMedia = useMemo(() => mediaItems.find((item) => item.isFeatured) || mediaItems[0], [mediaItems]);
+  // Only a deliberately featured item may headline the Media screen. Falling
+  // back to "whatever was uploaded last" put an internal smoke-test upload on
+  // the banner for every member.
+  const heroMedia = useMemo(() => mediaItems.find((item) => item.isFeatured) ?? null, [mediaItems]);
+  const heroSermon = useMemo(() => sermons.find((sermon) => sermon.isFeatured) ?? null, [sermons]);
   const visibleSermons = sermons.length ? sermons.slice(0, 4) : [];
   const articleItems = mediaItems.filter((item) => item.mediaType === 'article');
   const videoItems = mediaItems.filter((item) => item.mediaType === 'video' || item.mediaType === 'live');
@@ -69,7 +76,7 @@ export default function MediaScreen() {
   const seriesCards = series.length
     ? series.slice(0, 6).map((item, index) => ({
       title: item.title,
-      count: `${item.messageCount} Sermons`,
+      count: item.messageCount === 1 ? '1 Sermon' : `${item.messageCount} Sermons`,
       colors: fallbackSeries[index % fallbackSeries.length].colors as [string, string]
     }))
     : fallbackSeries.map((item) => ({ title: item.title, count: item.count, colors: item.colors as [string, string] }));
@@ -153,7 +160,7 @@ export default function MediaScreen() {
             <Image source={art.seal} style={styles.seal} resizeMode="contain" />
             <View style={styles.headerCopy}>
               <Text numberOfLines={1} adjustsFontSizeToFit style={[styles.title, dark && styles.titleDark]}>Media</Text>
-              <Text style={[styles.subtitle, dark && styles.subtitleDark]}>Sermons. Articles. Videos. Music.</Text>
+              <Text style={[styles.subtitle, dark && styles.subtitleDark]} numberOfLines={2}>Sermons. Articles. Videos. Music.</Text>
             </View>
             <View style={styles.headerActions}>
               <Pressable onPress={openMediaSearch} style={[styles.iconButton, dark && styles.iconButtonDark]}>
@@ -178,12 +185,31 @@ export default function MediaScreen() {
             ))}
           </ScrollView>
 
-          <Pressable onPress={playFeaturedMedia} style={styles.heroPressable}>
-            <ImageBackground source={dark ? art.heroDark : art.heroLight} resizeMode="stretch" imageStyle={styles.heroImage} style={[styles.heroCard, !dark && styles.heroCardLight, dark && styles.heroCardDark]}>
-              <View style={styles.heroOverlayButton}>
-                <Ionicons name="play" size={26} color={colors.gold} />
+          <Pressable onPress={playFeaturedMedia} style={styles.heroPressable} accessibilityRole="button" accessibilityLabel="Play the featured message">
+            <View style={[styles.heroCard, dark ? styles.heroCardDark : styles.heroCardLight]}>
+              <Image source={dark ? art.heroGlobeDark : art.heroGlobeLight} style={styles.heroGlobe} resizeMode="cover" />
+              <LinearGradient
+                colors={dark ? ['#061334', 'rgba(6,19,52,0.92)', 'rgba(6,19,52,0)'] : ['#FFFFFF', 'rgba(255,255,255,0.94)', 'rgba(255,255,255,0)']}
+                start={{ x: 0, y: 0.5 }}
+                end={{ x: 1, y: 0.5 }}
+                style={styles.heroFade}
+              />
+              <View style={styles.heroCopy}>
+                <View style={styles.heroOverlineRow}>
+                  <Ionicons name="radio-outline" size={14} color={dark ? colors.gold : colors.deepGold} />
+                  <Text style={[styles.heroOverline, !dark && styles.heroOverlineLight]}>GLOBAL BROADCAST</Text>
+                </View>
+                <Text style={[styles.heroTitle, !dark && styles.heroTitleLight]} numberOfLines={2}>
+                  {heroMedia?.title || heroSermon?.title || 'Faith That Overcomes'}
+                </Text>
+                <Text style={[styles.heroSpeaker, !dark && styles.heroSpeakerLight]} numberOfLines={1}>
+                  {heroMedia?.speaker || heroSermon?.speaker || 'Overcomers Global Network'}
+                </Text>
               </View>
-            </ImageBackground>
+              <View style={[styles.heroPlay, !dark && styles.heroPlayLight]}>
+                <Ionicons name="play" size={24} color={dark ? colors.deepGold : colors.royalBlue} />
+              </View>
+            </View>
           </Pressable>
 
           {activeTab === 'sermons' ? (
@@ -453,16 +479,16 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   scroll: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 112 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 },
-  seal: { width: 84, height: 76 },
-  headerCopy: { flex: 1, minWidth: 116 },
-  title: { color: colors.royalBlue, fontSize: 34, lineHeight: 38, fontWeight: '900' },
+  seal: { width: 64, height: 58 },
+  headerCopy: { flex: 1, minWidth: 0 },
+  title: { color: colors.royalBlue, fontSize: 30, lineHeight: 34, fontWeight: '900' },
   titleDark: { color: colors.white },
-  subtitle: { color: colors.deepGold, fontWeight: '700', marginTop: 2 },
+  subtitle: { color: colors.deepGold, fontWeight: '700', marginTop: 2, fontSize: 12, lineHeight: 15 },
   subtitleDark: { color: colors.gold },
   headerActions: { flexDirection: 'row', gap: 6 },
-  iconButton: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
+  iconButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
   iconButtonDark: { backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(212,175,55,0.22)' },
-  profileButton: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(212,175,55,0.35)' },
+  profileButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(212,175,55,0.35)' },
   profileButtonDark: { backgroundColor: 'rgba(212,175,55,0.12)', borderColor: colors.gold },
   notificationDot: { position: 'absolute', top: 5, right: 6, width: 9, height: 9, borderRadius: 5, backgroundColor: colors.gold },
   tabRow: { gap: 8, paddingBottom: 16 },
@@ -475,14 +501,24 @@ const styles = StyleSheet.create({
   tabTextActive: { color: colors.white },
   tabTextActiveDark: { color: colors.gold },
   heroPressable: { marginBottom: 12 },
-  heroCard: { width: '100%', aspectRatio: 871 / 387, borderRadius: 18, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(212,175,55,0.42)', backgroundColor: colors.white, ...shadows.lift },
-  heroCardLight: { aspectRatio: 823 / 363 },
-  heroCardDark: { backgroundColor: '#020817' },
-  heroImage: { borderRadius: 18 },
-  heroOverlayButton: { width: 70, height: 70, borderRadius: 35, backgroundColor: 'rgba(2,8,23,0.66)', borderWidth: 2, borderColor: colors.gold, alignItems: 'center', justifyContent: 'center', opacity: 0.01 },
+  heroCard: { width: '100%', minHeight: 156, borderRadius: 18, overflow: 'hidden', flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: 'rgba(212,175,55,0.42)', ...shadows.lift },
+  heroCardLight: { backgroundColor: colors.white },
+  heroCardDark: { backgroundColor: '#061334' },
+  heroGlobe: { position: 'absolute', right: -8, top: 0, bottom: 0, width: '62%', height: '100%' },
+  heroFade: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '78%' },
+  heroCopy: { flex: 1, paddingVertical: 18, paddingLeft: 18, paddingRight: 4, zIndex: 2 },
+  heroOverlineRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  heroOverline: { color: colors.gold, fontWeight: '800', fontSize: 12, letterSpacing: 1.2 },
+  heroOverlineLight: { color: colors.deepGold },
+  heroTitle: { color: colors.white, fontSize: 21, lineHeight: 25, fontWeight: '900', marginTop: 8 },
+  heroTitleLight: { color: colors.royalBlue },
+  heroSpeaker: { color: colors.gold, fontWeight: '700', fontSize: 13, marginTop: 8 },
+  heroSpeakerLight: { color: colors.deepGold },
+  heroPlay: { width: 58, height: 58, borderRadius: 29, marginRight: 16, backgroundColor: colors.white, borderWidth: 4, borderColor: 'rgba(212,175,55,0.6)', alignItems: 'center', justifyContent: 'center', zIndex: 2 },
+  heroPlayLight: { backgroundColor: colors.gold, borderColor: 'rgba(212,175,55,0.35)' },
   mediaAction: { flex: 1, minHeight: 56, borderRadius: 13, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', gap: 4, ...shadows.soft },
   mediaActionDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.2)' },
-  mediaActionText: { color: colors.royalBlue, fontWeight: '800', fontSize: 11, textAlign: 'center' },
+  mediaActionText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12, textAlign: 'center' },
   mediaActionTextDark: { color: colors.gold },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 18, marginBottom: 10 },
   sectionTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 21 },

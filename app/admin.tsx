@@ -21,7 +21,7 @@ import {
 } from '../lib/adminManagementService';
 import { AdminDashboard, getAdminDashboard } from '../lib/adminService';
 import { useAccessProfile } from '../lib/accessControl';
-import { createAdminMediaItem, createAdminStory } from '../lib/contentService';
+import { createAdminEvent, createAdminMediaItem, createAdminStory } from '../lib/contentService';
 import { friendlyError } from '../lib/errorMessages';
 import { colors, shadows } from '../lib/theme';
 import { useThemePreference } from '../lib/themePreference';
@@ -36,7 +36,7 @@ type AdminAction = {
 };
 
 const actions: AdminAction[] = [
-  { title: 'Stories', subtitle: 'Regions, testimonies, alerts', icon: 'images-outline', route: '/(tabs)/index' },
+  { title: 'Stories', subtitle: 'Regions, testimonies, alerts', icon: 'images-outline', route: '/(tabs)' },
   { title: 'Media Uploads', subtitle: 'Sermons, articles, video, music', icon: 'cloud-upload-outline', route: '/(tabs)/messages' },
   { title: 'Sermon Files', subtitle: 'Audio, video, thumbnails', icon: 'folder-open-outline', route: '/(tabs)/messages' },
   { title: 'Roles', subtitle: 'Members, leaders, admins', icon: 'shield-checkmark-outline', route: '/(tabs)/profile' },
@@ -57,16 +57,29 @@ export default function AdminScreen() {
   const [workbench, setWorkbench] = useState<AdminWorkbench | null>(null);
   const [savingStory, setSavingStory] = useState(false);
   const [savingMedia, setSavingMedia] = useState(false);
+  const [savingEvent, setSavingEvent] = useState(false);
   const [working, setWorking] = useState(false);
   const [uploadStatus, setUploadStatus] = useState('');
   const [selectedMediaFileName, setSelectedMediaFileName] = useState('');
   const [selectedStoryImageName, setSelectedStoryImageName] = useState('');
+  const [selectedEventFlyerName, setSelectedEventFlyerName] = useState('');
   const [selectedCoverName, setSelectedCoverName] = useState('');
+  const [showStoryAdvanced, setShowStoryAdvanced] = useState(false);
+  const [showMediaAdvanced, setShowMediaAdvanced] = useState(false);
+  const [showEventAdvanced, setShowEventAdvanced] = useState(false);
   const [roleForm, setRoleForm] = useState({ userId: '', role: 'member' as AppRole });
   const [prayerAssignee, setPrayerAssignee] = useState('');
   const [pushForm, setPushForm] = useState({ title: '', body: '', audience: 'announcements' as PushAudience });
   const [mediaEdit, setMediaEdit] = useState<Record<string, { title: string; speaker: string }>>({});
   const [storyForm, setStoryForm] = useState({ title: '', category: '', region: '', body: '', imageUrl: '', actionUrl: '' });
+  const [eventForm, setEventForm] = useState({
+    title: '',
+    startsAt: '',
+    location: '',
+    description: '',
+    imageUrl: '',
+    registrationUrl: '',
+  });
   const [mediaForm, setMediaForm] = useState({
     mediaType: 'sermon' as MediaKind,
     title: '',
@@ -180,8 +193,34 @@ export default function AdminScreen() {
     }
   }
 
+  async function pickEventFlyer() {
+    setSavingEvent(true);
+    setUploadStatus('Selecting event flyer...');
+    try {
+      const upload = await pickImageUpload({
+        bucketId: 'app-assets',
+        purpose: 'media_thumbnail',
+        pathPrefix: 'event-flyers',
+        relatedTable: 'events',
+        onSelected: setSelectedEventFlyerName,
+      });
+      if (upload) {
+        setEventForm((current) => ({ ...current, imageUrl: upload.publicUrl }));
+        setUploadStatus(`Event flyer ready: ${upload.fileName}`);
+      } else {
+        setUploadStatus('');
+      }
+    } catch (err) {
+      setUploadStatus('');
+      Alert.alert('Flyer upload not completed', friendlyError(err, 'We could not upload this event flyer right now.'));
+    } finally {
+      setSavingEvent(false);
+    }
+  }
+
   async function publishStory() {
     if (!storyForm.title.trim()) return Alert.alert('Story title needed', 'Add a title before publishing.');
+    if (!storyForm.imageUrl) return Alert.alert('Story media needed', 'Upload an image or video before publishing this story.');
     setSavingStory(true);
     try {
       await createAdminStory({
@@ -239,6 +278,32 @@ export default function AdminScreen() {
       Alert.alert('Media not published', friendlyError(err, 'Check admin permissions and try again.'));
     } finally {
       setSavingMedia(false);
+    }
+  }
+
+  async function publishEvent() {
+    if (!eventForm.title.trim()) return Alert.alert('Event title needed', 'Add a title before publishing.');
+    if (!eventForm.startsAt.trim()) return Alert.alert('Date and time needed', 'Add a date/time like 2026-07-01 7:00 PM or an ISO date.');
+    const parsed = new Date(eventForm.startsAt.trim());
+    if (Number.isNaN(parsed.getTime())) return Alert.alert('Date format not recognized', 'Use a date/time like 2026-07-01 7:00 PM.');
+    setSavingEvent(true);
+    try {
+      await createAdminEvent({
+        title: eventForm.title.trim(),
+        startsAt: parsed.toISOString(),
+        description: eventForm.description.trim(),
+        location: eventForm.location.trim(),
+        imageUrl: eventForm.imageUrl,
+        registrationUrl: eventForm.registrationUrl.trim(),
+      });
+      setEventForm({ title: '', startsAt: '', location: '', description: '', imageUrl: '', registrationUrl: '' });
+      setSelectedEventFlyerName('');
+      await refreshAdminData();
+      Alert.alert('Event published', 'The event is now available on the Home tab.');
+    } catch (err) {
+      Alert.alert('Event not published', friendlyError(err, 'Check admin permissions and try again.'));
+    } finally {
+      setSavingEvent(false);
     }
   }
 
@@ -338,6 +403,22 @@ export default function AdminScreen() {
             </View>
           </LinearGradient>
 
+          <View style={styles.commandGrid}>
+            {[
+              { label: 'Post Story', icon: 'images-outline' as const },
+              { label: 'Upload Sermon', icon: 'mic-outline' as const },
+              { label: 'Upload Music', icon: 'musical-notes-outline' as const },
+              { label: 'Create Event', icon: 'calendar-outline' as const },
+            ].map((item) => (
+              <View key={item.label} style={[styles.commandCard, dark && styles.commandCardDark]}>
+                <View style={[styles.commandIcon, dark && styles.commandIconDark]}>
+                  <Ionicons name={item.icon} size={22} color={dark ? colors.gold : colors.royalBlue} />
+                </View>
+                <Text style={[styles.commandText, dark && styles.commandTextDark]}>{item.label}</Text>
+              </View>
+            ))}
+          </View>
+
           <View style={[styles.publishCard, dark && styles.publishCardDark]}>
             <View style={styles.publishHeader}>
               <Ionicons name="images-outline" size={22} color={colors.gold} />
@@ -346,16 +427,24 @@ export default function AdminScreen() {
             {storyForm.imageUrl ? <Image source={{ uri: storyForm.imageUrl }} style={styles.previewImage} resizeMode="cover" /> : null}
             {selectedStoryImageName ? <Text style={[styles.uploadedText, dark && styles.uploadedTextDark]}>Selected image: {selectedStoryImageName}</Text> : null}
             <TextInput value={storyForm.title} onChangeText={(title) => setStoryForm((current) => ({ ...current, title }))} placeholder="Story title" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
-            <View style={styles.twoColumn}>
-              <TextInput value={storyForm.category} onChangeText={(category) => setStoryForm((current) => ({ ...current, category }))} placeholder="Category" placeholderTextColor={colors.muted} style={[styles.input, styles.halfInput, dark && styles.inputDark]} />
-              <TextInput value={storyForm.region} onChangeText={(region) => setStoryForm((current) => ({ ...current, region }))} placeholder="Region" placeholderTextColor={colors.muted} style={[styles.input, styles.halfInput, dark && styles.inputDark]} />
-            </View>
-            <TextInput value={storyForm.body} onChangeText={(body) => setStoryForm((current) => ({ ...current, body }))} placeholder="Story body" placeholderTextColor={colors.muted} multiline style={[styles.input, styles.textArea, dark && styles.inputDark]} />
-            <TextInput value={storyForm.actionUrl} onChangeText={(actionUrl) => setStoryForm((current) => ({ ...current, actionUrl }))} placeholder="Optional link URL" placeholderTextColor={colors.muted} autoCapitalize="none" style={[styles.input, dark && styles.inputDark]} />
+            <Pressable onPress={() => setShowStoryAdvanced((current) => !current)} style={[styles.moreOptions, dark && styles.moreOptionsDark]}>
+              <Text style={[styles.moreOptionsText, dark && styles.moreOptionsTextDark]}>{showStoryAdvanced ? 'Hide options' : 'More options'}</Text>
+              <Ionicons name={showStoryAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={dark ? colors.gold : colors.royalBlue} />
+            </Pressable>
+            {showStoryAdvanced ? (
+              <>
+                <View style={styles.twoColumn}>
+                  <TextInput value={storyForm.category} onChangeText={(category) => setStoryForm((current) => ({ ...current, category }))} placeholder="Category" placeholderTextColor={colors.muted} style={[styles.input, styles.halfInput, dark && styles.inputDark]} />
+                  <TextInput value={storyForm.region} onChangeText={(region) => setStoryForm((current) => ({ ...current, region }))} placeholder="Region" placeholderTextColor={colors.muted} style={[styles.input, styles.halfInput, dark && styles.inputDark]} />
+                </View>
+                <TextInput value={storyForm.body} onChangeText={(body) => setStoryForm((current) => ({ ...current, body }))} placeholder="Story body" placeholderTextColor={colors.muted} multiline style={[styles.input, styles.textArea, dark && styles.inputDark]} />
+                <TextInput value={storyForm.actionUrl} onChangeText={(actionUrl) => setStoryForm((current) => ({ ...current, actionUrl }))} placeholder="Optional link URL" placeholderTextColor={colors.muted} autoCapitalize="none" style={[styles.input, dark && styles.inputDark]} />
+              </>
+            ) : null}
             <View style={styles.buttonRow}>
               <Pressable onPress={pickStoryImage} disabled={savingStory} style={[styles.secondaryButton, dark && styles.secondaryButtonDark]}>
                 <Ionicons name="cloud-upload-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-                <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>Upload Image</Text>
+                <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>Upload Media</Text>
               </Pressable>
               <Pressable onPress={publishStory} disabled={savingStory} style={styles.goldButton}>
                 <Text style={styles.goldButtonText}>{savingStory ? 'Publishing...' : 'Publish'}</Text>
@@ -378,23 +467,31 @@ export default function AdminScreen() {
             {mediaForm.thumbnailUrl ? <Image source={{ uri: mediaForm.thumbnailUrl }} style={styles.previewImage} resizeMode="cover" /> : null}
             {selectedCoverName ? <Text style={[styles.uploadedText, dark && styles.uploadedTextDark]}>Selected cover: {selectedCoverName}</Text> : null}
             <TextInput value={mediaForm.title} onChangeText={(title) => setMediaForm((current) => ({ ...current, title }))} placeholder="Title" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
-            <TextInput value={mediaForm.speaker} onChangeText={(speaker) => setMediaForm((current) => ({ ...current, speaker }))} placeholder="Speaker / artist" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
-            <TextInput value={mediaForm.scriptureReference} onChangeText={(scriptureReference) => setMediaForm((current) => ({ ...current, scriptureReference }))} placeholder="Scripture reference" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
-            <TextInput value={mediaForm.description} onChangeText={(description) => setMediaForm((current) => ({ ...current, description }))} placeholder="Description" placeholderTextColor={colors.muted} multiline style={[styles.input, styles.textArea, dark && styles.inputDark]} />
             <TextInput value={mediaForm.externalUrl} onChangeText={(externalUrl) => setMediaForm((current) => ({ ...current, externalUrl }))} placeholder="Optional external video/audio URL" placeholderTextColor={colors.muted} autoCapitalize="none" style={[styles.input, dark && styles.inputDark]} />
             {selectedMediaFileName ? <Text style={[styles.uploadedText, dark && styles.uploadedTextDark]}>Selected file: {selectedMediaFileName}</Text> : null}
             {mediaForm.fileUrl ? <Text style={[styles.uploadedText, dark && styles.uploadedTextDark]}>Uploaded file ready</Text> : null}
             {uploadStatus ? <Text style={[styles.statusText, dark && styles.statusTextDark]}>{uploadStatus}</Text> : null}
             <View style={styles.buttonRow}>
-              <Pressable onPress={pickMediaThumbnail} disabled={savingMedia} style={[styles.secondaryButton, dark && styles.secondaryButtonDark]}>
-                <Ionicons name="image-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-                <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>Cover</Text>
-              </Pressable>
               <Pressable onPress={pickMediaFile} disabled={savingMedia} style={[styles.secondaryButton, dark && styles.secondaryButtonDark]}>
                 <Ionicons name="folder-open-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
                 <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>File</Text>
               </Pressable>
             </View>
+            <Pressable onPress={() => setShowMediaAdvanced((current) => !current)} style={[styles.moreOptions, dark && styles.moreOptionsDark]}>
+              <Text style={[styles.moreOptionsText, dark && styles.moreOptionsTextDark]}>{showMediaAdvanced ? 'Hide options' : 'More options'}</Text>
+              <Ionicons name={showMediaAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={dark ? colors.gold : colors.royalBlue} />
+            </Pressable>
+            {showMediaAdvanced ? (
+              <>
+                <TextInput value={mediaForm.speaker} onChangeText={(speaker) => setMediaForm((current) => ({ ...current, speaker }))} placeholder="Speaker / artist" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
+                <TextInput value={mediaForm.scriptureReference} onChangeText={(scriptureReference) => setMediaForm((current) => ({ ...current, scriptureReference }))} placeholder="Scripture reference" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
+                <TextInput value={mediaForm.description} onChangeText={(description) => setMediaForm((current) => ({ ...current, description }))} placeholder="Description" placeholderTextColor={colors.muted} multiline style={[styles.input, styles.textArea, dark && styles.inputDark]} />
+                <Pressable onPress={pickMediaThumbnail} disabled={savingMedia} style={[styles.secondaryButton, dark && styles.secondaryButtonDark]}>
+                  <Ionicons name="image-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
+                  <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>Upload Cover</Text>
+                </Pressable>
+              </>
+            ) : null}
             <View style={styles.buttonRow}>
               <Pressable onPress={() => setMediaForm((current) => ({ ...current, isFeatured: !current.isFeatured }))} style={[styles.secondaryButton, mediaForm.isFeatured && styles.secondaryButtonActive, dark && styles.secondaryButtonDark]}>
                 <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>Featured</Text>
@@ -406,6 +503,35 @@ export default function AdminScreen() {
                 <Text style={styles.goldButtonText}>{savingMedia ? 'Publishing...' : 'Publish'}</Text>
               </Pressable>
             </View>
+          </View>
+
+          <View style={[styles.publishCard, dark && styles.publishCardDark]}>
+            <View style={styles.publishHeader}>
+              <Ionicons name="calendar-outline" size={22} color={colors.gold} />
+              <Text style={[styles.publishTitle, dark && styles.publishTitleDark]}>Create Event</Text>
+            </View>
+            {eventForm.imageUrl ? <Image source={{ uri: eventForm.imageUrl }} style={styles.previewImage} resizeMode="cover" /> : null}
+            {selectedEventFlyerName ? <Text style={[styles.uploadedText, dark && styles.uploadedTextDark]}>Selected flyer: {selectedEventFlyerName}</Text> : null}
+            <TextInput value={eventForm.title} onChangeText={(title) => setEventForm((current) => ({ ...current, title }))} placeholder="Event title" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
+            <TextInput value={eventForm.startsAt} onChangeText={(startsAt) => setEventForm((current) => ({ ...current, startsAt }))} placeholder="Date/time, e.g. 2026-07-01 7:00 PM" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
+            <Pressable onPress={() => setShowEventAdvanced((current) => !current)} style={[styles.moreOptions, dark && styles.moreOptionsDark]}>
+              <Text style={[styles.moreOptionsText, dark && styles.moreOptionsTextDark]}>{showEventAdvanced ? 'Hide options' : 'More options'}</Text>
+              <Ionicons name={showEventAdvanced ? 'chevron-up' : 'chevron-down'} size={16} color={dark ? colors.gold : colors.royalBlue} />
+            </Pressable>
+            {showEventAdvanced ? (
+              <>
+                <TextInput value={eventForm.location} onChangeText={(location) => setEventForm((current) => ({ ...current, location }))} placeholder="Location or livestream" placeholderTextColor={colors.muted} style={[styles.input, dark && styles.inputDark]} />
+                <TextInput value={eventForm.description} onChangeText={(description) => setEventForm((current) => ({ ...current, description }))} placeholder="Event description" placeholderTextColor={colors.muted} multiline style={[styles.input, styles.textArea, dark && styles.inputDark]} />
+                <TextInput value={eventForm.registrationUrl} onChangeText={(registrationUrl) => setEventForm((current) => ({ ...current, registrationUrl }))} placeholder="Registration link" placeholderTextColor={colors.muted} autoCapitalize="none" style={[styles.input, dark && styles.inputDark]} />
+                <Pressable onPress={pickEventFlyer} disabled={savingEvent} style={[styles.secondaryButton, dark && styles.secondaryButtonDark]}>
+                  <Ionicons name="image-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
+                  <Text style={[styles.secondaryButtonText, dark && styles.secondaryButtonTextDark]}>Upload Flyer</Text>
+                </Pressable>
+              </>
+            ) : null}
+            <Pressable onPress={publishEvent} disabled={savingEvent} style={styles.goldButton}>
+              <Text style={styles.goldButtonText}>{savingEvent ? 'Publishing...' : 'Publish Event'}</Text>
+            </Pressable>
           </View>
 
           <View style={[styles.publishCard, dark && styles.publishCardDark]}>
@@ -631,8 +757,8 @@ async function pickImageUpload(input: {
     return null;
   }
   const result = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ['images'],
-    allowsEditing: true,
+    mediaTypes: input.purpose === 'story' ? ['images', 'videos'] : ['images'],
+    allowsEditing: input.purpose !== 'story',
     quality: 0.86,
   });
   if (result.canceled || !result.assets[0]) return null;
@@ -666,6 +792,13 @@ const styles = StyleSheet.create({
   heroCopy: { flex: 1 },
   heroTitle: { color: colors.white, fontSize: 24, fontWeight: '900' },
   heroBody: { color: 'rgba(255,255,255,0.82)', marginTop: 6, lineHeight: 20 },
+  commandGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 14 },
+  commandCard: { width: '48.4%', minHeight: 92, borderRadius: 15, backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.22)', padding: 12, justifyContent: 'space-between', ...shadows.soft },
+  commandCardDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.2)' },
+  commandIcon: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
+  commandIconDark: { backgroundColor: 'rgba(212,175,55,0.12)' },
+  commandText: { color: colors.royalBlue, fontWeight: '900', fontSize: 15 },
+  commandTextDark: { color: colors.white },
   publishCard: { marginTop: 18, borderRadius: 16, padding: 14, gap: 10, backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.22)', ...shadows.soft },
   publishCardDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.2)' },
   publishHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -677,6 +810,10 @@ const styles = StyleSheet.create({
   twoColumn: { flexDirection: 'row', gap: 10 },
   halfInput: { flex: 1 },
   previewImage: { width: '100%', height: 128, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)' },
+  moreOptions: { minHeight: 42, borderRadius: 12, backgroundColor: '#F8FAFC', borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  moreOptionsDark: { backgroundColor: 'rgba(2,8,23,0.3)', borderColor: 'rgba(212,175,55,0.18)' },
+  moreOptionsText: { color: colors.royalBlue, fontWeight: '900' },
+  moreOptionsTextDark: { color: colors.gold },
   buttonRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 9, alignItems: 'center' },
   secondaryButton: { minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: colors.white, flexGrow: 1 },
   secondaryButtonDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.24)' },
@@ -703,7 +840,7 @@ const styles = StyleSheet.create({
   listCopy: { flex: 1, minWidth: 0 },
   listTitle: { color: colors.royalBlue, fontSize: 15, fontWeight: '900' },
   listTitleDark: { color: colors.white },
-  listMeta: { color: colors.slate, fontSize: 11, fontWeight: '800', marginTop: 2 },
+  listMeta: { color: colors.slate, fontSize: 12, fontWeight: '800', marginTop: 2 },
   listMetaDark: { color: 'rgba(255,255,255,0.62)' },
   listBody: { color: colors.textBody, fontSize: 12, lineHeight: 17, marginTop: 4 },
   listBodyDark: { color: 'rgba(255,255,255,0.78)' },
@@ -714,7 +851,7 @@ const styles = StyleSheet.create({
   smallDangerButtonText: { color: '#D63031', fontWeight: '900', fontSize: 12 },
   miniPill: { borderRadius: 999, borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', paddingHorizontal: 9, paddingVertical: 7, backgroundColor: 'rgba(255,255,255,0.4)' },
   miniPillActive: { backgroundColor: colors.gold, borderColor: colors.gold },
-  miniPillText: { color: colors.royalBlue, fontWeight: '900', fontSize: 11, textTransform: 'capitalize' },
+  miniPillText: { color: colors.royalBlue, fontWeight: '900', fontSize: 12, textTransform: 'capitalize' },
   miniPillTextActive: { color: '#071231' },
   metricGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 18 },
   metricCard: { width: '31.6%', minHeight: 106, borderRadius: 14, backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.22)', padding: 11, justifyContent: 'center', ...shadows.soft },

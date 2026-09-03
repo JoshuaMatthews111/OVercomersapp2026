@@ -113,7 +113,7 @@ export default function TabLayout() {
         borderTopColor: dark ? 'rgba(212,175,55,0.18)' : '#E5E7EB',
         backgroundColor: dark ? '#061334' : colors.white,
       },
-      tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+      tabBarLabelStyle: { fontSize: 12, fontWeight: '600' },
     }}>
       <Tabs.Screen name="index" options={{ title: 'Home', tabBarIcon: icon('home-outline', 'home') }} />
       <Tabs.Screen name="messages" options={{ title: 'Media', tabBarIcon: icon('play-circle-outline', 'play-circle') }} />

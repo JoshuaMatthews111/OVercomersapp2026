@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
@@ -23,13 +24,14 @@ import { friendlyError } from '../lib/errorMessages';
 import { supabase } from '../lib/supabase';
 import { colors } from '../lib/theme';
 import { ThemePreference, useThemePreference } from '../lib/themePreference';
+import { uploadPickedAsset } from '../lib/uploadService';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 type Screen = 'splash' | 'auth';
 type AuthMode = 'signin' | 'signup';
 
-const tabsRoute = '/(tabs)/index' as const;
+const tabsRoute = '/(tabs)' as const;
 
 export default function WelcomeScreen() {
   const insets = useSafeAreaInsets();
@@ -38,6 +40,7 @@ export default function WelcomeScreen() {
   const [screen, setScreen] = useState<Screen>('splash');
   const [authMode, setAuthMode] = useState<AuthMode>('signin');
   const [displayName, setDisplayName] = useState('');
+  const [pendingAvatar, setPendingAvatar] = useState<ImagePicker.ImagePickerAsset | null>(null);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -86,12 +89,31 @@ export default function WelcomeScreen() {
       }
 
       if (authMode === 'signup' && result.data.user) {
+        let avatarUrl: string | undefined;
+        if (result.data.session && pendingAvatar) {
+          try {
+            const upload = await uploadPickedAsset({
+              asset: pendingAvatar,
+              bucketId: 'profile-avatars',
+              purpose: 'profile_avatar',
+              pathPrefix: result.data.user.id,
+              relatedTable: 'profiles',
+              relatedId: result.data.user.id,
+            });
+            avatarUrl = upload.publicUrl;
+          } catch {
+            avatarUrl = undefined;
+          }
+        }
+
         await Promise.allSettled([
           supabase.from('profiles').upsert({
             id: result.data.user.id,
             display_name: displayName.trim() || normalizedEmail,
+            avatar_url: avatarUrl || result.data.user.user_metadata.avatar_url || null,
             country: 'United States',
           }),
+          avatarUrl ? supabase.auth.updateUser({ data: { avatar_url: avatarUrl } }) : Promise.resolve(),
           supabase.from('user_roles').upsert({ user_id: result.data.user.id, role: 'member' }),
         ]);
 
@@ -115,6 +137,21 @@ export default function WelcomeScreen() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function pickSignupAvatar() {
+    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!permission.granted) {
+      Alert.alert('Photo access needed', 'Allow photo access to choose a profile picture.');
+      return;
+    }
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      aspect: [1, 1],
+      quality: 0.86,
+    });
+    if (!result.canceled && result.assets[0]) setPendingAvatar(result.assets[0]);
   }
 
   async function sendPasswordReset() {
@@ -222,6 +259,22 @@ export default function WelcomeScreen() {
               <Text style={[styles.segmentLabel, authMode === 'signup' && styles.segmentLabelActive]}>Create Account</Text>
             </Pressable>
           </View>
+
+          {authMode === 'signup' && (
+            <View style={styles.avatarWizard}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Choose profile picture" onPress={pickSignupAvatar} style={styles.avatarPicker}>
+                {pendingAvatar ? (
+                  <Image source={{ uri: pendingAvatar.uri }} style={styles.avatarPreview} resizeMode="cover" />
+                ) : (
+                  <Ionicons name="camera-outline" size={30} color={colors.gold} />
+                )}
+              </Pressable>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.avatarWizardTitle, isDarkTheme && styles.avatarWizardTitleDark]}>Add Profile Picture</Text>
+                <Text style={[styles.avatarWizardBody, isDarkTheme && styles.avatarWizardBodyDark]}>This helps leaders and group members recognize you in chat.</Text>
+              </View>
+            </View>
+          )}
 
           {/* Name field (signup only) */}
           {authMode === 'signup' && (
@@ -608,5 +661,33 @@ const styles = StyleSheet.create({
   switchText: { color: colors.slate, fontSize: 14 },
   switchTextDark: { color: 'rgba(255,255,255,0.76)' },
   switchLink: { color: colors.brightBlue, fontWeight: '800', fontSize: 14 },
+  avatarWizard: {
+    minHeight: 86,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(212,175,55,0.28)',
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    padding: 12,
+    marginBottom: 18,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  avatarPicker: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    borderWidth: 2,
+    borderColor: colors.gold,
+    backgroundColor: colors.royalBlue,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  avatarPreview: { width: '100%', height: '100%' },
+  avatarWizardTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 15 },
+  avatarWizardTitleDark: { color: colors.white },
+  avatarWizardBody: { color: colors.slate, lineHeight: 18, marginTop: 3, fontSize: 13 },
+  avatarWizardBodyDark: { color: 'rgba(255,255,255,0.7)' },
 
 });

@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Image, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, Image, Linking, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
 import {
@@ -14,6 +14,7 @@ import {
   getChatMembers,
   getChatMessages,
   getChatRooms,
+  joinChatRoom,
   moderateChatMessage,
   reportChatMessage,
   removeChatMember,
@@ -58,6 +59,8 @@ export default function CommunityScreen() {
   const [memberQuery, setMemberQuery] = useState('');
   const [profileResults, setProfileResults] = useState<ChatProfileSearchResult[]>([]);
   const [roomMembers, setRoomMembers] = useState<ChatMember[]>([]);
+  const [selectedProfile, setSelectedProfile] = useState<{ userId?: string; displayName: string; phone?: string; avatarUrl?: string; role?: string } | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -65,16 +68,25 @@ export default function CommunityScreen() {
       setRooms(items);
       setSelectedRoomId(items[0]?.id || null);
     });
+    supabase.auth.getUser().then(({ data }) => setCurrentUserId(data.user?.id || null)).catch(() => setCurrentUserId(null));
   }, []);
 
   useEffect(() => {
     if (!selectedRoomId) return;
-    getChatMessages(selectedRoomId).then(setMessages);
+    let cancelled = false;
+    // Membership is required to read room messages, so join on entry before loading history.
+    joinChatRoom(selectedRoomId)
+      .catch(() => undefined)
+      .then(() => getChatMessages(selectedRoomId))
+      .then((items) => {
+        if (!cancelled && items) setMessages(items);
+      });
     if (access.canManageChatMembers) getChatMembers(selectedRoomId).then(setRoomMembers);
     const channel = subscribeToChat(selectedRoomId, (message) => {
       setMessages((current) => current.some((item) => item.id === message.id) ? current : [...current, message]);
     });
     return () => {
+      cancelled = true;
       if (channel) supabase.removeChannel(channel);
     };
   }, [access.canManageChatMembers, selectedRoomId]);
@@ -97,8 +109,8 @@ export default function CommunityScreen() {
   const visibleRooms = useMemo(() => {
     const filtered = rooms.filter((room) => {
       if (chatTab === 'announcements') return room.type === 'announcement';
-      if (chatTab === 'groups') return room.type === 'leader' || room.type === 'regional' || room.type === 'prayer';
-      return room.type !== 'announcement';
+      if (chatTab === 'groups') return room.type === 'group' || room.type === 'leader' || room.type === 'regional' || room.type === 'prayer' || room.type === 'global' || room.type === 'general';
+      return room.type === 'direct';
     });
     return filtered.length ? filtered : rooms;
   }, [chatTab, rooms]);
@@ -109,7 +121,7 @@ export default function CommunityScreen() {
     setError(null);
     try {
       const result = await sendChatMessage(selectedRoomId, text);
-      setMessages((current) => [...current, { id: result.id, channelId: selectedRoomId, body: text, displayName: 'You', createdAt: new Date().toISOString() }]);
+      setMessages((current) => [...current, { id: result.id, channelId: selectedRoomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString() }]);
       setBody('');
     } catch (err) {
       setError(friendlyError(err, 'Unable to send message. Please sign in and try again.'));
@@ -152,6 +164,30 @@ export default function CommunityScreen() {
   function pickMember(profile: ChatProfileSearchResult) {
     setMemberUserId(profile.id);
     setMemberQuery(profile.displayName);
+    setSelectedProfile({ userId: profile.id, displayName: profile.displayName, phone: profile.phone, avatarUrl: profile.avatarUrl });
+  }
+
+  async function openExternalUrl(url?: string) {
+    if (!url) return;
+    try {
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) return Alert.alert('Link unavailable', 'This link cannot be opened on this device.');
+      await Linking.openURL(url);
+    } catch (err) {
+      Alert.alert('Unable to open link', friendlyError(err, 'Please try again.'));
+    }
+  }
+
+  async function callPhone(phone?: string) {
+    const clean = phone?.replace(/[^\d+]/g, '');
+    if (!clean) return Alert.alert('No phone number', 'This member does not have a phone number saved.');
+    await openExternalUrl(`tel:${clean}`);
+  }
+
+  async function openWhatsapp(phone?: string) {
+    const clean = phone?.replace(/[^\d]/g, '');
+    if (!clean) return Alert.alert('No WhatsApp number', 'This member does not have a phone number saved.');
+    await openExternalUrl(`https://wa.me/${clean}`);
   }
 
   async function reportMessage(message: ChatMessage) {
@@ -186,6 +222,7 @@ export default function CommunityScreen() {
     });
     if (result.canceled || !result.assets[0]) return;
     try {
+      await joinChatRoom(selectedRoomId);
       const upload = await uploadPickedAsset({
         asset: result.assets[0],
         bucketId: 'chat-attachments',
@@ -195,7 +232,7 @@ export default function CommunityScreen() {
       });
       const text = `Shared attachment: ${upload.fileName}\n${upload.publicUrl}`;
       const sent = await sendChatMessage(selectedRoomId, text);
-      setMessages((current) => [...current, { id: sent.id, channelId: selectedRoomId, body: text, displayName: 'You', createdAt: new Date().toISOString() }]);
+      setMessages((current) => [...current, { id: sent.id, channelId: selectedRoomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString() }]);
     } catch (err) {
       Alert.alert('Attachment failed', friendlyError(err, 'Please choose another file and try again.'));
     }
@@ -210,7 +247,7 @@ export default function CommunityScreen() {
             <Image source={art.seal} style={styles.seal} resizeMode="contain" />
             <View style={styles.headerCopy}>
               <Text style={[styles.title, dark && styles.titleDark]}>Chat</Text>
-              <Text style={[styles.subtitle, dark && styles.subtitleDark]}>Connect. Encourage. Grow Together.</Text>
+              <Text style={[styles.subtitle, dark && styles.subtitleDark]} numberOfLines={2}>Connect. Encourage. Grow Together.</Text>
             </View>
             <View style={styles.headerActions}>
               <Pressable onPress={() => Alert.alert('Chat Notifications', 'Chat alerts can be managed in More / Profile notification preferences.')} style={[styles.iconButton, dark && styles.iconButtonDark]}>
@@ -236,13 +273,13 @@ export default function CommunityScreen() {
             <Image source={dark ? art.heroDark : art.heroLight} resizeMode="cover" style={styles.heroImage} />
           </View>
 
-          <View style={[styles.roomPanel, dark && styles.roomPanelDark]}>
-            <View style={styles.panelHeader}>
-              <Text style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>
-                {chatTab === 'private' ? 'Recent Messages' : chatTab === 'groups' ? 'Groups' : 'Announcements'}
-              </Text>
-              <Text style={[styles.viewAll, dark && styles.viewAllDark]}>View all</Text>
-            </View>
+            <View style={[styles.roomPanel, dark && styles.roomPanelDark]}>
+              <View style={styles.panelHeader}>
+                <Text style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>
+                  {chatTab === 'private' ? 'Recent Messages' : chatTab === 'groups' ? 'Groups' : 'Announcements'}
+                </Text>
+              <Text style={[styles.viewAll, dark && styles.viewAllDark]}>{visibleRooms.length} active</Text>
+              </View>
             {visibleRooms.slice(0, 5).map((room, index) => (
               <Pressable
                 key={room.id}
@@ -256,7 +293,7 @@ export default function CommunityScreen() {
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.roomName, dark && styles.roomNameDark]}>{room.name}</Text>
-                  <Text style={[styles.roomPreview, dark && styles.roomPreviewDark]}>{room.region || 'Global'} • {room.members.toLocaleString()} members</Text>
+                  <Text style={[styles.roomPreview, dark && styles.roomPreviewDark]}>{roomLabel(room.type)} • {room.region || 'Global'} • {room.members.toLocaleString()} members</Text>
                 </View>
                 <View style={styles.roomMetaRight}>
                   <Text style={[styles.roomTime, dark && styles.roomTimeDark]}>{index === 0 ? '9:30 AM' : index === 1 ? '8:15 AM' : 'Yesterday'}</Text>
@@ -285,39 +322,87 @@ export default function CommunityScreen() {
               </View>
             </View>
 
-            {messages.length ? messages.slice(-5).map((message) => (
-              <View key={message.id} style={[styles.messageBubble, dark && styles.messageBubbleDark]}>
-                <View style={styles.messageTop}>
-                  <Text style={[styles.messageName, dark && styles.messageNameDark]}>{message.displayName}</Text>
-                  {access.canModerateChat ? (
-                    <Pressable accessibilityRole="button" accessibilityLabel="Remove chat message" onPress={() => removeMessage(message)} style={styles.removeButton}>
-                      <Ionicons name="trash-outline" size={14} color={colors.red} />
-                      <Text style={styles.removeText}>Remove</Text>
-                    </Pressable>
-                  ) : (
-                    <View style={styles.userSafetyActions}>
-                      <Pressable accessibilityRole="button" accessibilityLabel="Report chat message" onPress={() => reportMessage(message)} style={styles.reportButton}>
-                        <Ionicons name="flag-outline" size={13} color={colors.deepGold} />
-                        <Text style={styles.reportText}>Report</Text>
+            {messages.length ? messages.slice(-30).map((message) => {
+              const own = Boolean(currentUserId && message.userId === currentUserId);
+              return (
+              <View key={message.id} style={[styles.messageRow, own && styles.messageRowOwn]}>
+                {!own ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open ${message.displayName} profile`}
+                    onPress={() => setSelectedProfile({ userId: message.userId, displayName: message.displayName, avatarUrl: message.avatarUrl })}
+                    style={styles.messageAvatar}
+                  >
+                    {message.avatarUrl ? <Image source={{ uri: message.avatarUrl }} style={styles.avatarImage} resizeMode="cover" /> : <Text style={styles.avatarInitial}>{initials(message.displayName)}</Text>}
+                  </Pressable>
+                ) : null}
+                <View style={[styles.messageBubble, dark && styles.messageBubbleDark, own && (dark ? styles.messageBubbleOwnDark : styles.messageBubbleOwn)]}>
+                  <View style={styles.messageTop}>
+                    {own ? (
+                      <Text style={[styles.messageName, dark ? styles.messageNameDark : styles.messageNameOwn]}>You</Text>
+                    ) : (
+                      <Pressable onPress={() => setSelectedProfile({ userId: message.userId, displayName: message.displayName, avatarUrl: message.avatarUrl })}>
+                        <Text style={[styles.messageName, dark && styles.messageNameDark]}>{message.displayName}</Text>
                       </Pressable>
-                      {message.userId ? (
-                        <Pressable accessibilityRole="button" accessibilityLabel="Block chat user" onPress={() => blockUser(message.userId)} style={styles.reportButton}>
-                          <Ionicons name="ban-outline" size={13} color={colors.red} />
-                          <Text style={styles.blockText}>Block</Text>
+                    )}
+                    <Text style={[styles.messageTime, dark && styles.messageTimeDark]}>{formatMessageTime(message.createdAt)}</Text>
+                    {access.canModerateChat ? (
+                      <Pressable accessibilityRole="button" accessibilityLabel="Remove chat message" onPress={() => removeMessage(message)} style={styles.removeButton}>
+                        <Ionicons name="trash-outline" size={14} color={colors.red} />
+                        <Text style={styles.removeText}>Remove</Text>
+                      </Pressable>
+                    ) : !own ? (
+                      <View style={styles.userSafetyActions}>
+                        <Pressable accessibilityRole="button" accessibilityLabel="Report chat message" onPress={() => reportMessage(message)} style={styles.reportButton}>
+                          <Ionicons name="flag-outline" size={13} color={colors.deepGold} />
+                          <Text style={styles.reportText}>Report</Text>
                         </Pressable>
-                      ) : null}
-                    </View>
-                  )}
+                        {message.userId ? (
+                          <Pressable accessibilityRole="button" accessibilityLabel="Block chat user" onPress={() => blockUser(message.userId)} style={styles.reportButton}>
+                            <Ionicons name="ban-outline" size={13} color={colors.red} />
+                            <Text style={styles.blockText}>Block</Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    ) : null}
+                  </View>
+                  <MessageBody message={message.body} dark={dark} onOpenUrl={openExternalUrl} />
                 </View>
-                <Text style={[styles.messageBody, dark && styles.messageBodyDark]}>{message.body}</Text>
               </View>
-            )) : (
+              );
+            }) : (
               <View style={[styles.emptyChatState, dark && styles.emptyChatStateDark]}>
                 <Ionicons name="chatbubbles-outline" size={28} color={colors.gold} />
                 <Text style={[styles.emptyChatTitle, dark && styles.emptyChatTitleDark]}>Start the conversation</Text>
                 <Text style={[styles.emptyChatBody, dark && styles.emptyChatBodyDark]}>Enter a group, type a message, or attach a photo or video for this chat.</Text>
               </View>
             )}
+
+            {selectedProfile ? (
+              <View style={[styles.profilePeek, dark && styles.profilePeekDark]}>
+                <View style={styles.profilePeekAvatar}>
+                  {selectedProfile.avatarUrl ? (
+                    <Image source={{ uri: selectedProfile.avatarUrl }} style={styles.avatarImage} resizeMode="cover" />
+                  ) : (
+                    <Text style={styles.avatarInitial}>{initials(selectedProfile.displayName)}</Text>
+                  )}
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.profilePeekName, dark && styles.profilePeekNameDark]}>{selectedProfile.displayName}</Text>
+                  <Text style={[styles.profilePeekMeta, dark && styles.profilePeekMetaDark]}>
+                    {selectedProfile.role || 'Member'}{selectedProfile.phone ? ` • ${selectedProfile.phone}` : ''}
+                  </Text>
+                </View>
+                {selectedProfile.phone ? (
+                  <Pressable accessibilityRole="button" accessibilityLabel="Call profile" onPress={() => callPhone(selectedProfile.phone)} style={[styles.profilePeekButton, dark && styles.profilePeekButtonDark]}>
+                    <Ionicons name="call-outline" size={17} color={dark ? colors.gold : colors.royalBlue} />
+                  </Pressable>
+                ) : null}
+                <Pressable accessibilityRole="button" accessibilityLabel="Close profile preview" onPress={() => setSelectedProfile(null)} style={[styles.profilePeekButton, dark && styles.profilePeekButtonDark]}>
+                  <Ionicons name="close" size={17} color={dark ? colors.white : colors.royalBlue} />
+                </Pressable>
+              </View>
+            ) : null}
 
             <View style={styles.composer}>
               <Pressable onPress={attachFile} style={[styles.attachButton, dark && styles.attachButtonDark]}>
@@ -361,6 +446,13 @@ export default function CommunityScreen() {
               />
               {profileResults.map((profile) => (
                 <Pressable key={profile.id} onPress={() => pickMember(profile)} style={[styles.profileResult, dark && styles.profileResultDark]}>
+                  <View style={styles.searchAvatar}>
+                    {profile.avatarUrl ? (
+                      <Image source={{ uri: profile.avatarUrl }} style={styles.avatarImage} resizeMode="cover" />
+                    ) : (
+                      <Text style={styles.searchAvatarInitial}>{initials(profile.displayName)}</Text>
+                    )}
+                  </View>
                   <View style={{ flex: 1 }}>
                     <Text style={[styles.profileName, dark && styles.profileNameDark]}>{profile.displayName}</Text>
                     <Text style={[styles.profilePhone, dark && styles.profilePhoneDark]}>{profile.phone || 'No phone on profile'}</Text>
@@ -382,15 +474,40 @@ export default function CommunityScreen() {
               <View style={[styles.memberList, dark && styles.memberListDark]}>
                 <Text style={[styles.memberListTitle, dark && styles.memberListTitleDark]}>Enrolled Group Contacts</Text>
                 {roomMembers.length ? roomMembers.map((member) => (
-                  <View key={member.userId} style={[styles.memberRow, dark && styles.memberRowDark]}>
+                  <Pressable
+                    key={member.userId}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Open ${member.displayName} profile`}
+                    onPress={() => setSelectedProfile({ userId: member.userId, displayName: member.displayName, phone: member.phone, avatarUrl: member.avatarUrl, role: member.role })}
+                    style={[styles.memberRow, dark && styles.memberRowDark]}
+                  >
+                    <View style={styles.searchAvatar}>
+                      {member.avatarUrl ? (
+                        <Image source={{ uri: member.avatarUrl }} style={styles.avatarImage} resizeMode="cover" />
+                      ) : (
+                        <Text style={styles.searchAvatarInitial}>{initials(member.displayName)}</Text>
+                      )}
+                    </View>
                     <View style={{ flex: 1 }}>
                       <Text style={[styles.memberName, dark && styles.memberNameDark]}>{member.displayName}</Text>
                       <Text style={[styles.memberPhone, dark && styles.memberPhoneDark]}>{member.phone || 'No phone on profile'} • {member.role || 'member'}</Text>
+                      {member.phone ? (
+                        <View style={styles.memberContactActions}>
+                          <Pressable onPress={() => callPhone(member.phone)} style={[styles.memberContactButton, dark && styles.memberContactButtonDark]}>
+                            <Ionicons name="call-outline" size={13} color={dark ? colors.gold : colors.royalBlue} />
+                            <Text style={[styles.memberContactText, dark && styles.memberContactTextDark]}>Call</Text>
+                          </Pressable>
+                          <Pressable onPress={() => openWhatsapp(member.phone)} style={[styles.memberContactButton, dark && styles.memberContactButtonDark]}>
+                            <Ionicons name="logo-whatsapp" size={13} color={dark ? colors.gold : colors.green} />
+                            <Text style={[styles.memberContactText, dark && styles.memberContactTextDark]}>WhatsApp</Text>
+                          </Pressable>
+                        </View>
+                      ) : null}
                     </View>
                     <Pressable onPress={() => updateRoomMember('remove', member.userId)} style={styles.rowRemoveButton}>
                       <Ionicons name="person-remove-outline" size={16} color={colors.red} />
                     </Pressable>
-                  </View>
+                  </Pressable>
                 )) : (
                   <Text style={[styles.memberEmpty, dark && styles.memberEmptyDark]}>No enrolled contacts visible yet.</Text>
                 )}
@@ -405,9 +522,79 @@ export default function CommunityScreen() {
 
 function roomIcon(type: ChatRoom['type']): keyof typeof Ionicons.glyphMap {
   if (type === 'announcement') return 'megaphone';
+  if (type === 'direct') return 'person-circle';
+  if (type === 'group') return 'people';
   if (type === 'leader') return 'shield-checkmark';
   if (type === 'prayer') return 'hand-left';
   return 'person';
+}
+
+function roomLabel(type: ChatRoom['type']) {
+  if (type === 'announcement') return 'Announcement';
+  if (type === 'direct') return 'Direct message';
+  if (type === 'leader') return 'Leader group';
+  if (type === 'regional') return 'Regional group';
+  if (type === 'prayer') return 'Prayer group';
+  if (type === 'group') return 'Group chat';
+  return 'Community chat';
+}
+
+function getFirstUrl(text: string) {
+  return text.match(/https?:\/\/[^\s]+/)?.[0];
+}
+
+function attachmentKind(url?: string) {
+  if (!url) return 'link';
+  const lower = url.toLowerCase();
+  if (lower.match(/\.(png|jpe?g|webp|gif)(\?|$)/)) return 'image';
+  if (lower.match(/\.(mp4|mov|m4v)(\?|$)/)) return 'video';
+  if (lower.match(/\.(mp3|m4a|aac|wav)(\?|$)/)) return 'audio';
+  if (lower.match(/\.(pdf|docx?|pptx?|xlsx?)(\?|$)/)) return 'document';
+  return 'link';
+}
+
+function attachmentIcon(kind: string): keyof typeof Ionicons.glyphMap {
+  if (kind === 'image') return 'image-outline';
+  if (kind === 'video') return 'videocam-outline';
+  if (kind === 'audio') return 'musical-notes-outline';
+  if (kind === 'document') return 'document-text-outline';
+  return 'link-outline';
+}
+
+function initials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const first = parts[0]?.[0] || 'O';
+  const second = parts[1]?.[0] || '';
+  return `${first}${second}`.toUpperCase();
+}
+
+function formatMessageTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+function MessageBody({ message, dark, onOpenUrl }: { message: string; dark: boolean; onOpenUrl: (url?: string) => void }) {
+  const url = getFirstUrl(message);
+  const kind = attachmentKind(url);
+  const cleanMessage = url ? message.replace(url, '').trim() : message;
+  return (
+    <View>
+      {cleanMessage ? <Text style={[styles.messageBody, dark && styles.messageBodyDark]}>{cleanMessage}</Text> : null}
+      {url ? (
+        <Pressable onPress={() => onOpenUrl(url)} style={[styles.linkPreview, dark && styles.linkPreviewDark]}>
+          <View style={[styles.linkIcon, dark && styles.linkIconDark]}>
+            <Ionicons name={attachmentIcon(kind)} size={18} color={dark ? colors.gold : colors.royalBlue} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.linkTitle, dark && styles.linkTitleDark]}>{kind === 'link' ? 'Open link' : `Open ${kind}`}</Text>
+            <Text numberOfLines={1} style={[styles.linkUrl, dark && styles.linkUrlDark]}>{url}</Text>
+          </View>
+          <Ionicons name="open-outline" size={16} color={dark ? colors.gold : colors.deepGold} />
+        </Pressable>
+      ) : null}
+    </View>
+  );
 }
 
 const styles = StyleSheet.create({
@@ -415,11 +602,11 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   scroll: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 112 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
-  seal: { width: 96, height: 82 },
-  headerCopy: { flex: 1 },
-  title: { color: colors.royalBlue, fontSize: 36, fontWeight: '900' },
+  seal: { width: 64, height: 58 },
+  headerCopy: { flex: 1, minWidth: 0 },
+  title: { color: colors.royalBlue, fontSize: 30, lineHeight: 34, fontWeight: '900' },
   titleDark: { color: colors.white },
-  subtitle: { color: colors.deepGold, fontWeight: '700', marginTop: 2 },
+  subtitle: { color: colors.deepGold, fontWeight: '700', marginTop: 2, fontSize: 12, lineHeight: 15 },
   subtitleDark: { color: colors.gold },
   headerActions: { flexDirection: 'row', gap: 8 },
   iconButton: { width: 43, height: 43, borderRadius: 22, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
@@ -471,16 +658,34 @@ const styles = StyleSheet.create({
   chatSub: { color: colors.slate, marginTop: 3, fontSize: 12 },
   chatSubDark: { color: 'rgba(255,255,255,0.64)' },
   livePill: { borderRadius: 999, backgroundColor: colors.softGreen, paddingHorizontal: 10, paddingVertical: 5 },
-  livePillText: { color: colors.green, fontWeight: '900', fontSize: 11 },
-  messageBubble: { borderRadius: 13, backgroundColor: '#F8FAFC', padding: 12, marginBottom: 9 },
+  livePillText: { color: colors.green, fontWeight: '900', fontSize: 12 },
+  messageRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, marginBottom: 9 },
+  messageRowOwn: { justifyContent: 'flex-end', paddingLeft: 44 },
+  messageAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.royalBlue, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(212,175,55,0.35)' },
+  avatarImage: { width: '100%', height: '100%' },
+  avatarInitial: { color: colors.gold, fontWeight: '900', fontSize: 12 },
+  messageBubble: { flex: 1, borderRadius: 13, backgroundColor: '#F8FAFC', padding: 12 },
   messageBubbleDark: { backgroundColor: 'rgba(2,8,23,0.42)' },
+  messageBubbleOwn: { flexGrow: 0, flexShrink: 1, flexBasis: 'auto', maxWidth: '88%', backgroundColor: colors.paleGold, borderWidth: 1, borderColor: 'rgba(212,175,55,0.4)', borderTopRightRadius: 4 },
+  messageBubbleOwnDark: { flexGrow: 0, flexShrink: 1, flexBasis: 'auto', maxWidth: '88%', backgroundColor: 'rgba(18,58,143,0.5)', borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', borderTopRightRadius: 4 },
   messageTop: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 4 },
   messageName: { color: colors.royalBlue, fontWeight: '900' },
   messageNameDark: { color: colors.gold },
+  messageNameOwn: { color: colors.deepGold },
+  messageTime: { color: colors.muted, fontSize: 10, fontWeight: '800', marginLeft: 'auto' },
+  messageTimeDark: { color: 'rgba(255,255,255,0.54)' },
   messageBody: { color: colors.textBody, lineHeight: 20 },
   messageBodyDark: { color: 'rgba(255,255,255,0.86)' },
+  linkPreview: { marginTop: 8, minHeight: 58, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)', backgroundColor: colors.white, padding: 9, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  linkPreviewDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.2)' },
+  linkIcon: { width: 38, height: 38, borderRadius: 11, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
+  linkIconDark: { backgroundColor: 'rgba(212,175,55,0.12)' },
+  linkTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 13, textTransform: 'capitalize' },
+  linkTitleDark: { color: colors.white },
+  linkUrl: { color: colors.slate, fontWeight: '700', fontSize: 12, marginTop: 2 },
+  linkUrlDark: { color: 'rgba(255,255,255,0.58)' },
   removeButton: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.softRed, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 5 },
-  removeText: { color: colors.red, fontWeight: '900', fontSize: 11 },
+  removeText: { color: colors.red, fontWeight: '900', fontSize: 12 },
   userSafetyActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   reportButton: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: colors.paleGold, borderRadius: 999, paddingHorizontal: 7, paddingVertical: 5 },
   reportText: { color: colors.deepGold, fontWeight: '900', fontSize: 10 },
@@ -491,6 +696,15 @@ const styles = StyleSheet.create({
   emptyChatTitleDark: { color: colors.white },
   emptyChatBody: { color: colors.slate, textAlign: 'center', lineHeight: 19, marginTop: 4 },
   emptyChatBodyDark: { color: 'rgba(255,255,255,0.68)' },
+  profilePeek: { minHeight: 68, borderRadius: 15, borderWidth: 1, borderColor: 'rgba(212,175,55,0.38)', backgroundColor: colors.paleGold, flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, marginBottom: 10 },
+  profilePeekDark: { backgroundColor: 'rgba(212,175,55,0.1)', borderColor: 'rgba(212,175,55,0.26)' },
+  profilePeekAvatar: { width: 46, height: 46, borderRadius: 23, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: colors.royalBlue, borderWidth: 1, borderColor: colors.gold },
+  profilePeekName: { color: colors.royalBlue, fontWeight: '900', fontSize: 15 },
+  profilePeekNameDark: { color: colors.white },
+  profilePeekMeta: { color: colors.slate, fontWeight: '700', fontSize: 12, marginTop: 2 },
+  profilePeekMetaDark: { color: 'rgba(255,255,255,0.65)' },
+  profilePeekButton: { width: 34, height: 34, borderRadius: 17, backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)', alignItems: 'center', justifyContent: 'center' },
+  profilePeekButtonDark: { backgroundColor: 'rgba(2,8,23,0.36)', borderColor: 'rgba(212,175,55,0.24)' },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, marginTop: 6 },
   attachButton: { width: 43, height: 43, borderRadius: 13, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
   attachButtonDark: { backgroundColor: 'rgba(212,175,55,0.12)' },
@@ -509,11 +723,13 @@ const styles = StyleSheet.create({
   memberInputDark: { backgroundColor: 'rgba(2,8,23,0.42)', borderColor: 'rgba(212,175,55,0.22)', color: colors.white },
   profileResult: { minHeight: 56, borderRadius: 12, borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)', backgroundColor: 'rgba(255,255,255,0.72)', flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 9 },
   profileResultDark: { backgroundColor: 'rgba(2,8,23,0.34)', borderColor: 'rgba(212,175,55,0.2)' },
+  searchAvatar: { width: 38, height: 38, borderRadius: 19, backgroundColor: colors.royalBlue, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(212,175,55,0.4)' },
+  searchAvatarInitial: { color: colors.gold, fontWeight: '900', fontSize: 12 },
   profileName: { color: colors.royalBlue, fontWeight: '900' },
   profileNameDark: { color: colors.white },
   profilePhone: { color: colors.slate, fontWeight: '700', marginTop: 2, fontSize: 12 },
   profilePhoneDark: { color: 'rgba(255,255,255,0.66)' },
-  selectedUser: { color: colors.slate, fontSize: 11, fontWeight: '700' },
+  selectedUser: { color: colors.slate, fontSize: 12, fontWeight: '700' },
   selectedUserDark: { color: 'rgba(255,255,255,0.6)' },
   moderationActions: { flexDirection: 'row', gap: 10 },
   addMemberBtn: { flex: 1, minHeight: 46, borderRadius: 12, backgroundColor: colors.royalBlue, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7 },
@@ -530,6 +746,11 @@ const styles = StyleSheet.create({
   memberNameDark: { color: colors.white },
   memberPhone: { color: colors.slate, fontWeight: '700', marginTop: 2, fontSize: 12 },
   memberPhoneDark: { color: 'rgba(255,255,255,0.64)' },
+  memberContactActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 7 },
+  memberContactButton: { minHeight: 28, borderRadius: 999, backgroundColor: colors.paleGold, borderWidth: 1, borderColor: 'rgba(212,175,55,0.3)', flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 9 },
+  memberContactButtonDark: { backgroundColor: 'rgba(212,175,55,0.1)', borderColor: 'rgba(212,175,55,0.22)' },
+  memberContactText: { color: colors.royalBlue, fontWeight: '900', fontSize: 12 },
+  memberContactTextDark: { color: colors.gold },
   rowRemoveButton: { width: 36, height: 36, borderRadius: 18, backgroundColor: colors.softRed, alignItems: 'center', justifyContent: 'center' },
   memberEmpty: { color: colors.slate, fontWeight: '700', fontSize: 12 },
   memberEmptyDark: { color: 'rgba(255,255,255,0.62)' },

@@ -67,6 +67,7 @@ export default function MapsScreen() {
     if (!selected) return [];
     return contactList.filter((contact) => contact.territoryId === selected.id || children.some((territory) => territory.id === contact.territoryId));
   }, [children, contactList, selected]);
+  const ministryPoints = useMemo(() => selected ? nearbyMinistryPoints(selected) : [], [selected]);
   const dueToday = contactList.filter((contact) => contact.nextFollowUpAt && isTodayOrOverdue(contact.nextFollowUpAt));
   const overdue = contactList.filter((contact) => contact.nextFollowUpAt && new Date(contact.nextFollowUpAt) < startOfToday());
 
@@ -208,7 +209,14 @@ export default function MapsScreen() {
     <Screen scroll={false}>
       <View style={styles.header}>
         <EvangelismBackButton onPress={goBack} />
-        <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." showMenu />
+        <View style={styles.headerCard}>
+          <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." showMenu />
+          <View style={styles.headerStats}>
+            <HeaderStat label="Contacts" value={contactList.length} />
+            <HeaderStat label="Due Today" value={dueToday.length} tone={colors.purple} />
+            <HeaderStat label="Territories" value={territoryList.length} tone={colors.gold} />
+          </View>
+        </View>
       </View>
       <MapView
         ref={mapRef}
@@ -224,11 +232,15 @@ export default function MapsScreen() {
           <React.Fragment key={territory.id}>
             <Marker
               coordinate={territory.center}
-              pinColor={statusColor[territory.status]}
               title={territory.name}
               description={`${territory.level} • ${territory.status.replace('_', ' ')}`}
               onPress={() => focusTerritory(territory)}
-            />
+            >
+              <View style={[styles.customMarker, { borderColor: statusColor[territory.status] }]}>
+                <View style={[styles.markerCore, { backgroundColor: statusColor[territory.status] }]} />
+                <Text numberOfLines={1} style={styles.customMarkerText}>{territory.name}</Text>
+              </View>
+            </Marker>
             {territory.level === 'neighborhood' || territory.level === 'street' ? (
               <Circle
                 center={territory.center}
@@ -249,6 +261,20 @@ export default function MapsScreen() {
             description={contact.followUpNeeded ? 'Follow-up due' : 'Outreach record'}
           />
         ) : null)}
+        {ministryPoints.map((point) => (
+          <Marker
+            key={point.id}
+            coordinate={point.coordinate}
+            title={point.name}
+            description={point.type}
+          >
+            <View style={[styles.churchMarker, { borderColor: point.color }]}>
+              <View style={[styles.churchMarkerCore, { backgroundColor: point.color }]}>
+                <Ionicons name={point.icon} size={13} color={colors.white} />
+              </View>
+            </View>
+          </Marker>
+        ))}
         {myLocation ? (
           <>
             <Marker coordinate={myLocation} pinColor={colors.brightBlue} title="My exact location" />
@@ -256,6 +282,7 @@ export default function MapsScreen() {
           </>
         ) : null}
       </MapView>
+      <StatusLegend />
 
       <ScrollView style={styles.panel}>
         <View style={styles.searchRow}>
@@ -266,6 +293,7 @@ export default function MapsScreen() {
           <View>
             <Text style={styles.kicker}>{selected.level.toUpperCase()}</Text>
             <Text style={styles.title}>{selected.name}</Text>
+            <Text style={styles.statusLine}>{selected.status.replace('_', ' ')} • {selected.metrics.coveredStreets.toLocaleString()} covered • {selected.metrics.untappedTerritory.toLocaleString()} untapped</Text>
           </View>
           <PrimaryButton label="Locate Me" onPress={locateMe} variant="gold" />
         </View>
@@ -281,6 +309,21 @@ export default function MapsScreen() {
           <Stat label="Discipleship" value={selected.metrics.discipleshipProgress} suffix="%" />
           <Stat label="Covered" value={selected.metrics.coveredStreets} />
           <Stat label="Untapped" value={selected.metrics.untappedTerritory} />
+        </View>
+
+        <Text style={styles.section}>Nearby Churches & Follow-Up Points</Text>
+        <View style={styles.ministryGrid}>
+          {ministryPoints.map((point) => (
+            <View key={point.id} style={[styles.ministryPoint, { borderColor: point.color }]}>
+              <View style={[styles.ministryIcon, { backgroundColor: point.color }]}>
+                <Ionicons name={point.icon} size={16} color={colors.white} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.ministryName}>{point.name}</Text>
+                <Text style={styles.ministryType}>{point.type} • {point.distance}</Text>
+              </View>
+            </View>
+          ))}
         </View>
 
         <Text style={styles.section}>{children.length ? 'Tap To Drill Down' : 'Street-Level Territory'}</Text>
@@ -324,8 +367,20 @@ export default function MapsScreen() {
         <Text style={styles.section}>Outreach Records</Text>
         {relatedContacts.map((contact) => (
           <Card key={contact.id} style={styles.contact}>
-            <Text style={styles.contactName}>{contact.name}</Text>
-            <Text style={styles.contactSub}>{contact.status.replace('_', ' ')} • {contact.nextFollowUpAt ? `Next follow-up ${contact.nextFollowUpAt}` : 'No follow-up scheduled'}</Text>
+            <View style={styles.contactHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.contactName}>{contact.name}</Text>
+                <Text style={styles.contactSub}>{contact.status.replace('_', ' ')} • {contact.nextFollowUpAt ? `Next follow-up ${contact.nextFollowUpAt}` : 'No follow-up scheduled'}</Text>
+              </View>
+              <View style={styles.followUpBadge}>
+                <Ionicons name={contact.followUpNeeded ? 'alert-circle' : 'checkmark-circle'} size={15} color={contact.followUpNeeded ? colors.purple : colors.green} />
+                <Text style={[styles.followUpBadgeText, { color: contact.followUpNeeded ? colors.purple : colors.green }]}>{contact.followUpNeeded ? 'Follow up' : 'Complete'}</Text>
+              </View>
+            </View>
+            <View style={styles.contactMethods}>
+              {contact.phone ? <Text style={styles.contactMethod}>Phone: {contact.phone}</Text> : null}
+              {contact.whatsapp ? <Text style={styles.contactMethod}>WhatsApp: {contact.whatsapp}</Text> : null}
+            </View>
             <Text style={styles.body}>{contact.prayerRequest || 'No prayer request recorded.'}</Text>
           </Card>
         ))}
@@ -357,6 +412,35 @@ function Stat({ label, value, suffix = '' }: { label: string; value: number; suf
   return <View style={styles.stat}><Text style={styles.statValue}>{value.toLocaleString()}{suffix}</Text><Text style={styles.statLabel}>{label}</Text></View>;
 }
 
+function HeaderStat({ label, value, tone = colors.brightBlue }: { label: string; value: number; tone?: string }) {
+  return (
+    <View style={styles.headerStat}>
+      <Text style={[styles.headerStatValue, { color: tone }]}>{value.toLocaleString()}</Text>
+      <Text style={styles.headerStatLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function StatusLegend() {
+  const items: { label: string; color: string }[] = [
+    { label: 'Covered', color: colors.green },
+    { label: 'In Progress', color: colors.amber },
+    { label: 'Untapped', color: colors.red },
+    { label: 'Follow-Up', color: colors.purple },
+  ];
+
+  return (
+    <View style={styles.legend}>
+      {items.map((item) => (
+        <View key={item.label} style={styles.legendItem}>
+          <View style={[styles.legendDot, { backgroundColor: item.color }]} />
+          <Text style={styles.legendText}>{item.label}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
 function Flag({ label, value, onPress }: { label: string; value: boolean; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={[styles.flag, value && styles.flagActive]}>
@@ -381,6 +465,39 @@ function nearestTerritory(point: { latitude: number; longitude: number }, items:
     .sort((a, b) => a.distance - b.distance)[0]?.item;
 }
 
+function nearbyMinistryPoints(territory: Territory) {
+  const base = territory.center;
+  return [
+    {
+      id: `${territory.id}-church-hub`,
+      name: 'Partner Church Hub',
+      type: 'Church Partner',
+      distance: '0.7 mi',
+      color: colors.gold,
+      icon: 'business' as keyof typeof Ionicons.glyphMap,
+      coordinate: { latitude: base.latitude + 0.012, longitude: base.longitude - 0.014 },
+    },
+    {
+      id: `${territory.id}-follow-up`,
+      name: 'Prayer Follow-Up Point',
+      type: 'Prayer Team',
+      distance: '1.1 mi',
+      color: colors.purple,
+      icon: 'heart' as keyof typeof Ionicons.glyphMap,
+      coordinate: { latitude: base.latitude - 0.011, longitude: base.longitude + 0.012 },
+    },
+    {
+      id: `${territory.id}-study-home`,
+      name: 'Bible Study Home',
+      type: 'Discipleship',
+      distance: '1.4 mi',
+      color: colors.green,
+      icon: 'book' as keyof typeof Ionicons.glyphMap,
+      coordinate: { latitude: base.latitude + 0.007, longitude: base.longitude + 0.016 },
+    },
+  ];
+}
+
 function startOfToday() {
   const date = new Date();
   date.setHours(0, 0, 0, 0);
@@ -397,19 +514,39 @@ function isTodayOrOverdue(value: string) {
 const styles = StyleSheet.create({
   backButton: { alignSelf: 'flex-start', minHeight: 42, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 13, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 4 },
   backText: { color: colors.royalBlue, fontWeight: '900' },
-  header: { padding: 16, paddingBottom: 8 },
+  header: { padding: 14, paddingBottom: 8, backgroundColor: colors.royalBlue },
+  headerCard: { borderRadius: 18, overflow: 'hidden', backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.55)' },
+  headerStats: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingBottom: 12 },
+  headerStat: { flex: 1, borderRadius: 12, backgroundColor: '#F8FAFC', paddingVertical: 8, alignItems: 'center', borderWidth: 1, borderColor: colors.softLine },
+  headerStatValue: { fontWeight: '900', fontSize: 15 },
+  headerStatLabel: { color: colors.slate, fontSize: 10, fontWeight: '800', marginTop: 2, textAlign: 'center' },
   map: { flex: 1 },
-  panel: { maxHeight: '58%', backgroundColor: colors.white, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 16, borderTopColor: colors.line, borderTopWidth: 1 },
+  customMarker: { maxWidth: 128, minHeight: 34, borderRadius: 999, borderWidth: 2, paddingHorizontal: 8, paddingVertical: 5, backgroundColor: 'rgba(255,255,255,0.96)', flexDirection: 'row', alignItems: 'center', gap: 6 },
+  markerCore: { width: 12, height: 12, borderRadius: 999 },
+  customMarkerText: { color: colors.royalBlue, fontSize: 12, fontWeight: '900', maxWidth: 92 },
+  churchMarker: { width: 34, height: 34, borderRadius: 17, borderWidth: 2, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 5, shadowOffset: { width: 0, height: 2 } },
+  churchMarkerCore: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  legend: { position: 'absolute', top: 176, left: 14, right: 14, minHeight: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.94)', borderWidth: 1, borderColor: 'rgba(212,175,55,0.75)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: 8 },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  legendDot: { width: 9, height: 9, borderRadius: 999 },
+  legendText: { color: colors.royalBlue, fontSize: 10, fontWeight: '900' },
+  panel: { maxHeight: '60%', backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 16, borderTopColor: colors.gold, borderTopWidth: 1.5 },
   searchRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   searchInput: { flex: 1, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, color: '#111827' },
   panelHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  kicker: { color: colors.gold, fontWeight: '800', fontSize: 11 },
+  kicker: { color: colors.gold, fontWeight: '800', fontSize: 12 },
   title: { color: colors.royalBlue, fontSize: 22, fontWeight: '800' },
+  statusLine: { color: colors.slate, fontSize: 12, fontWeight: '700', marginTop: 3, textTransform: 'capitalize' },
   stats: { flexDirection: 'row', gap: 8, marginTop: 12 },
   stat: { flex: 1, backgroundColor: '#F8FAFC', borderRadius: 12, padding: 8, alignItems: 'center' },
   statValue: { color: colors.royalBlue, fontWeight: '800' },
   statLabel: { color: colors.slate, fontSize: 10 },
   section: { color: colors.royalBlue, fontWeight: '800', marginBottom: 8, marginTop: 16 },
+  ministryGrid: { gap: 8 },
+  ministryPoint: { minHeight: 56, borderRadius: 14, borderWidth: 1.5, backgroundColor: '#F8FAFC', flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10 },
+  ministryIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
+  ministryName: { color: colors.royalBlue, fontWeight: '900' },
+  ministryType: { color: colors.slate, fontWeight: '700', fontSize: 12, marginTop: 2 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
   chip: { borderWidth: 1.5, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
   chipText: { color: colors.royalBlue, fontWeight: '700' },
@@ -417,8 +554,13 @@ const styles = StyleSheet.create({
   streetList: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   streetName: { backgroundColor: colors.cream, color: colors.royalBlue, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, fontWeight: '700' },
   contact: { padding: 10, marginBottom: 8 },
+  contactHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
   contactName: { color: colors.royalBlue, fontWeight: '800' },
   contactSub: { color: colors.slate, marginTop: 3, marginBottom: 6 },
+  followUpBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 999, backgroundColor: '#F8FAFC', paddingHorizontal: 8, paddingVertical: 5 },
+  followUpBadgeText: { fontSize: 10, fontWeight: '900' },
+  contactMethods: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 6 },
+  contactMethod: { color: colors.royalBlue, fontSize: 12, fontWeight: '800', backgroundColor: colors.cream, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5 },
   body: { color: '#111827', lineHeight: 21 },
   form: { gap: 10, marginBottom: 36 },
   input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, color: '#111827' },

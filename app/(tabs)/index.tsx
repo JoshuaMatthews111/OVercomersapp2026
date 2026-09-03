@@ -28,6 +28,8 @@ type Story = {
   category: string;
   body?: string;
   imageUrl?: string;
+  actionUrl?: string;
+  publishedAt?: string;
   image: ImageSourcePropType;
   accent: string;
   icon: keyof typeof Ionicons.glyphMap;
@@ -72,8 +74,9 @@ export default function HomeScreen() {
     getAppStories().then(setRemoteStories);
   }, []);
 
-  const displayStories: Story[] = remoteStories.length
-    ? remoteStories.map((story, index) => {
+  const activeRemoteStories = remoteStories.filter((story) => isActiveStory(story.publishedAt || story.createdAt));
+  const displayStories: Story[] = activeRemoteStories.length
+    ? activeRemoteStories.map((story, index) => {
       const fallback = fallbackStories[index % fallbackStories.length];
       return {
         id: story.id,
@@ -81,6 +84,8 @@ export default function HomeScreen() {
         category: story.category || fallback.category,
         body: story.body || fallback.body,
         imageUrl: story.imageUrl,
+        actionUrl: story.actionUrl,
+        publishedAt: story.publishedAt || story.createdAt,
         image: story.imageUrl ? { uri: story.imageUrl } : fallback.image,
         accent: fallback.accent,
         icon: fallback.icon
@@ -122,8 +127,10 @@ export default function HomeScreen() {
             </View>
           </View>
 
-          {dark ? (
-            <View style={styles.broadcastCard}>
+          {/* One coded card for both themes. The light-mode picture it replaced
+              had another minister's name and a made-up viewer count baked in. */}
+          {(
+            <View style={[styles.broadcastCard, !dark && styles.broadcastCardLight]}>
               <View style={styles.liveBadge}>
                 <View style={styles.liveDot} />
                 <Text style={styles.liveText}>LIVE NOW</Text>
@@ -135,13 +142,13 @@ export default function HomeScreen() {
                   </View>
                 </ImageBackground>
                 <View style={styles.broadcastCopy}>
-                  <Text style={styles.broadcastOverline}>GLOBAL BROADCAST</Text>
-                  <Text style={styles.broadcastTitle}>Faith That Overcomes</Text>
-                  <Text style={styles.broadcastSpeaker}>Overcomers Global Network</Text>
+                  <Text style={[styles.broadcastOverline, !dark && styles.broadcastOverlineLight]}>GLOBAL BROADCAST</Text>
+                  <Text style={[styles.broadcastTitle, !dark && styles.broadcastTitleLight]} numberOfLines={2} adjustsFontSizeToFit minimumFontScale={0.8}>Faith That Overcomes</Text>
+                  <Text style={[styles.broadcastSpeaker, !dark && styles.broadcastSpeakerLight]}>Overcomers Global Network</Text>
                   <View style={styles.watchRow}>
                     <View style={styles.viewerInfo}>
-                      <Ionicons name="people" size={17} color={colors.gold} />
-                      <Text style={styles.viewerText}>12.4K watching</Text>
+                      <Ionicons name="people" size={17} color={dark ? colors.gold : colors.deepGold} />
+                      <Text style={[styles.viewerText, !dark && styles.viewerTextLight]}>Believers worldwide</Text>
                     </View>
                     <Pressable style={styles.watchButton} onPress={() => Linking.openURL('https://overcomersglobalnetwork.com')}>
                       <Text style={styles.watchButtonText}>Watch Live</Text>
@@ -151,10 +158,6 @@ export default function HomeScreen() {
                 </View>
               </View>
             </View>
-          ) : (
-            <Pressable onPress={() => Linking.openURL('https://overcomersglobalnetwork.com')} style={styles.broadcastLightCard}>
-              <Image source={art.broadcastLight} resizeMode="cover" style={styles.referenceImage} />
-            </Pressable>
           )}
 
           <View style={styles.sectionHeader}>
@@ -219,39 +222,62 @@ export default function HomeScreen() {
 function StoryCard({ story, dark }: { story: Story; dark: boolean }) {
   const [imageFailed, setImageFailed] = useState(false);
   const storyHasVideo = Boolean(story.imageUrl && isVideoUrl(story.imageUrl));
+  const resolveAsset = (Image as unknown as { resolveAssetSource?: (source: ImageSourcePropType) => { uri?: string } | undefined }).resolveAssetSource;
+  const localImageUrl = !story.imageUrl && resolveAsset ? resolveAsset(story.image)?.uri : undefined;
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`Open story ${story.title}`}
       onPress={() => router.push({
-        pathname: '/story-detail',
+        pathname: '/story-viewer',
         params: {
           id: story.id,
           title: story.title,
           category: story.category,
           body: story.body || '',
-          imageUrl: story.imageUrl || '',
+          imageUrl: story.imageUrl || localImageUrl || '',
+          actionUrl: story.actionUrl || '',
           accent: story.accent,
+          publishedAt: story.publishedAt || '',
         },
       } as any)}
       style={styles.storyCard}
     >
-      <View style={[styles.storyImageWrap, { borderColor: story.accent }]}>
-        {storyHasVideo ? (
-          <View style={[styles.storyImage, styles.storyVideoFallback]}>
-            <Ionicons name="play-circle" size={30} color={colors.white} />
-          </View>
-        ) : (
-          <Image source={imageFailed ? fallbackStories[0].image : story.image} resizeMode="cover" style={styles.storyImage} onError={() => setImageFailed(true)} />
-        )}
+      <LinearGradient colors={[colors.gold, story.accent]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={styles.storyRing}>
+        <View style={[styles.storyImageWrap, dark && styles.storyImageWrapDark]}>
+          {storyHasVideo ? (
+            <View style={[styles.storyImage, styles.storyVideoFallback]}>
+              <Ionicons name="play-circle" size={30} color={colors.white} />
+            </View>
+          ) : (
+            <Image source={imageFailed ? fallbackStories[0].image : story.image} resizeMode="cover" style={styles.storyImage} onError={() => setImageFailed(true)} />
+          )}
+        </View>
         <View style={[styles.storyBadge, { backgroundColor: story.accent }]}>
           <Ionicons name={story.icon} size={15} color={colors.white} />
         </View>
-      </View>
+      </LinearGradient>
       <Text style={[styles.storyTitle, dark && styles.storyTitleDark]}>{story.title}</Text>
       <Text style={[styles.storyCategory, { color: dark ? colors.gold : story.accent }]}>{story.category}</Text>
+      <Text style={[styles.storyTimer, dark && styles.storyTimerDark]}>{storyTimeLabel(story.publishedAt)}</Text>
     </Pressable>
   );
+}
+
+function isActiveStory(value?: string) {
+  if (!value) return true;
+  const published = new Date(value).getTime();
+  if (Number.isNaN(published)) return true;
+  return Date.now() - published <= 24 * 60 * 60 * 1000;
+}
+
+function storyTimeLabel(value?: string) {
+  if (!value) return '24h';
+  const published = new Date(value).getTime();
+  if (Number.isNaN(published)) return '24h';
+  const remainingMs = published + 24 * 60 * 60 * 1000 - Date.now();
+  if (remainingMs <= 0) return 'expiring';
+  return `${Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000)))}h left`;
 }
 
 function isVideoUrl(url: string) {
@@ -353,13 +379,13 @@ const styles = StyleSheet.create({
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.white },
   liveText: { color: colors.white, fontWeight: '900', fontSize: 12 },
   broadcastContent: { flexDirection: 'row', minHeight: 190, gap: 14, alignItems: 'stretch' },
-  broadcastImageWrap: { flex: 1, borderRadius: 14, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', minHeight: 190 },
+  broadcastImageWrap: { flex: 0.9, borderRadius: 14, overflow: 'hidden', justifyContent: 'center', alignItems: 'center', minHeight: 190 },
   broadcastImage: { borderRadius: 14 },
   playCircle: { width: 72, height: 72, borderRadius: 36, backgroundColor: colors.white, borderWidth: 5, borderColor: 'rgba(212,175,55,0.55)', alignItems: 'center', justifyContent: 'center' },
-  broadcastCopy: { flex: 1, justifyContent: 'center', paddingVertical: 10 },
+  broadcastCopy: { flex: 1.1, justifyContent: 'center', paddingVertical: 10 },
   broadcastOverline: { color: colors.gold, fontWeight: '900', fontSize: 13 },
   broadcastOverlineLight: { color: colors.deepGold },
-  broadcastTitle: { color: colors.white, fontSize: 27, lineHeight: 31, fontWeight: '900', marginTop: 10 },
+  broadcastTitle: { color: colors.white, fontSize: 24, lineHeight: 28, fontWeight: '900', marginTop: 10 },
   broadcastTitleLight: { color: colors.royalBlue },
   broadcastSpeaker: { color: colors.gold, fontSize: 16, fontWeight: '800', marginTop: 10 },
   broadcastSpeakerLight: { color: colors.deepGold },
@@ -377,13 +403,17 @@ const styles = StyleSheet.create({
   sectionActionDark: { color: colors.gold },
   storyScroll: { gap: 18, paddingRight: 12, paddingBottom: 6 },
   storyCard: { width: 100, alignItems: 'center' },
-  storyImageWrap: { width: 86, height: 86, borderRadius: 43, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
-  storyImage: { width: 76, height: 76, borderRadius: 38 },
+  storyRing: { width: 86, height: 86, borderRadius: 43, alignItems: 'center', justifyContent: 'center' },
+  storyImageWrap: { width: 80, height: 80, borderRadius: 40, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center' },
+  storyImageWrapDark: { backgroundColor: '#061334' },
+  storyImage: { width: 74, height: 74, borderRadius: 37 },
   storyVideoFallback: { backgroundColor: colors.royalBlue, alignItems: 'center', justifyContent: 'center' },
   storyBadge: { position: 'absolute', left: -6, bottom: -3, width: 30, height: 30, borderRadius: 15, borderWidth: 2, borderColor: colors.white, alignItems: 'center', justifyContent: 'center' },
   storyTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 13, textAlign: 'center', marginTop: 9 },
   storyTitleDark: { color: colors.white },
-  storyCategory: { fontWeight: '800', fontSize: 11, marginTop: 3, textAlign: 'center' },
+  storyCategory: { fontWeight: '800', fontSize: 12, marginTop: 3, textAlign: 'center' },
+  storyTimer: { color: colors.muted, fontWeight: '800', fontSize: 10, marginTop: 2, textAlign: 'center' },
+  storyTimerDark: { color: 'rgba(255,255,255,0.58)' },
 
   prayerDarkApproved: { marginTop: 17, height: 104, borderRadius: 13, overflow: 'hidden', backgroundColor: '#071B45', ...shadows.soft },
   prayerLightApproved: { marginTop: 17, height: 104, borderRadius: 13, overflow: 'hidden', backgroundColor: colors.white, ...shadows.soft },
@@ -397,7 +427,7 @@ const styles = StyleSheet.create({
   impactDivider: { borderRightWidth: 1, borderRightColor: 'rgba(212,175,55,0.24)' },
   impactValue: { color: colors.royalBlue, fontWeight: '900', fontSize: 20, marginTop: 5 },
   impactValueDark: { color: colors.white },
-  impactLabel: { color: colors.slate, fontSize: 11, textAlign: 'center', lineHeight: 14, marginTop: 2 },
+  impactLabel: { color: colors.slate, fontSize: 12, textAlign: 'center', lineHeight: 14, marginTop: 2 },
   impactLabelDark: { color: 'rgba(255,255,255,0.78)' },
 
   eventsRow: { gap: 11 },

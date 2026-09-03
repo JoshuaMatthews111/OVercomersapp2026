@@ -40,7 +40,7 @@ const styles = StyleSheet.create({
   seal: { width: 54, height: 44 },
   brandTextBlock: { flex: 1 },
   brandName: { color: colors.royalBlue, fontWeight: '900', fontSize: 14, textTransform: 'uppercase' },
-  brandMotto: { color: colors.deepGold, fontWeight: '700', fontSize: 11, marginTop: 2 },
+  brandMotto: { color: colors.deepGold, fontWeight: '700', fontSize: 12, marginTop: 2 },
   titleBlock: { marginTop: 18 },
   subtitle: { color: colors.muted, fontSize: 15, marginTop: 4, lineHeight: 20 },
   screenTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 28, letterSpacing: 0 },

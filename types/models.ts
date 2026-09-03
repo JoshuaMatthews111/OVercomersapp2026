@@ -40,7 +40,7 @@ export type ChatRoom = {
   region?: string;
   members: number;
   unread: number;
-  type: 'global' | 'regional' | 'leader' | 'prayer' | 'announcement';
+  type: 'global' | 'regional' | 'leader' | 'prayer' | 'announcement' | 'direct' | 'group' | 'general';
 };
 
 export type OutreachStatus = 'untapped' | 'in_progress' | 'covered' | 'follow_up_due' | 'new_believer' | 'discipled';
@@ -153,4 +153,5 @@ export type AppStory = {
   imageUrl?: string;
   actionUrl?: string;
   publishedAt?: string;
+  createdAt?: string;
 };

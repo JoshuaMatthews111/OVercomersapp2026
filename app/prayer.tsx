@@ -44,7 +44,7 @@ export default function PrayerScreen() {
       return;
     }
     if (router.canGoBack()) router.back();
-    else router.replace('/(tabs)/index' as any);
+    else router.replace('/(tabs)' as any);
   }
 
   function switchMode(nextMode: 'submit' | 'mine') {

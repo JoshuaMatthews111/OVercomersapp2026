@@ -46,7 +46,7 @@ export default function EventDetailScreen() {
 
   function goBack() {
     if (router.canGoBack()) router.back();
-    else router.replace('/(tabs)/index' as any);
+    else router.replace('/(tabs)' as any);
   }
 
   function addToCalendar() {

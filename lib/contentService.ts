@@ -59,7 +59,7 @@ export async function getAppStories(): Promise<AppStory[]> {
   if (!hasSupabase) return [];
   const { data, error } = await supabase
     .from('app_stories')
-    .select('id, title, category, body, region, image_url, action_url, published_at')
+    .select('id, title, category, body, region, image_url, action_url, published_at, created_at')
     .eq('status', 'published')
     .order('sort_order')
     .order('published_at', { ascending: false })
@@ -73,7 +73,8 @@ export async function getAppStories(): Promise<AppStory[]> {
     region: row.region || undefined,
     imageUrl: row.image_url || undefined,
     actionUrl: row.action_url || undefined,
-    publishedAt: row.published_at || undefined
+    publishedAt: row.published_at || undefined,
+    createdAt: row.created_at || undefined
   }));
 }
 
@@ -346,6 +347,33 @@ export async function createAdminMediaItem(input: {
       status: 'published',
       created_by: userResult.user.id,
       published_at: new Date().toISOString(),
+    })
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function createAdminEvent(input: {
+  title: string;
+  startsAt: string;
+  description?: string;
+  location?: string;
+  imageUrl?: string;
+  registrationUrl?: string;
+}) {
+  if (!hasSupabase) return { id: `local-event-${Date.now()}` };
+  const { data: userResult } = await supabase.auth.getUser();
+  if (!userResult.user) throw new Error('Sign in before publishing events.');
+  const { data, error } = await supabase
+    .from('events')
+    .insert({
+      title: input.title,
+      starts_at: input.startsAt,
+      description: input.description || null,
+      location: input.location || null,
+      image_url: input.imageUrl || null,
+      registration_url: input.registrationUrl || null,
     })
     .select('id')
     .single();

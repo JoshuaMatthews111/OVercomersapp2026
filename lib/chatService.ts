@@ -11,6 +11,7 @@ export type ChatMessage = {
   userId?: string;
   body: string;
   displayName: string;
+  avatarUrl?: string;
   createdAt: string;
   isFlagged?: boolean;
 };
@@ -20,15 +21,24 @@ export type ChatProfileSearchResult = {
   displayName: string;
   phone?: string;
   email?: string;
+  avatarUrl?: string;
 };
 
 export type ChatMember = {
   userId: string;
   displayName: string;
   phone?: string;
+  avatarUrl?: string;
   role?: string;
   joinedAt?: string;
 };
+
+function normalizeRoomType(type?: string): ChatRoom['type'] {
+  if (type === 'announcement' || type === 'leader' || type === 'regional' || type === 'prayer' || type === 'direct' || type === 'group' || type === 'general' || type === 'global') {
+    return type;
+  }
+  return 'global';
+}
 
 export async function getChatRooms(): Promise<ChatRoom[]> {
   if (!hasSupabase) return chatRooms;
@@ -40,7 +50,7 @@ export async function getChatRooms(): Promise<ChatRoom[]> {
     region: row.region || 'Worldwide',
     members: 0,
     unread: row.is_mandatory ? 1 : 0,
-    type: row.channel_type || 'global'
+    type: normalizeRoomType(row.channel_type)
   }));
 }
 
@@ -54,7 +64,7 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
 
   const { data, error } = await supabase
     .from('chat_messages')
-    .select('id, channel_id, user_id, body, created_at, profiles(display_name)')
+    .select('id, channel_id, user_id, body, created_at, is_flagged')
     .eq('channel_id', channelId)
     .is('deleted_at', null)
     .order('created_at', { ascending: true })
@@ -67,7 +77,8 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     channelId: row.channel_id,
     userId: row.user_id,
     body: row.body,
-    displayName: profiles.get(row.user_id)?.displayName || row.profiles?.display_name || 'OGN Member',
+    displayName: profiles.get(row.user_id)?.displayName || 'OGN Member',
+    avatarUrl: profiles.get(row.user_id)?.avatarUrl,
     createdAt: row.created_at,
     isFlagged: row.is_flagged
   }));
@@ -115,18 +126,31 @@ export function subscribeToChat(channelId: string, onMessage: (message: ChatMess
       { event: 'INSERT', schema: 'public', table: 'chat_messages', filter: `channel_id=eq.${channelId}` },
       (payload) => {
         const row: any = payload.new;
-        onMessage({
+        const base: ChatMessage = {
           id: row.id,
           channelId: row.channel_id,
           userId: row.user_id,
           body: row.body,
           displayName: 'OGN Member',
           createdAt: row.created_at
-        });
+        };
+        getProfilesByIds(row.user_id ? [row.user_id] : [])
+          .then((profiles) => {
+            const profile = row.user_id ? profiles.get(row.user_id) : undefined;
+            onMessage({ ...base, displayName: profile?.displayName || base.displayName, avatarUrl: profile?.avatarUrl });
+          })
+          .catch(() => onMessage(base));
       }
     )
     .subscribe();
   return channel;
+}
+
+export async function joinChatRoom(channelId: string) {
+  if (!hasSupabase) return { channel_id: channelId };
+  const { data: userResult } = await supabase.auth.getUser();
+  if (!userResult.user) throw new Error('Sign in before joining chat rooms.');
+  return ensureChatMember(channelId, userResult.user.id);
 }
 
 export async function moderateChatMessage(messageId: string, action: 'remove' | 'flag' = 'remove') {
@@ -180,11 +204,16 @@ export async function searchChatProfiles(query: string): Promise<ChatProfileSear
   const needle = `%${query.trim()}%`;
   const { data, error } = await supabase
     .from('profiles')
-    .select('id, display_name, phone')
+    .select('id, display_name, phone, avatar_url')
     .or(`display_name.ilike.${needle},phone.ilike.${needle}`)
     .limit(10);
   if (error || !data) return [];
-  return data.map((row) => ({ id: row.id, displayName: row.display_name || 'OGN Member', phone: row.phone || undefined }));
+  return data.map((row) => ({
+    id: row.id,
+    displayName: row.display_name || 'OGN Member',
+    phone: row.phone || undefined,
+    avatarUrl: row.avatar_url || undefined
+  }));
 }
 
 export async function getChatMembers(channelId: string): Promise<ChatMember[]> {
@@ -203,6 +232,7 @@ export async function getChatMembers(channelId: string): Promise<ChatMember[]> {
     joinedAt: row.joined_at || undefined,
     displayName: profiles.get(row.user_id)?.displayName || 'OGN Member',
     phone: profiles.get(row.user_id)?.phone,
+    avatarUrl: profiles.get(row.user_id)?.avatarUrl,
   }));
 }
 
@@ -258,14 +288,18 @@ async function ensureChatMember(channelId: string, userId: string) {
 
 async function getProfilesByIds(userIds: string[]) {
   const uniqueIds = [...new Set(userIds)].filter(Boolean);
-  const profiles = new Map<string, { displayName: string; phone?: string }>();
+  const profiles = new Map<string, { displayName: string; phone?: string; avatarUrl?: string }>();
   if (!hasSupabase || !uniqueIds.length) return profiles;
   const { data } = await supabase
     .from('profiles')
-    .select('id, display_name, phone')
+    .select('id, display_name, phone, avatar_url')
     .in('id', uniqueIds);
   (data || []).forEach((row) => {
-    profiles.set(row.id, { displayName: row.display_name || 'OGN Member', phone: row.phone || undefined });
+    profiles.set(row.id, {
+      displayName: row.display_name || 'OGN Member',
+      phone: row.phone || undefined,
+      avatarUrl: row.avatar_url || undefined
+    });
   });
   return profiles;
 }
