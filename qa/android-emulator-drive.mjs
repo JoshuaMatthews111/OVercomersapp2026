@@ -144,7 +144,19 @@ const forInputText = (s) => s.replace(/ /g, "%s");
 
 /** Signed in is read off the app, never assumed from a tap having landed. */
 async function looksSignedIn() {
-  return /welcome to|global broadcast|recent stories/i.test(fingerprint(await tree()));
+  /**
+   * Signed out means a sign-in form is on screen: a text box to type into, or
+   * the welcome door. Judging by the HOME screen's words was wrong the moment
+   * the app was anywhere else — after "sign out" it sat in a chat room, still
+   * signed in, and the run reported the session ended and a critical finding
+   * that the app could not be signed back into. Neither was true.
+   */
+  const nodes = await tree();
+  const words = fingerprint(nodes);
+  const signInFormShowing =
+    nodes.some((n) => /EditText/.test(n.cls)) ||
+    /get started|welcome back|create account/i.test(words);
+  return nodes.length > 0 && !signInFormShowing;
 }
 
 const report = {
@@ -337,9 +349,43 @@ try {
 }
 
 // ── Launch ─────────────────────────────────────────────────────────────────
+/**
+ * Is our app actually the thing on screen?
+ *
+ * A fresh emulator threw up "Pixel Launcher isn't responding" while the app
+ * was starting, and every read for the rest of the run was of that dialog
+ * and whatever sat behind it. The run reported the app's sign-in absent and
+ * eighteen controls dead; the app had never been in front. So: launch, wait,
+ * clear any system dialog, and ASK Android which window has focus before
+ * believing anything read from the screen.
+ */
+async function inFront() {
+  try {
+    const out = await adbText(["shell", "dumpsys", "window", "windows"]);
+    const m = out.match(/mCurrentFocus=.*?\{[^}]*\s([\w.]+)\/[\w.$]+\}/);
+    return m ? m[1] : "";
+  } catch {
+    return "";
+  }
+}
+async function clearSystemDialogs() {
+  for (let i = 0; i < 3; i++) {
+    const r = await tapLabelled(/^(wait|close app|ok|got it|dismiss)$/i);
+    if (!r.ok) break;
+    note("system dialog", 'cleared "' + r.tapped + '"');
+    await sleep(1200);
+  }
+}
 await sh(["am", "force-stop", BUNDLE]).catch(() => undefined);
-await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
-await sleep(11000);
+for (let attempt = 0; attempt < 3; attempt++) {
+  await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
+  await sleep(11000);
+  await clearSystemDialogs();
+  const front = await inFront();
+  if (front === BUNDLE) break;
+  note("launch", "attempt " + (attempt + 1) + ": " + (front || "nothing") + " is in front, not the app — launching again");
+  await sleep(4000);
+}
 report.screens.push({ route: "(launch)", shot: await shot("00-launch"), labels: fingerprint(await tree()).slice(0, 400) });
 note("launch", "app opened");
 
@@ -432,7 +478,7 @@ for (const route of ROUTES) {
     // A press that answers with an alert has WORKED — but the alert stays up,
     // and on this app the next fourteen presses all landed on its OK button and
     // were reported dead. Clear anything modal before the next press.
-    const modal = await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)$/i);
+    const modal = await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)\b/i);
     if (modal.ok) await sleep(800);
     await openRoute();
     await sleep(2600);
@@ -450,7 +496,7 @@ if (report.signedIn) {
 
   let signOut = null;
   for (let hop = 0; hop < 4 && !signOut; hop++) {
-    signOut = (await tree()).find((n) => n.clickable && onScreen(n) && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable") ?? null;
+    signOut = (await tree()).find((n) => n.clickable && onScreen(n) && /^(sign ?out|log ?out|logout)$/i.test(labelOf(n)) && mayPress(labelOf(n), PERMISSIONS).allowed) ?? null;
     if (signOut) break;
     await sh(["input", "swipe", "540", "1900", "540", "600", "400"]).catch(() => undefined);
     await sleep(1200);

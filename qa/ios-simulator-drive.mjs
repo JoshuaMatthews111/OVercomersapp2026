@@ -302,7 +302,19 @@ async function tapLabelled(pattern) {
 
 /** Signed in is read off the app, never assumed from a tap having landed. */
 async function looksSignedIn() {
-  return /welcome to|global broadcast|recent stories/i.test(fingerprint(await tree()));
+  /**
+   * Signed out means a sign-in form is on screen: a text box to type into, or
+   * the welcome door. Judging by the HOME screen's words was wrong the moment
+   * the app was anywhere else — after "sign out" it sat in a chat room, still
+   * signed in, and the run reported the session ended and a critical finding
+   * that the app could not be signed back into. Neither was true.
+   */
+  const nodes = await tree();
+  const words = fingerprint(nodes);
+  const signInFormShowing =
+    nodes.some((n) => isTextField(n)) ||
+    /get started|welcome back|create account/i.test(words);
+  return nodes.length > 0 && !signInFormShowing;
 }
 
 
@@ -551,7 +563,7 @@ for (const route of ROUTES) {
     // controls for exactly this reason. Close it before moving on.
     // Alerts too: on Android a bell that only shows a message swallowed the
     // next fourteen presses. Same guard here.
-    await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)$/i);
+    await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)\b/i);
     await sleep(800);
     await openRoute();
     await sleep(2600);
@@ -569,7 +581,7 @@ if (canTap && report.signedIn) {
   // four screens, reading the tree after each swipe.
   let signOut = null;
   for (let hop = 0; hop < 4 && !signOut; hop++) {
-    signOut = (await tree()).find((n) => isControl(n) && onScreen(n) && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable") ?? null;
+    signOut = (await tree()).find((n) => isControl(n) && onScreen(n) && /^(sign ?out|log ?out|logout)$/i.test(labelOf(n)) && mayPress(labelOf(n), PERMISSIONS).allowed) ?? null;
     if (signOut) break;
     await idbRun(["ui", "swipe", "200", "700", "200", "200", "--duration", "0.4"]).catch(() => undefined);
     await sleep(1200);
