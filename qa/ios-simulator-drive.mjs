@@ -321,10 +321,17 @@ async function signIn(tag) {
    * whatever the label above it says.
    */
   const fields = (await tree()).filter(isTextField);
-  const secure = fields.filter((f) => f.role === "AXSecureTextField");
-  const plain = fields.filter((f) => f.role !== "AXSecureTextField");
-  const emailField = plain[0] ?? null;
-  const passwordField = secure[0] ?? null;
+  // React Native does not always expose a password box as AXSecureTextField:
+  // on this app it is a plain AXTextField whose traits or label say "password".
+  // Ask the role first, then the traits, then the words, then fall back to
+  // "the other text field" — a sign-in form has exactly two.
+  const saysPassword = (f) =>
+    f.role === "AXSecureTextField" ||
+    (Array.isArray(f.traits) && f.traits.some((t) => /secure/i.test(String(t)))) ||
+    /password/i.test(labelOf(f)) ||
+    /password/i.test(String(f.AXPlaceholderValue ?? f.placeholder ?? ""));
+  const passwordField = fields.find(saysPassword) ?? (fields.length >= 2 ? fields[1] : null);
+  const emailField = fields.find((f) => f !== passwordField) ?? null;
 
   if (emailField) {
     await tapFrame(emailField.frame);
@@ -345,6 +352,18 @@ async function signIn(tag) {
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
   await sleep(9000);
+
+  // A rejected sign-in raises a modal alert. Left open, it swallows every
+  // tap for the rest of the run and every control reads as dead — sixteen of
+  // them did, on a run where nothing was wrong with the app. Record what it
+  // said, then clear it.
+  const alertText = fingerprint(await tree());
+  const alert = await tapLabelled(/^(ok|dismiss|close|try again)$/i);
+  if (alert.ok) {
+    const said = (alertText.match(/[^|~]*(?:needed|invalid|incorrect|failed|wrong|error)[^|~]*/i) ?? [""])[0].trim();
+    note(tag + " alert", 'the app answered with an alert' + (said ? ': "' + said.slice(0, 120) + '"' : "") + " — dismissed");
+    await sleep(1200);
+  }
 
   return await looksSignedIn();
 }
