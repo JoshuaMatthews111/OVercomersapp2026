@@ -122,8 +122,14 @@ async function tapLabelled(pattern) {
   return { ok: true, tapped: labelOf(hit) };
 }
 
-/** adb's shell splits on spaces, so typed text arrives as one word without this. */
-const shellQuote = (s) => "'" + s.replace(/'/g, "'\\''") + "'";
+/**
+ * What `input text` actually wants.
+ *
+ * Wrapping the text in shell quotes typed nothing at all — the after-sign-in
+ * screenshot shows both boxes still empty. `input text` takes one argument
+ * and understands %s for a space; everything else goes through as it is.
+ */
+const forInputText = (s) => s.replace(/ /g, "%s");
 
 /** Signed in is read off the app, never assumed from a tap having landed. */
 async function looksSignedIn() {
@@ -223,14 +229,14 @@ async function signIn(tag) {
 
   const email = await tapLabelled(/email|phone/i);
   if (email.ok) {
-    await sh(["input", "text", shellQuote(EMAIL)]);
+    await sh(["input", "text", forInputText(EMAIL)]);
     await sleep(700);
   }
   note(tag + " email field", email.ok ? 'typed into "' + email.tapped + '"' : email.why);
 
   const pw = await tapLabelled(/password/i);
   if (pw.ok) {
-    await sh(["input", "text", shellQuote(PASSWORD)]);
+    await sh(["input", "text", forInputText(PASSWORD)]);
     await sleep(700);
   }
   note(tag + " password field", pw.ok ? 'typed into "' + pw.tapped + '"' : pw.why);
@@ -319,15 +325,24 @@ for (const route of ROUTES) {
     await sleep(2400);
     const after = fingerprint(await tree());
     if (before === after) {
+      const proof = await shot("dead-" + name + "-" + report.deadControls.length).catch(() => null);
       report.deadControls.push({
         route,
         control: labelOf(control),
-        evidence: "the screen read identically before and after the press, on a screen that does not move on its own"
+        shot: proof,
+        evidence:
+          "the screen read identically before and after the press — same controls, same selection, same layout — " +
+          "on a screen measured not to move on its own"
       });
       note("DEAD", route + ' — "' + labelOf(control) + '" did nothing');
     } else {
       report.liveControls++;
     }
+    // A press that answers with an alert has WORKED — but the alert stays up,
+    // and on this app the next fourteen presses all landed on its OK button and
+    // were reported dead. Clear anything modal before the next press.
+    const modal = await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)$/i);
+    if (modal.ok) await sleep(800);
     await openRoute();
     await sleep(2600);
   }

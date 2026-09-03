@@ -468,7 +468,9 @@ for (const route of ROUTES) {
     // A press can open a picker or a sheet, and leaving it open makes the NEXT
     // screen read as this one — /profile came back full of Bible-picker
     // controls for exactly this reason. Close it before moving on.
-    await tapLabelled(/^(close|cancel|done|dismiss)$/i);
+    // Alerts too: on Android a bell that only shows a message swallowed the
+    // next fourteen presses. Same guard here.
+    await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)$/i);
     await sleep(800);
     await openRoute();
     await sleep(2600);
