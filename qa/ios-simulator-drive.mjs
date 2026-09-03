@@ -70,6 +70,8 @@ const report = {
   notAssessed: [],
   /** Controls that exist but sit off screen. Not pressed, not judged, named. */
   notReached: [],
+  /** What the operating system asked for, and what this run answered. */
+  permissionsRequested: [],
   sessionFlow: null,
   /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
   idbRawSample: null
@@ -303,6 +305,33 @@ async function looksSignedIn() {
   return /welcome to|global broadcast|recent stories/i.test(fingerprint(await tree()));
 }
 
+
+/**
+ * A system permission sheet is not part of the app, and it is not nothing.
+ *
+ * Pressing "Upload profile photo" raised iOS's Photo Library sheet. That IS
+ * the control working — and the sheet then sat over the next four rows, which
+ * were all reported dead. So after every press: if the operating system is
+ * asking for something, record what it asked for, answer no (the app's
+ * denied path is the one that is never tested by hand), and carry on.
+ */
+const PERMISSION_WORDS = /would like (full )?access|would like to (send|use|access)|allow .* to access|access to your|photo library|camera|microphone|location|notifications|contacts/i;
+const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|no thanks|limit access|only while using|allow once|allow|ok)$/i;
+async function handlePermissionSheet(route, control) {
+  const nodes = await tree();
+  const words = nodes.map(labelOf).filter(Boolean).join(" | ");
+  const asks = nodes.filter((n) => /alert|sheet|dialog/i.test(String(n.role ?? n.type ?? "")) || PERMISSION_WORDS.test(labelOf(n)));
+  const answer = nodes.find((n) => n.frame && /^(don.?t allow|deny|not now)$/i.test(labelOf(n)))
+    ?? nodes.find((n) => n.frame && PERMISSION_ANSWERS.test(labelOf(n)));
+  if (asks.length === 0 || !answer) return false;
+  const what = (words.match(/[^|]*(?:would like|access to|allow)[^|]*/i) ?? [words.slice(0, 160)])[0].trim();
+  report.permissionsRequested.push({ route, control, asked: what.slice(0, 200), answered: labelOf(answer) });
+  note("permission", route + ' — pressing "' + control + '" made the system ask: "' + what.slice(0, 90) + '" — answered "' + labelOf(answer) + '"');
+  await tapFrame(answer.frame);
+  await sleep(1200);
+  return true;
+}
+
 /**
  * Sign in from the stored account. Written once, called twice: first to get
  * in, and again to restore the session after sign-out is pressed on purpose.
@@ -471,7 +500,9 @@ for (const route of ROUTES) {
     const before = fingerprint(await tree());
     await tapFrame(control.frame);
     await sleep(2400);
-    const after = fingerprint(await tree());
+    // The operating system answering counts as the control having worked.
+    const asked = await handlePermissionSheet(route, labelOf(control));
+    const after = asked ? before + " +permission-sheet" : fingerprint(await tree());
     if (before === after) {
       // Proof, not just an assertion. A dead-control finding that cannot be
       // looked at is one nobody acts on.

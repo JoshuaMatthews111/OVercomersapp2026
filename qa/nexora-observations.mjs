@@ -119,6 +119,22 @@ export function toNexora(drive, platform) {
     }
   }
 
+  // ── What the operating system was asked for ──────────────────────────────
+  // Recorded, not judged here: whether "full access to your Photo Library" is
+  // right for a profile-photo picker is Nexora's call, with its rules.
+  for (const p of drive.permissionsRequested ?? []) {
+    observations.push({
+      ruleId: "device.permission-prompt",
+      route: p.route,
+      controlText: p.control,
+      title: `Pressing "${p.control}" asks the system for: ${p.asked.slice(0, 80)}`,
+      expected: "An app asks for the narrowest access that does the job, at the moment it is needed, and explains why.",
+      actual: `${p.asked} This run answered "${p.answered}" so the denied path was exercised.`,
+      reproSteps: repro(1, `Open ${p.route} on ${where} and press "${p.control}"`, "a permission request", p.asked.slice(0, 120)),
+      evidence: []
+    });
+  }
+
   // ── What this run did not look at ────────────────────────────────────────
   const notAssessed = [...(drive.notAssessed ?? [])];
   for (const n of drive.notJudged ?? []) {

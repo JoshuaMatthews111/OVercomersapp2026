@@ -156,6 +156,7 @@ const report = {
   notPressed: [],
   notJudged: [],
   notReached: [],
+  permissionsRequested: [],
   sessionFlow: null
 };
 /**
@@ -210,6 +211,33 @@ const note = (step, detail) => {
   report.steps.push({ step, detail });
   console.log("· " + step + ": " + detail);
 };
+
+
+/**
+ * A system permission sheet is not part of the app, and it is not nothing.
+ *
+ * Pressing "Upload profile photo" raised iOS's Photo Library sheet. That IS
+ * the control working — and the sheet then sat over the next four rows, which
+ * were all reported dead. So after every press: if the operating system is
+ * asking for something, record what it asked for, answer no (the app's
+ * denied path is the one that is never tested by hand), and carry on.
+ */
+const PERMISSION_WORDS = /would like (full )?access|would like to (send|use|access)|allow .* to access|access to your|photo library|camera|microphone|location|notifications|contacts/i;
+const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|no thanks|limit access|only while using|allow once|allow|ok)$/i;
+async function handlePermissionSheet(route, control) {
+  const nodes = await tree();
+  const words = nodes.map(labelOf).filter(Boolean).join(" | ");
+  const asks = nodes.filter((n) => /alert|sheet|dialog/i.test(String("")) || PERMISSION_WORDS.test(labelOf(n)));
+  const answer = nodes.find((n) => n.box && /^(don.?t allow|deny|not now)$/i.test(labelOf(n)))
+    ?? nodes.find((n) => n.box && PERMISSION_ANSWERS.test(labelOf(n)));
+  if (asks.length === 0 || !answer) return false;
+  const what = (words.match(/[^|]*(?:would like|access to|allow)[^|]*/i) ?? [words.slice(0, 160)])[0].trim();
+  report.permissionsRequested.push({ route, control, asked: what.slice(0, 200), answered: labelOf(answer) });
+  note("permission", route + ' — pressing "' + control + '" made the system ask: "' + what.slice(0, 90) + '" — answered "' + labelOf(answer) + '"');
+  await tapBox(answer.box);
+  await sleep(1200);
+  return true;
+}
 
 /**
  * Sign in from the stored account.
@@ -345,7 +373,8 @@ for (const route of ROUTES) {
     const before = fingerprint(await tree());
     await tapBox(control.box);
     await sleep(2400);
-    const after = fingerprint(await tree());
+    const asked = await handlePermissionSheet(route, labelOf(control));
+    const after = asked ? before + " +permission-sheet" : fingerprint(await tree());
     if (before === after) {
       const proof = await shot("dead-" + name + "-" + report.deadControls.length).catch(() => null);
       report.deadControls.push({
