@@ -190,6 +190,45 @@ async function tree() {
   }
 }
 
+/**
+ * Is this thing a control, or is it just words on the screen?
+ *
+ * The first run that could tap pressed every node with a box on it and then
+ * reported the app's own title, its tagline and "John 3:16" as dead controls.
+ * They are not broken buttons; they were never buttons. A report full of
+ * findings like that is worse than no report, because the real ones drown.
+ *
+ * iOS says what each node is — the accessibility role — so this asks instead
+ * of guessing. React Native surfaces a Pressable as AXButton, so the roles
+ * below are what an app of this kind actually exposes.
+ */
+const CONTROL_ROLES = new Set([
+  "AXButton",
+  "AXLink",
+  "AXTextField",
+  "AXSecureTextField",
+  "AXSearchField",
+  "AXSwitch",
+  "AXSlider",
+  "AXCell",
+  "AXTabGroup",
+  "AXRadioButton",
+  "AXCheckBox",
+  "AXPopUpButton",
+  "AXSegmentedControl"
+]);
+
+const isControl = (el) => {
+  if (!el || !el.frame || el.enabled === false) return false;
+  if (CONTROL_ROLES.has(el.role)) return true;
+  // Some controls describe themselves only through their traits.
+  const traits = Array.isArray(el.traits) ? el.traits : [];
+  return traits.some((t) => /^(Button|Link|SearchField|Selected|Adjustable)$/i.test(String(t)));
+};
+
+const isTextField = (el) =>
+  el?.role === "AXTextField" || el?.role === "AXSecureTextField" || el?.role === "AXSearchField";
+
 const labelOf = (el) => ((el.AXLabel ?? "") + " " + (el.AXValue ?? "")).trim();
 const fingerprint = (nodes) => nodes.map(labelOf).filter(Boolean).join(" ");
 
@@ -234,19 +273,36 @@ async function signIn(tag) {
     await sleep(2500);
   }
 
-  const email = await tapLabelled(/email|phone/i);
-  if (email.ok) {
+  /**
+   * Find the boxes by what they ARE, not by words near them.
+   *
+   * Matching on /email|phone/ typed the account into a validation message that
+   * happened to say "Enter your email and password first." — the sign-in then
+   * failed, and the run reported everything behind it as unchecked, correctly
+   * but for entirely the wrong reason. A secure text field is a password box
+   * whatever the label above it says.
+   */
+  const fields = (await tree()).filter(isTextField);
+  const secure = fields.filter((f) => f.role === "AXSecureTextField");
+  const plain = fields.filter((f) => f.role !== "AXSecureTextField");
+  const emailField = plain[0] ?? null;
+  const passwordField = secure[0] ?? null;
+
+  if (emailField) {
+    await tapFrame(emailField.frame);
+    await sleep(500);
     await idbRun(["ui", "text", EMAIL]);
     await sleep(700);
   }
-  note(tag + " email field", email.ok ? 'typed into "' + email.tapped + '"' : email.why);
+  note(tag + " email field", emailField ? "typed into the text field" : "no plain text field on this screen");
 
-  const pw = await tapLabelled(/password/i);
-  if (pw.ok) {
+  if (passwordField) {
+    await tapFrame(passwordField.frame);
+    await sleep(500);
     await idbRun(["ui", "text", PASSWORD]);
     await sleep(700);
   }
-  note(tag + " password field", pw.ok ? 'typed into "' + pw.tapped + '"' : pw.why);
+  note(tag + " password field", passwordField ? "typed into the secure field" : "no secure text field on this screen");
 
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
@@ -311,7 +367,7 @@ for (const route of ROUTES) {
   const shotPath = await shot("10-" + name);
   const nodes = await tree();
   const labels = nodes.map(labelOf).filter(Boolean);
-  report.screens.push({ route, shot: shotPath, labels: labels.slice(0, 40), controls: nodes.filter((n) => n.frame).length });
+  report.screens.push({ route, shot: shotPath, labels: labels.slice(0, 40), controls: nodes.filter(isControl).length });
   note("screen", route + " — " + (canTap ? labels.length + " labels" : "photographed only"));
 
   if (!canTap) continue;
@@ -323,7 +379,7 @@ for (const route of ROUTES) {
   }
 
   const pressable = [];
-  for (const n of nodes.filter((x) => x.frame && labelOf(x))) {
+  for (const n of nodes.filter((x) => isControl(x) && labelOf(x))) {
     const verdict = mayPress(labelOf(n), PERMISSIONS);
     // Session-ending controls are saved for the end of the run, not skipped.
     if (verdict.allowed && verdict.cls === "recoverable") continue;
@@ -346,6 +402,11 @@ for (const route of ROUTES) {
     } else {
       report.liveControls++;
     }
+    // A press can open a picker or a sheet, and leaving it open makes the NEXT
+    // screen read as this one — /profile came back full of Bible-picker
+    // controls for exactly this reason. Close it before moving on.
+    await tapLabelled(/^(close|cancel|done|dismiss)$/i);
+    await sleep(800);
     await openRoute();
     await sleep(2600);
   }
