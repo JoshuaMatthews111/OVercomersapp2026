@@ -247,6 +247,24 @@ const onScreen = (el) =>
   el.frame.x + el.frame.width / 2 > 0 &&
   el.frame.x + el.frame.width / 2 < SCREEN.width;
 
+/**
+ * Which app is on screen. idb's tree starts with an AXApplication node whose
+ * label is the app's name, so a press that opened Mail or Safari shows up as
+ * a different name at the root — the control worked, it just left the app.
+ */
+async function appInFront() {
+  const root = (await tree()).find((n) => n.role === "AXApplication" || n.type === "Application");
+  return root ? String(root.AXLabel ?? "") : "";
+}
+const OUR_APP = /overcomers/i;
+async function bringAppBack(why) {
+  note("left the app", why + " — bringing it back");
+  await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
+  await sleep(3000);
+}
+
+const isSelected = (el) => Array.isArray(el.traits) && el.traits.some((t) => /^Selected$/i.test(String(t)));
+
 const isTextField = (el) =>
   el?.role === "AXTextField" || el?.role === "AXSecureTextField" || el?.role === "AXSearchField";
 
@@ -528,6 +546,19 @@ for (const route of ROUTES) {
       report.notReached.push({ route, control: labelOf(n), why: "below the fold — needs scrolling, which this run does not do yet" });
       continue;
     }
+    // Pressing the tab you are on, or the pill already chosen, does nothing
+    // BY DESIGN. "Home, tab, 1 of 6" on Home and "Select KJV" with KJV lit
+    // were reported dead on three runs. Not a control to judge.
+    if (isSelected(n)) {
+      report.notPressed.push({ route, control: labelOf(n), kind: "already-selected", why: "already the active choice; pressing it is meant to do nothing" });
+      continue;
+    }
+    // A text box is judged by typing into it, not by tapping it: a tap only
+    // raises the keyboard, which lives outside the app's tree.
+    if (isTextField(n)) {
+      report.notPressed.push({ route, control: labelOf(n), kind: "text-box", why: "a text box — judged by typing, not by a tap" });
+      continue;
+    }
     const verdict = mayPress(labelOf(n), PERMISSIONS);
     // Session-ending controls are saved for the end of the run, not skipped.
     if (verdict.allowed && verdict.cls === "recoverable") continue;
@@ -535,13 +566,58 @@ for (const route of ROUTES) {
     else report.notPressed.push({ route, control: labelOf(n), kind: verdict.cls, why: verdict.why });
   }
 
+  /**
+   * Put the screen back before every press, and prove it.
+   *
+   * A press that opens something leaves the app THERE. On one run the first
+   * press opened the Global Prayer Room, and every later "control" on /community
+   * was pressed inside that room; on /prayer a tab press hid the very chips
+   * the next presses were aimed at. Each of those was reported dead. Reopening
+   * the route is not enough — a deep link to the tab you are on keeps the
+   * nested screen — so the screen is compared with how it looked when the
+   * route was first opened, backed out of if it differs, and relaunched if it
+   * still differs. A press is only judged on the screen it was meant for.
+   */
+  const baseline = fingerprint(nodes);
+  const restore = async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 1) await tapLabelled(/^(back|go back|close|cancel|done)\b/i);
+      if (attempt === 2) {
+        await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
+        await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
+        await sleep(6000);
+      }
+      await openRoute();
+      await sleep(2000);
+      if (fingerprint(await tree()) === baseline) return true;
+    }
+    return false;
+  };
+
   for (const control of pressable.slice(0, 6)) {
+    if (fingerprint(await tree()) !== baseline && !(await restore())) {
+      report.notJudged.push({ route, why: "the screen could not be put back to how it was, so the remaining controls here were not judged" });
+      note("not judged", route + " — could not restore the screen; stopping here");
+      break;
+    }
     const before = fingerprint(await tree());
+    // Prove the control is still where the tree said, then press it.
+    const live = (await tree()).find((n) => labelOf(n) === labelOf(control) && isControl(n) && onScreen(n));
+    if (!live) {
+      report.notReached.push({ route, control: labelOf(control), why: "no longer on screen when its turn came" });
+      continue;
+    }
+    control.frame = live.frame;
     await tapFrame(control.frame);
     await sleep(2400);
     // The operating system answering counts as the control having worked.
     const asked = await handlePermissionSheet(route, labelOf(control));
-    const after = asked ? before + " +permission-sheet" : fingerprint(await tree());
+    // So does leaving for another app: "Email Support" opening Mail is the
+    // control doing its job, not the screen staying the same.
+    const front = await appInFront();
+    const left = front && !OUR_APP.test(front);
+    if (left) await bringAppBack('"' + labelOf(control) + '" opened ' + front);
+    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : fingerprint(await tree());
     if (before === after) {
       // Proof, not just an assertion. A dead-control finding that cannot be
       // looked at is one nobody acts on.
@@ -561,12 +637,8 @@ for (const route of ROUTES) {
     // A press can open a picker or a sheet, and leaving it open makes the NEXT
     // screen read as this one — /profile came back full of Bible-picker
     // controls for exactly this reason. Close it before moving on.
-    // Alerts too: on Android a bell that only shows a message swallowed the
-    // next fourteen presses. Same guard here.
     await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)\b/i);
     await sleep(800);
-    await openRoute();
-    await sleep(2600);
   }
 }
 
@@ -590,6 +662,11 @@ if (canTap && report.signedIn) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
     note("sign-out", "not found on the profile screen");
   } else {
+    await shot("19-before-sign-out");
+    // Re-read after the swipes settled: on one run the coordinates were stale
+    // and the press landed on the Theme row, turning Home light.
+    const settled = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && isControl(n) && onScreen(n));
+    if (settled) signOut.frame = settled.frame;
     note("sign-out", 'pressing "' + labelOf(signOut) + '" deliberately — the stored account can restore the session');
     await tapFrame(signOut.frame);
     await sleep(4000);

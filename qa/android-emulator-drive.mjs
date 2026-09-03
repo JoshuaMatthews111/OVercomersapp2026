@@ -318,6 +318,12 @@ async function signIn(tag) {
 
   const e = await typeInto(emailBox, EMAIL, "email", false);
   note(tag + " email field", e.why);
+  // The keyboard raised by the email box covers the password box, so the
+  // tap meant for it lands on a key and the password is typed into the
+  // email box — the box then read "fableqa@…OgnFableQa2026!". Put the
+  // keyboard away first.
+  await sh(["input", "keyevent", "111"]).catch(() => undefined);
+  await sleep(700);
   const pw = await typeInto(passwordBox, PASSWORD, "password", true);
   note(tag + " password field", pw.why);
 
@@ -361,8 +367,9 @@ try {
  */
 async function inFront() {
   try {
-    const out = await adbText(["shell", "dumpsys", "window", "windows"]);
-    const m = out.match(/mCurrentFocus=.*?\{[^}]*\s([\w.]+)\/[\w.$]+\}/);
+    const out = await adbText(["shell", "dumpsys", "window"]);
+    // mCurrentFocus=Window{7c1 u0 com.overcomers.globalnetwork.app/…MainActivity}
+    const m = out.match(/mCurrentFocus=Window\{[^}]*?\s([A-Za-z][\w.]+)\//);
     return m ? m[1] : "";
   } catch {
     return "";
@@ -447,6 +454,14 @@ for (const route of ROUTES) {
       report.notReached.push({ route, control: labelOf(n), why: "below the fold — needs scrolling, which this run does not do yet" });
       continue;
     }
+    if (n.selected || n.checked) {
+      report.notPressed.push({ route, control: labelOf(n), kind: "already-selected", why: "already the active choice; pressing it is meant to do nothing" });
+      continue;
+    }
+    if (/EditText/.test(n.cls)) {
+      report.notPressed.push({ route, control: labelOf(n), kind: "text-box", why: "a text box — judged by typing, not by a tap" });
+      continue;
+    }
     const verdict = mayPress(labelOf(n), PERMISSIONS);
     // The session-ending ones are gathered for the end of the run, not skipped.
     if (verdict.allowed && verdict.cls === "recoverable") continue;
@@ -460,7 +475,14 @@ for (const route of ROUTES) {
     await tapBox(control.box);
     await sleep(2400);
     const asked = await handlePermissionSheet(route, labelOf(control));
-    const after = asked ? before + " +permission-sheet" : fingerprint(await tree());
+    const front = await inFront();
+    const left = front && front !== BUNDLE;
+    if (left) {
+      note("left the app", '"' + labelOf(control) + '" opened ' + front + " — bringing it back");
+      await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
+      await sleep(3000);
+    }
+    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : fingerprint(await tree());
     if (before === after) {
       const proof = await shot("dead-" + name + "-" + report.deadControls.length).catch(() => null);
       report.deadControls.push({
