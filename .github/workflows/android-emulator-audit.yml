@@ -40,6 +40,9 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          # The build took 18 of the run's 20 minutes, and almost all of that
+          # is Gradle fetching and compiling the same dependencies every time.
+          cache: gradle
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -73,7 +76,14 @@ jobs:
           cd android
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon -x lint
-          find . -name "*.apk" -path "*release*" | head -5
+          # Hand the emulator step an absolute path. Its script ran with a
+          # different working directory, its own find came back empty, and
+          # adb was asked to install "" — which is how a green build turned
+          # into a run that installed nothing and hung for 74 minutes.
+          APK="$(find "$PWD/app/build/outputs/apk" -name '*.apk' | head -1)"
+          if [ -z "$APK" ]; then echo "::error::no APK produced"; exit 1; fi
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+          echo "built $APK ($(du -h "$APK" | cut -f1))"
 
       - name: The rules about what may be pressed must hold before anything is
         run: node --test qa/control-policy.test.mjs
@@ -104,16 +114,16 @@ jobs:
           disable-animations: true
           script: |
             adb wait-for-device
-            APK=$(find android -name "*.apk" -path "*release*" | head -1)
-            echo "installing $APK"
-            adb install -r "$APK"
+            echo "installing $APK_PATH"
+            adb install -r "$APK_PATH"
             node qa/android-emulator-drive.mjs
+            # Read the log while the phone still exists. After this step the
+            # action kills the emulator, and adb with no device waits forever.
+            timeout 30 adb logcat -d > qa/android-shots/device.log 2>/dev/null || true
 
-      - name: Keep the device log whatever happened
+      - name: Make sure there is something to upload
         if: always()
-        run: |
-          mkdir -p qa/android-shots
-          adb logcat -d > qa/android-shots/device.log 2>/dev/null || true
+        run: mkdir -p qa/android-shots && ls -la qa/android-shots
 
       - uses: actions/upload-artifact@v4
         if: always()
