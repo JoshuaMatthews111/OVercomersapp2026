@@ -470,8 +470,36 @@ for (const route of ROUTES) {
   }
 
   // Six per screen keeps a long list from eating the whole run.
+  // Put the screen back before every press, and prove it. See the iOS lane.
+  const baseline = fingerprint(nodes);
+  const restore = async () => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 1) await sh(["input", "keyevent", "4"]).catch(() => undefined);
+      if (attempt === 2) {
+        await sh(["am", "force-stop", BUNDLE]).catch(() => undefined);
+        await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
+        await sleep(6000);
+      }
+      await openRoute();
+      await sleep(2000);
+      if (fingerprint(await tree()) === baseline) return true;
+    }
+    return false;
+  };
+
   for (const control of pressable.slice(0, 6)) {
+    if (fingerprint(await tree()) !== baseline && !(await restore())) {
+      report.notJudged.push({ route, why: "the screen could not be put back to how it was, so the remaining controls here were not judged" });
+      note("not judged", route + " — could not restore the screen; stopping here");
+      break;
+    }
     const before = fingerprint(await tree());
+    const live = (await tree()).find((n) => labelOf(n) === labelOf(control) && n.clickable && onScreen(n));
+    if (!live) {
+      report.notReached.push({ route, control: labelOf(control), why: "no longer on screen when its turn came" });
+      continue;
+    }
+    control.box = live.box;
     await tapBox(control.box);
     await sleep(2400);
     const asked = await handlePermissionSheet(route, labelOf(control));
@@ -502,8 +530,6 @@ for (const route of ROUTES) {
     // were reported dead. Clear anything modal before the next press.
     const modal = await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)\b/i);
     if (modal.ok) await sleep(800);
-    await openRoute();
-    await sleep(2600);
   }
 }
 
@@ -527,6 +553,9 @@ if (report.signedIn) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
     note("sign-out", "not found on the profile screen");
   } else {
+    await shot("19-before-sign-out");
+    const settled = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && n.clickable && onScreen(n));
+    if (settled) signOut.box = settled.box;
     note("sign-out", 'pressing "' + labelOf(signOut) + '" deliberately — the stored account can restore the session');
     await tapBox(signOut.box);
     await sleep(4000);
