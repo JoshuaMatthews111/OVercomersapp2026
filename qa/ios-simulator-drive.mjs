@@ -68,7 +68,9 @@ const report = {
   notPressed: [],
   notJudged: [],
   notAssessed: [],
-  sessionFlow: null
+  sessionFlow: null,
+  /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
+  idbRawSample: null
 };
 const note = (step, detail) => {
   report.steps.push({ step, detail });
@@ -81,22 +83,61 @@ if (!canTap) {
   note("idb", "NOT available — this run can photograph screens but cannot press anything");
 }
 
-/** Everything the screen currently exposes to assistive technology. */
+/**
+ * Everything the screen currently exposes to assistive technology.
+ *
+ * idb has printed this three different ways across versions — one JSON object
+ * per line, a single array, and a nested tree — and a parser that understands
+ * only one of them returns an empty screen while reporting success. That is
+ * exactly what happened on the first cloud run: idb was installed, every call
+ * worked, and every screen came back with zero controls, so the app looked
+ * unreachable when it was fine. All three shapes are accepted, and the first
+ * raw reply is kept in the report so the next surprise is diagnosable instead
+ * of silent.
+ */
+let rawTreeSample = null;
 async function tree() {
   if (!canTap) return [];
   try {
     const { stdout } = await idbRun(["ui", "describe-all", "--json"]);
-    const parsed = [];
-    for (const line of stdout.split("\n")) {
+    if (rawTreeSample === null) {
+      rawTreeSample = stdout.slice(0, 600);
+      report.idbRawSample = rawTreeSample;
+    }
+
+    /** describe-all sometimes nests; a control is a control at any depth. */
+    const flatten = (node, into) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        for (const n of node) flatten(n, into);
+        return;
+      }
+      into.push(node);
+      for (const key of ["children", "Children", "AXChildren"]) {
+        if (Array.isArray(node[key])) flatten(node[key], into);
+      }
+    };
+
+    const out = [];
+    const whole = stdout.trim();
+    if (whole.startsWith("[") || whole.startsWith("{")) {
+      try {
+        flatten(JSON.parse(whole), out);
+        if (out.length > 0) return out;
+      } catch {
+        // Not one document — fall through to line by line.
+      }
+    }
+    for (const line of whole.split("\n")) {
       const t = line.trim();
       if (!t.startsWith("{")) continue;
       try {
-        parsed.push(JSON.parse(t));
+        flatten(JSON.parse(t), out);
       } catch {
         // A partial line is not a control.
       }
     }
-    return parsed;
+    return out;
   } catch {
     return [];
   }
@@ -203,7 +244,19 @@ async function movesOnItsOwn() {
 // can be pressed.
 const ROUTES = ["/", "/messages", "/give", "/community", "/bible", "/profile", "/prayer", "/support"];
 for (const route of ROUTES) {
-  const openRoute = () => simctl(["openurl", UDID, SCHEME + "://" + route]).catch(() => undefined);
+  /**
+   * Opening a custom-scheme link makes iOS ask "Open in ...?" first, and until
+   * somebody answers it the app never moves. The first cloud run photographed
+   * that dialog on all eight screens and reported eight identical onboarding
+   * shots as eight different screens. Answering it is part of opening a route.
+   */
+  const openRoute = async () => {
+    await simctl(["openurl", UDID, SCHEME + "://" + route]).catch(() => undefined);
+    await sleep(1500);
+    const consent = await tapLabelled(/^open$/i);
+    if (consent.ok) await sleep(1200);
+  };
+
   await openRoute();
   await sleep(3800);
 
@@ -254,7 +307,9 @@ for (const route of ROUTES) {
 // ── The sign-out flow, pressed on purpose and then undone ──────────────────
 if (canTap && report.signedIn) {
   await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
-  await sleep(4000);
+  await sleep(1500);
+  await tapLabelled(/^open$/i);
+  await sleep(3000);
 
   const signOut = (await tree()).find((n) => n.frame && mayPress(labelOf(n), PERMISSIONS).cls === "recoverable");
   if (!signOut) {
