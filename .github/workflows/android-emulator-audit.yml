@@ -75,6 +75,9 @@ jobs:
           ./gradlew assembleRelease --no-daemon -x lint
           find . -name "*.apk" -path "*release*" | head -5
 
+      - name: The rules about what may be pressed must hold before anything is
+        run: node --test qa/control-policy.test.mjs
+
       - name: Drive the app on an emulator
         uses: reactivecircus/android-emulator-runner@v2
         env:
@@ -83,6 +86,10 @@ jobs:
           APP_BUNDLE_ID: com.overcomers.globalnetwork.app
           APP_SCHEME: ognapp
           SHOT_DIR: qa/android-shots
+          # The OGN app is wired to the live Supabase project, so deletion
+          # stays blocked no matter which account signs in. Only a throwaway
+          # backend would change this.
+          BACKEND_IS_DISPOSABLE: "false"
         with:
           api-level: 35
           target: google_apis
