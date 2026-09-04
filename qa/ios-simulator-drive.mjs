@@ -634,6 +634,41 @@ async function checkLeaveAndReturn() {
  * path is walked deliberately: open More, press Upload profile photo, answer
  * the system, come back, and look for the email again.
  */
+/**
+ * A system sheet (the photo picker, a share sheet) is not in the app's
+ * accessibility tree: the tree collapses to one or two labels while the app
+ * process is fine. The picker run photographed that sheet eight times and
+ * reported "session lost", which was false — the app was still signed in
+ * underneath. So: when the tree collapses, tap where the sheet's close button
+ * lives (top-left), then swipe it down, then as a last resort relaunch the app.
+ */
+async function foreignSheetUp() {
+  const nodes = await tree();
+  const labels = nodes.map(labelOf).filter(Boolean);
+  return { up: labels.length <= 3, labels };
+}
+async function dismissForeignSheet(where) {
+  let { up } = await foreignSheetUp();
+  if (!up) return { hadSheet: false, closed: true, how: "" };
+  // The sheet's close control sits top-left on every system sheet; points
+  // are for an iPhone 17 Pro (402 x 874). Tap the X, then the grabber swipe.
+  await idbRun(["ui", "tap", "38", "110"]).catch(() => undefined);
+  await sleep(1500);
+  ({ up } = await foreignSheetUp());
+  if (!up) { note("foreign sheet", where + ": a system sheet was closed with its X"); return { hadSheet: true, closed: true, how: "x" }; }
+  await idbRun(["ui", "swipe", "201", "300", "201", "820", "--duration", "0.4"]).catch(() => undefined);
+  await sleep(1500);
+  ({ up } = await foreignSheetUp());
+  if (!up) { note("foreign sheet", where + ": a system sheet was swiped away"); return { hadSheet: true, closed: true, how: "swipe" }; }
+  await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
+  await sleep(1200);
+  await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
+  await sleep(7000);
+  ({ up } = await foreignSheetUp());
+  note("foreign sheet", where + ": a system sheet would not close; the app was relaunched" + (up ? " and the screen is still not the app's" : ""));
+  return { hadSheet: true, closed: !up, how: "relaunch" };
+}
+
 async function checkPickerAndReturn() {
   await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
   await sleep(1500);
@@ -648,13 +683,20 @@ async function checkPickerAndReturn() {
   const asked = await handlePermissionSheet("/profile", "Upload profile photo");
   if (!asked) await tapLabelled(/^(cancel|close|done|back)\b/i);
   await sleep(2000);
+  await shot("05a-picker-open");
+  const sheet = await dismissForeignSheet("picker");
   await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
   await sleep(4000);
   const proof = await proveSignedIn();
-  report.pickerAndReturn = { attempted: true, stillSignedIn: proof.ok, why: proof.why };
+  report.pickerAndReturn = { attempted: true, stillSignedIn: proof.ok, why: proof.why, pickerClosedBy: sheet.how || "app", pickerStuck: sheet.hadSheet && !sheet.closed };
   await shot("05-after-picker-and-return");
-  note("picker and return", proof.ok ? "the session survived the photo picker and coming back" : "SESSION LOST after the photo picker — " + proof.why);
-  if (!proof.ok) await signIn("re-entry");
+  if (sheet.hadSheet && !sheet.closed) {
+    report.notAssessed.push("Whether the session survives the photo picker — the system picker would not close on this run");
+    note("picker and return", "NOT judged: the system photo picker stayed on screen, so the app could not be read");
+  } else {
+    note("picker and return", proof.ok ? "the session survived the photo picker and coming back" : "SESSION LOST after the photo picker — " + proof.why);
+  }
+  if (!proof.ok && !(sheet.hadSheet && !sheet.closed)) await signIn("re-entry");
 }
 
 
@@ -790,6 +832,7 @@ for (const route of ROUTES) {
 
   await openRoute();
   await sleep(3800);
+  await dismissForeignSheet(route);
 
   const name = route === "/" ? "home" : route.replace(/\//g, "");
   const shotPath = await shot("10-" + name);
