@@ -97,6 +97,13 @@ jobs:
         run: |
           cd android
           chmod +x gradlew
+          # With react-native-webview and expo-image added, Gradle's default
+          # 512 MB Metaspace ran out ("OutOfMemoryError: Metaspace") and the
+          # build spun until the 90-minute limit. Give the JVM room.
+          cat >> gradle.properties <<'PROPS'
+          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
+          org.gradle.workers.max=3
+          PROPS
           ./gradlew assembleRelease --no-daemon -x lint
           # Hand the emulator step an absolute path. Its script ran with a
           # different working directory, its own find came back empty, and
