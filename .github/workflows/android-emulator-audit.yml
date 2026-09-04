@@ -100,15 +100,16 @@ jobs:
           # With react-native-webview and expo-image added, Gradle's default
           # 512 MB Metaspace ran out ("OutOfMemoryError: Metaspace") and the
           # build spun until the 90-minute limit. Give the JVM room.
-          cat >> gradle.properties <<'PROPS'
-          org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
-          org.gradle.workers.max=3
-          PROPS
+          # The generated file has no trailing newline: appending without one
+          # glued these onto the last property and corrupted an autolinking
+          # argument ("--watched-directories-serialized []org.gradle.jvmargs=...").
+          printf '\n# Added by the cloud lane\norg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8\norg.gradle.workers.max=3\n' >> gradle.properties
+          tail -4 gradle.properties
           # A node helper failed inside Gradle's configure phase and Gradle
           # swallowed its output. Keep the whole log and print the lines
           # around the failure so the cause is in the job log, not a guess.
           set -o pipefail
-          if ! ./gradlew assembleRelease --no-daemon -x lint --stacktrace --info 2>&1 | tee /tmp/gradle.log | grep -v -E "^\s*$" | tail -80; then
+          if ! ./gradlew assembleRelease --no-daemon -x lint --stacktrace 2>&1 | tee /tmp/gradle.log | grep -v -E "^\s*$" | tail -80; then
             echo "::group::Around the failure"
             grep -n -B 40 -A 10 -E "non-zero exit|FAILURE:" /tmp/gradle.log | head -200
             echo "::endgroup::"
