@@ -79,6 +79,9 @@ const report = {
   coldStart: null,
   /** Whether the session survived leaving for another app and coming back. */
   leaveAndReturn: null,
+  /** The last other app a press sent us to, so a lost session can be traced. */
+  lastDetour: null,
+  sessionGoneMidRun: null,
   /** Whether the session survived the system photo picker and coming back. */
   pickerAndReturn: null,
   sessionFlow: null,
@@ -274,6 +277,7 @@ async function appInFront() {
 }
 const OUR_APP = /overcomers/i;
 async function bringAppBack(why) {
+  report.lastDetour = why;
   note("left the app", why + " — bringing it back");
   await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
   await sleep(3000);
@@ -953,9 +957,14 @@ for (const route of ROUTES) {
 if (canTap && report.signedIn) {
   // A relaunch during the crawl may have cost the session (see cold start).
   // Sign back in first, or the profile shows a sign-in card and no Sign Out.
-  if (!(await proveSignedIn()).ok) {
-    note("sign-out", "the session was gone before the sign-out check — signing in again first");
-    await signIn("before-sign-out");
+  {
+    const p = await proveSignedIn();
+    if (!p.ok) {
+      await shot("06-session-gone-before-sign-out");
+      report.sessionGoneMidRun = { why: p.why, after: report.lastDetour ?? "no detour recorded" };
+      note("sign-out", "the session was gone before the sign-out check (" + p.why + "; last detour: " + (report.lastDetour ?? "none") + ") — signing in again first");
+      await signIn("before-sign-out");
+    }
   }
   await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
   await sleep(1500);

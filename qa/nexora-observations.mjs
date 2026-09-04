@@ -202,7 +202,11 @@ export function toNexora(drive, platform) {
   }
 
   // ── Does the session survive leaving for another app? ────────────────────
-  if (drive.leaveAndReturn?.attempted && drive.leaveAndReturn.stillSignedIn === false) {
+  // "Neither the email nor a sign-in card" means the More tab never drew —
+  // on iPhone it sat on the splash logo after the picker. That is a different
+  // defect from a lost session and must not be filed as one.
+  const cardShown = (r) => /sign in to ogn/i.test(String(r?.why ?? ""));
+  if (drive.leaveAndReturn?.attempted && drive.leaveAndReturn.stillSignedIn === false && cardShown(drive.leaveAndReturn)) {
     observations.push({
       ruleId: "device.session-lost-on-return",
       route: "/profile",
@@ -218,7 +222,23 @@ export function toNexora(drive, platform) {
     });
   }
 
-  if (drive.pickerAndReturn?.attempted && drive.pickerAndReturn.stillSignedIn === false) {
+  if (drive.pickerAndReturn?.attempted && drive.pickerAndReturn.stillSignedIn === false && !cardShown(drive.pickerAndReturn)) {
+    observations.push({
+      ruleId: "device.stuck-after-return",
+      route: "/profile",
+      controlText: "Upload profile photo",
+      title: `The app does not draw after the photo picker on ${where}`,
+      expected: "After the system picker closes, the app shows its screens again.",
+      actual: `After "Upload profile photo" opened the system picker and the app was brought back, the More tab showed neither the account nor a sign-in card — ${drive.pickerAndReturn.why}. The app was not usable at that point.`,
+      reproSteps: [
+        { step: 1, action: `Sign in on ${where}, open More, press Upload profile photo`, expected: "the system picker", observed: "the system asked" },
+        { step: 2, action: "Answer, then return to the app", expected: "the More tab", observed: drive.pickerAndReturn.why }
+      ],
+      evidence: [],
+      data: { screenshots: [`${drive.shotDir ?? ""}/05-after-picker-and-return.png`] }
+    });
+  }
+  if (drive.pickerAndReturn?.attempted && drive.pickerAndReturn.stillSignedIn === false && cardShown(drive.pickerAndReturn)) {
     observations.push({
       ruleId: "device.session-lost-on-return",
       route: "/profile",

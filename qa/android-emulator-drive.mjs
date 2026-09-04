@@ -200,6 +200,9 @@ const report = {
   coldStart: null,
   /** Whether the session survived leaving for another app and coming back. */
   leaveAndReturn: null,
+  /** The last other app a press sent us to, so a lost session can be traced. */
+  lastDetour: null,
+  sessionGoneMidRun: null,
   /** Whether the session survived the system photo picker and coming back. */
   pickerAndReturn: null,
   sessionFlow: null
@@ -861,9 +864,14 @@ for (const route of ROUTES) {
 // is the part that finds the worst defect there is: an app you can leave and
 // cannot get back into. It runs last, and only with a stored account.
 if (report.signedIn) {
-  if (!(await proveSignedIn()).ok) {
-    note("sign-out", "the session was gone before the sign-out check — signing in again first");
-    await signIn("before-sign-out");
+  {
+    const p = await proveSignedIn();
+    if (!p.ok) {
+      await shot("06-session-gone-before-sign-out");
+      report.sessionGoneMidRun = { why: p.why, after: report.lastDetour ?? "no detour recorded" };
+      note("sign-out", "the session was gone before the sign-out check (" + p.why + "; last detour: " + (report.lastDetour ?? "none") + ") — signing in again first");
+      await signIn("before-sign-out");
+    }
   }
   await sh(["am", "start", "-a", "android.intent.action.VIEW", "-d", SCHEME + "://profile"]).catch(() => undefined);
   await sleep(4000);
