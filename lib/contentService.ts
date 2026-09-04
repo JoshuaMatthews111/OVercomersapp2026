@@ -2,7 +2,7 @@ import { events, givingLinks, prayerRequests, series, sermons } from '../data/mo
 import { AppStory, Event, GivingLink, MediaItem, MediaKind, PrayerRequest, Series, Sermon } from '../types/models';
 import { supabase } from './supabase';
 
-const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+export const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
 
 export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: Sermon[] }> {
   if (!hasSupabase) return { series, sermons };
@@ -59,8 +59,9 @@ export async function getAppStories(): Promise<AppStory[]> {
   if (!hasSupabase) return [];
   const { data, error } = await supabase
     .from('app_stories')
-    .select('id, title, category, body, region, image_url, action_url, published_at, created_at')
+    .select('id, title, category, body, region, image_url, action_url, published_at, expires_at, created_at')
     .eq('status', 'published')
+    .gt('expires_at', new Date().toISOString())
     .order('sort_order')
     .order('published_at', { ascending: false })
     .limit(10);
@@ -74,6 +75,7 @@ export async function getAppStories(): Promise<AppStory[]> {
     imageUrl: row.image_url || undefined,
     actionUrl: row.action_url || undefined,
     publishedAt: row.published_at || undefined,
+    expiresAt: row.expires_at || undefined,
     createdAt: row.created_at || undefined
   }));
 }

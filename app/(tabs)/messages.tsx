@@ -1,21 +1,19 @@
 import { Ionicons } from '@expo/vector-icons';
-import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
-import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Image, ImageBackground, Linking, Modal, Pressable, ScrollView, Share, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Alert, Image, ImageBackground, Linking, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
-import { forwardMediaToChat } from '../../lib/chatService';
 import { getMediaItems, getMessageLibrary, getUserDownloads, recordDownloadIntent } from '../../lib/contentService';
 import { friendlyError } from '../../lib/errorMessages';
+import { playbackKind } from '../../lib/embed';
+import { useNowPlaying } from '../../lib/nowPlaying';
 import { colors, shadows } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
 import { MediaItem, Series, Sermon } from '../../types/models';
 
 type MediaTab = 'sermons' | 'articles' | 'videos' | 'music' | 'downloads';
-type NowPlaying = { title: string; speaker?: string; url: string; type: 'audio' | 'video'; artwork?: string };
 
 const tabs: { key: MediaTab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
   { key: 'sermons', label: 'Sermons', icon: 'pulse' },
@@ -49,7 +47,7 @@ export default function MediaScreen() {
   const [sermons, setSermons] = useState<Sermon[]>([]);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [downloads, setDownloads] = useState<{ id: string; title: string; mediaType?: string; fileUrl?: string; status: string; createdAt?: string }[]>([]);
-  const [nowPlaying, setNowPlaying] = useState<NowPlaying | null>(null);
+  const { play: setNowPlaying } = useNowPlaying();
   const dark = themePreference === 'dark';
 
   useEffect(() => {
@@ -92,7 +90,7 @@ export default function MediaScreen() {
       title: sermon?.title || 'OGN Sermon',
       speaker: sermon?.speaker,
       url: target,
-      type: inferPlaybackType(target, sermon?.videoUrl ? 'video' : 'audio'),
+      type: playbackKind(target, sermon?.videoUrl ? 'video' : 'audio'),
     });
   }
 
@@ -108,7 +106,7 @@ export default function MediaScreen() {
       speaker: featuredMedia?.speaker || featured?.speaker,
       artwork: featuredMedia?.thumbnailUrl,
       url: target,
-      type: inferPlaybackType(target, featuredMedia?.mediaType === 'video' || featured?.videoUrl ? 'video' : 'audio'),
+      type: playbackKind(target, featuredMedia?.mediaType === 'video' || featured?.videoUrl ? 'video' : 'audio'),
     });
   }
 
@@ -127,7 +125,7 @@ export default function MediaScreen() {
       speaker: item.speaker,
       artwork: item.thumbnailUrl,
       url: target,
-      type: inferPlaybackType(target, item.mediaType === 'video' || item.mediaType === 'live' ? 'video' : 'audio'),
+      type: playbackKind(target, item.mediaType === 'video' || item.mediaType === 'live' ? 'video' : 'audio'),
     });
   }
 
@@ -310,89 +308,7 @@ export default function MediaScreen() {
           ) : null}
         </ScrollView>
       </SafeAreaView>
-      <MediaPlayerModal item={nowPlaying} dark={dark} onClose={() => setNowPlaying(null)} />
     </LinearGradient>
-  );
-}
-
-function MediaPlayerModal({ item, dark, onClose }: { item: NowPlaying | null; dark: boolean; onClose: () => void }) {
-  const isVideo = item?.type === 'video';
-  const videoPlayer = useVideoPlayer(isVideo && item?.url ? { uri: item.url, metadata: { title: item.title, artist: item.speaker, artwork: item.artwork } } : null, (player) => {
-    player.staysActiveInBackground = true;
-    player.showNowPlayingNotification = true;
-    player.audioMixingMode = 'doNotMix';
-  });
-  const audioPlayer = useAudioPlayer(!isVideo && item?.url ? { uri: item.url } : null, { keepAudioSessionActive: true });
-  const audioStatus = useAudioPlayerStatus(audioPlayer);
-
-  useEffect(() => {
-    setAudioModeAsync({
-      playsInSilentMode: true,
-      shouldPlayInBackground: true,
-      interruptionMode: 'doNotMix',
-    }).catch(() => undefined);
-  }, []);
-
-  useEffect(() => {
-    if (!item) return;
-    if (isVideo) videoPlayer.play();
-    else {
-      audioPlayer.setActiveForLockScreen(true, {
-        title: item.title,
-        artist: item.speaker || 'Overcomers Global Network',
-        artworkUrl: item.artwork,
-      });
-      audioPlayer.play();
-    }
-  }, [item?.url]);
-
-  function close() {
-    if (isVideo) videoPlayer.pause();
-    else {
-      audioPlayer.pause();
-      audioPlayer.clearLockScreenControls();
-    }
-    onClose();
-  }
-
-  return (
-    <Modal visible={Boolean(item)} animationType="slide" transparent onRequestClose={close}>
-      <View style={styles.playerBackdrop}>
-        <View style={[styles.playerSheet, dark && styles.playerSheetDark]}>
-          <View style={styles.playerHeader}>
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.playerTitle, dark && styles.playerTitleDark]}>{item?.title || 'OGN Media'}</Text>
-              <Text style={[styles.playerArtist, dark && styles.playerArtistDark]}>{item?.speaker || 'Overcomers Global Network'}</Text>
-            </View>
-            <Pressable onPress={close} style={[styles.closeButton, dark && styles.closeButtonDark]}>
-              <Ionicons name="close" size={22} color={dark ? colors.gold : colors.royalBlue} />
-            </Pressable>
-          </View>
-          {isVideo ? (
-            <VideoView player={videoPlayer} style={styles.videoView} nativeControls allowsPictureInPicture contentFit="contain" />
-          ) : (
-            <LinearGradient colors={dark ? ['#071B45', '#0B2A66'] : ['#FFFFFF', '#FFF5D8']} style={styles.audioPanel}>
-              <Ionicons name="musical-notes" size={42} color={colors.gold} />
-              <Text style={[styles.audioStatus, dark && styles.playerArtistDark]}>{audioStatus.playing ? 'Playing in background' : 'Ready'}</Text>
-              <Pressable onPress={() => audioStatus.playing ? audioPlayer.pause() : audioPlayer.play()} style={styles.goldControl}>
-                <Ionicons name={audioStatus.playing ? 'pause' : 'play'} size={22} color="#071231" />
-                <Text style={styles.goldControlText}>{audioStatus.playing ? 'Pause' : 'Play'}</Text>
-              </Pressable>
-            </LinearGradient>
-          )}
-          <View style={styles.playerActions}>
-            <Pressable onPress={() => item && Share.share({ message: `${item.title}\n${item.url}` })} style={[styles.mediaAction, dark && styles.mediaActionDark]}>
-              <Ionicons name="share-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-              <Text style={[styles.mediaActionText, dark && styles.mediaActionTextDark]}>Share</Text>
-            </Pressable>
-            <Pressable onPress={() => item && forwardMediaToChat({ title: item.title, url: item.url, kind: item.type }).then(() => Alert.alert('Forwarded', 'Sent to an OGN chat channel.')).catch((err) => Alert.alert('Forward failed', friendlyError(err, 'Please sign in and try again.')))} style={[styles.mediaAction, dark && styles.mediaActionDark]}>
-              <Ionicons name="arrow-redo-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-              <Text style={[styles.mediaActionText, dark && styles.mediaActionTextDark]}>Forward</Text>
-            </Pressable>
-          </View>
-        </View>
-      </View>
-    </Modal>
   );
 }
 
@@ -459,13 +375,6 @@ function formatDuration(seconds?: number) {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${mins}:${String(secs).padStart(2, '0')}`;
-}
-
-function inferPlaybackType(url: string, fallback: 'audio' | 'video'): 'audio' | 'video' {
-  const clean = url.split('?')[0].toLowerCase();
-  if (clean.endsWith('.mp3') || clean.endsWith('.m4a') || clean.endsWith('.aac')) return 'audio';
-  if (clean.endsWith('.mp4') || clean.endsWith('.m3u8') || clean.endsWith('.mov')) return 'video';
-  return fallback;
 }
 
 function shouldOpenExternally(item: MediaItem, url: string) {
@@ -572,20 +481,6 @@ const styles = StyleSheet.create({
   adminTitleDark: { color: colors.gold },
   adminBody: { color: colors.slate, marginTop: 3, lineHeight: 19 },
   adminBodyDark: { color: 'rgba(255,255,255,0.76)' },
-  playerBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(2,8,23,0.58)' },
-  playerSheet: { borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: colors.white, padding: 16, gap: 14 },
-  playerSheetDark: { backgroundColor: '#071B45', borderTopWidth: 1, borderTopColor: 'rgba(212,175,55,0.28)' },
-  playerHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  playerTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 20 },
-  playerTitleDark: { color: colors.white },
-  playerArtist: { color: colors.slate, marginTop: 3 },
-  playerArtistDark: { color: 'rgba(255,255,255,0.74)' },
   closeButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
   closeButtonDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  videoView: { width: '100%', aspectRatio: 16 / 9, borderRadius: 14, backgroundColor: '#020817', overflow: 'hidden' },
-  audioPanel: { minHeight: 190, borderRadius: 16, alignItems: 'center', justifyContent: 'center', gap: 12, borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)' },
-  audioStatus: { color: colors.royalBlue, fontWeight: '800' },
-  goldControl: { minHeight: 46, borderRadius: 999, backgroundColor: colors.gold, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  goldControlText: { color: '#071231', fontWeight: '900' },
-  playerActions: { flexDirection: 'row', gap: 10 },
 });

@@ -15,6 +15,7 @@ import {
   getChatMessages,
   getChatRooms,
   joinChatRoom,
+  deleteOwnChatMessage,
   moderateChatMessage,
   reportChatMessage,
   removeChatMember,
@@ -134,6 +135,20 @@ export default function CommunityScreen() {
       scrollRef.current?.scrollTo({ y: Math.max(chatPanelY - 12, 0), animated: true });
       setTimeout(() => composerRef.current?.focus(), 260);
     });
+  }
+
+  async function deleteOwnMessage(message: ChatMessage) {
+    Alert.alert('Delete message?', 'It will be removed for everyone.', [
+      { text: 'Keep', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: async () => {
+        try {
+          await deleteOwnChatMessage(message.id);
+          setMessages((current) => current.filter((item) => item.id !== message.id));
+        } catch (err) {
+          Alert.alert('Message not deleted', friendlyError(err, 'Please try again.'));
+        }
+      } },
+    ]);
   }
 
   async function removeMessage(message: ChatMessage) {
@@ -351,6 +366,16 @@ export default function CommunityScreen() {
                         <Ionicons name="trash-outline" size={14} color={colors.red} />
                         <Text style={styles.removeText}>Remove</Text>
                       </Pressable>
+                    ) : own ? (
+                      <View style={styles.userSafetyActions}>
+                        {message.isFlagged ? (
+                          <View style={styles.heldPill}><Ionicons name="time-outline" size={12} color={colors.deepGold} /><Text style={styles.heldText}>Held for review</Text></View>
+                        ) : null}
+                        <Pressable accessibilityRole="button" accessibilityLabel="Delete my message" onPress={() => deleteOwnMessage(message)} style={styles.reportButton}>
+                          <Ionicons name="trash-outline" size={13} color={colors.red} />
+                          <Text style={styles.blockText}>Delete</Text>
+                        </Pressable>
+                      </View>
                     ) : !own ? (
                       <View style={styles.userSafetyActions}>
                         <Pressable accessibilityRole="button" accessibilityLabel="Report chat message" onPress={() => reportMessage(message)} style={styles.reportButton}>
@@ -687,6 +712,8 @@ const styles = StyleSheet.create({
   removeButton: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.softRed, borderRadius: 999, paddingHorizontal: 8, paddingVertical: 5 },
   removeText: { color: colors.red, fontWeight: '900', fontSize: 12 },
   userSafetyActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  heldPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: 'rgba(212,175,55,0.16)' },
+  heldText: { color: colors.deepGold, fontSize: 11, fontWeight: '800' },
   reportButton: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: colors.paleGold, borderRadius: 999, paddingHorizontal: 7, paddingVertical: 5 },
   reportText: { color: colors.deepGold, fontWeight: '900', fontSize: 10 },
   blockText: { color: colors.red, fontWeight: '900', fontSize: 10 },

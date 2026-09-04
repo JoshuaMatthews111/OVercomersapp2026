@@ -26,7 +26,7 @@ export async function getAdminWorkbench(): Promise<AdminWorkbench> {
     supabase.from('prayer_requests').select('id, name, category, request, status, assigned_to, created_at').order('created_at', { ascending: false }).limit(40),
     supabase.from('chat_messages').select('id, channel_id, user_id, body, is_flagged, created_at').order('created_at', { ascending: false }).limit(40),
     supabase.from('chat_channels').select('id, name').limit(100),
-    supabase.from('app_stories').select('id, title, category, region, status, published_at').order('updated_at', { ascending: false }).limit(40),
+    supabase.from('app_stories').select('id, title, category, region, status, published_at, expires_at').order('updated_at', { ascending: false }).limit(40),
     supabase.from('media_items').select('id, title, media_type, speaker, status, is_featured, published_at').order('updated_at', { ascending: false }).limit(60),
   ]);
 
@@ -96,10 +96,12 @@ export async function updatePrayerWorkflow(input: { id: string; status?: string;
   if (error) throw error;
 }
 
-export async function moderateMessage(messageId: string, action: 'flag' | 'remove') {
+export async function moderateMessage(messageId: string, action: 'flag' | 'remove' | 'approve') {
   const patch = action === 'remove'
     ? { is_flagged: true, deleted_at: new Date().toISOString() }
-    : { is_flagged: true };
+    : action === 'approve'
+      ? { is_flagged: false }
+      : { is_flagged: true };
   const { error } = await supabase.from('chat_messages').update(patch).eq('id', messageId);
   if (error) throw error;
 }
@@ -109,6 +111,13 @@ export async function setStoryStatus(id: string, status: 'draft' | 'published' |
     .from('app_stories')
     .update({ status, published_at: status === 'published' ? new Date().toISOString() : null })
     .eq('id', id);
+  if (error) throw error;
+}
+
+// Removes the story for good. The database only allows this for staff and
+// for the person who created the story.
+export async function deleteStory(id: string) {
+  const { error } = await supabase.from('app_stories').delete().eq('id', id);
   if (error) throw error;
 }
 

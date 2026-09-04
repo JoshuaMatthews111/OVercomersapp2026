@@ -153,5 +153,6 @@ export type AppStory = {
   imageUrl?: string;
   actionUrl?: string;
   publishedAt?: string;
+  expiresAt?: string;
   createdAt?: string;
 };

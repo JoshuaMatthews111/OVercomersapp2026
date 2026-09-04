@@ -8,6 +8,7 @@ import { Alert, Image, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextI
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   AdminWorkbench,
+  deleteStory,
   grantUserRole,
   getAdminWorkbench,
   moderateMessage,
@@ -305,6 +306,13 @@ export default function AdminScreen() {
     } finally {
       setSavingEvent(false);
     }
+  }
+
+  function confirmDeleteStory(id: string, title: string) {
+    Alert.alert('Delete story?', `"${title}" will be removed for everyone.`, [
+      { text: 'Keep', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => runAdminAction('Story deleted.', () => deleteStory(id)) },
+    ]);
   }
 
   async function runAdminAction(successMessage: string, action: () => Promise<unknown>) {
@@ -617,9 +625,15 @@ export default function AdminScreen() {
                   <Text style={[styles.listMeta, dark && styles.listMetaDark]}>{message.isFlagged ? 'Flagged' : 'Visible'} • {message.userId || 'unknown user'}</Text>
                 </View>
                 <View style={styles.stackedButtons}>
-                  <Pressable onPress={() => runAdminAction('Message flagged.', () => moderateMessage(message.id, 'flag'))} style={styles.smallGoldButton}>
-                    <Text style={styles.smallGoldButtonText}>Flag</Text>
-                  </Pressable>
+                  {message.isFlagged ? (
+                    <Pressable onPress={() => runAdminAction('Message approved and visible.', () => moderateMessage(message.id, 'approve'))} style={styles.smallGoldButton}>
+                      <Text style={styles.smallGoldButtonText}>Approve</Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable onPress={() => runAdminAction('Message flagged.', () => moderateMessage(message.id, 'flag'))} style={styles.smallGoldButton}>
+                      <Text style={styles.smallGoldButtonText}>Flag</Text>
+                    </Pressable>
+                  )}
                   <Pressable onPress={() => runAdminAction('Message removed from chat.', () => moderateMessage(message.id, 'remove'))} style={styles.smallDangerButton}>
                     <Text style={styles.smallDangerButtonText}>Remove</Text>
                   </Pressable>
@@ -639,8 +653,24 @@ export default function AdminScreen() {
                   <Text style={[styles.listTitle, dark && styles.listTitleDark]}>{story.title}</Text>
                   <Text style={[styles.listMeta, dark && styles.listMetaDark]}>{story.category || 'story'} • {story.status || 'draft'}</Text>
                 </View>
-                <Pressable onPress={() => runAdminAction('Story published.', () => setStoryStatus(story.id, 'published'))} style={styles.smallGoldButton}>
-                  <Text style={styles.smallGoldButtonText}>Publish</Text>
+                <View style={styles.stackedButtons}>
+                  <Pressable onPress={() => runAdminAction('Story published.', () => setStoryStatus(story.id, 'published'))} style={styles.smallGoldButton}>
+                    <Text style={styles.smallGoldButtonText}>Publish</Text>
+                  </Pressable>
+                  <Pressable onPress={() => confirmDeleteStory(story.id, story.title)} style={styles.smallDangerButton}>
+                    <Text style={styles.smallDangerButtonText}>Delete</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ))}
+            {(workbench?.stories || []).filter((item) => item.status === 'published').slice(0, 5).map((story) => (
+              <View key={story.id} style={[styles.listRow, dark && styles.listRowDark]}>
+                <View style={styles.listCopy}>
+                  <Text style={[styles.listTitle, dark && styles.listTitleDark]}>{story.title}</Text>
+                  <Text style={[styles.listMeta, dark && styles.listMetaDark]}>{story.category || 'story'} • live</Text>
+                </View>
+                <Pressable onPress={() => confirmDeleteStory(story.id, story.title)} style={styles.smallDangerButton}>
+                  <Text style={styles.smallDangerButtonText}>Delete</Text>
                 </Pressable>
               </View>
             ))}

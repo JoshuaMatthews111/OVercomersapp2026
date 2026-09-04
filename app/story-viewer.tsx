@@ -2,11 +2,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Animated, Easing } from 'react-native';
 import { Image, Linking, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../lib/theme';
+import { storyRemainingLabel } from '../lib/storyTime';
 
-const storyLifetimeMs = 24 * 60 * 60 * 1000;
+// A picture story plays for this long, then the viewer closes on its own,
+// the way Snapchat and WhatsApp stories do. A video plays until it ends.
+const IMAGE_STORY_MS = 7000;
 
 export default function StoryViewerScreen() {
   const params = useLocalSearchParams<{
@@ -17,20 +21,42 @@ export default function StoryViewerScreen() {
     actionUrl?: string;
     accent?: string;
     publishedAt?: string;
+    expiresAt?: string;
   }>();
   const [imageFailed, setImageFailed] = useState(false);
   const mediaUrl = Array.isArray(params.imageUrl) ? params.imageUrl[0] : params.imageUrl;
   const actionUrl = Array.isArray(params.actionUrl) ? params.actionUrl[0] : params.actionUrl;
   const accent = Array.isArray(params.accent) ? params.accent[0] : params.accent || colors.gold;
   const publishedAt = Array.isArray(params.publishedAt) ? params.publishedAt[0] : params.publishedAt;
-  const remaining = useMemo(() => storyRemainingLabel(publishedAt), [publishedAt]);
-  const progress = useMemo(() => storyProgress(publishedAt), [publishedAt]);
+  const expiresAt = Array.isArray(params.expiresAt) ? params.expiresAt[0] : params.expiresAt;
+  const remaining = useMemo(() => storyRemainingLabel({ publishedAt, expiresAt }), [publishedAt, expiresAt]);
   const isVideo = Boolean(mediaUrl && isVideoUrl(mediaUrl));
+  const [paused, setPaused] = useState(false);
 
+  // The bar across the top is the playback timer. It fills over 7 seconds for
+  // a picture and is driven by the player for a video. Holding a finger on the
+  // story pauses it, like the real thing.
+  const playback = useRef(new Animated.Value(0)).current;
+  const closedRef = useRef(false);
   function close() {
+    if (closedRef.current) return;
+    closedRef.current = true;
     if (router.canGoBack()) router.back();
     else router.replace('/(tabs)' as any);
   }
+  useEffect(() => {
+    if (isVideo || paused) return;
+    const current = (playback as any).__getValue ? (playback as any).__getValue() : 0;
+    const animation = Animated.timing(playback, {
+      toValue: 1,
+      duration: Math.max(200, IMAGE_STORY_MS * (1 - current)),
+      easing: Easing.linear,
+      useNativeDriver: false
+    });
+    animation.start(({ finished }) => { if (finished) close(); });
+    return () => animation.stop();
+  }, [isVideo, paused]);
+  const progressWidth = playback.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   async function openAction() {
     if (!actionUrl) return;
@@ -41,7 +67,7 @@ export default function StoryViewerScreen() {
     <LinearGradient colors={['#020817', '#061334', '#071B45']} style={styles.root}>
       <StatusBar barStyle="light-content" />
       <View style={styles.progressTrack}>
-        <View style={[styles.progressFill, { width: `${progress * 100}%`, backgroundColor: accent }]} />
+        <Animated.View style={[styles.progressFill, { width: progressWidth, backgroundColor: accent }]} />
       </View>
 
       <View style={styles.topBar}>
@@ -57,9 +83,9 @@ export default function StoryViewerScreen() {
         </Pressable>
       </View>
 
-      <View style={styles.mediaFrame}>
+      <Pressable style={styles.mediaFrame} onPressIn={() => setPaused(true)} onPressOut={() => setPaused(false)} accessibilityLabel="Story media, hold to pause">
         {isVideo && mediaUrl ? (
-          <StoryVideo url={mediaUrl} />
+          <StoryVideo url={mediaUrl} onEnd={close} progress={playback} paused={paused} />
         ) : mediaUrl && !imageFailed ? (
           <Image source={{ uri: mediaUrl }} resizeMode="cover" style={styles.media} onError={() => setImageFailed(true)} />
         ) : (
@@ -68,7 +94,7 @@ export default function StoryViewerScreen() {
             <Text style={styles.fallbackTitle}>Story media unavailable</Text>
           </LinearGradient>
         )}
-      </View>
+      </Pressable>
 
       <LinearGradient colors={['transparent', 'rgba(2,8,23,0.82)', '#020817']} style={styles.captionPanel}>
         <Text style={styles.category}>{params.category || 'Story'}</Text>
@@ -85,31 +111,23 @@ export default function StoryViewerScreen() {
   );
 }
 
-function StoryVideo({ url }: { url: string }) {
+function StoryVideo({ url, onEnd, progress, paused }: { url: string; onEnd: () => void; progress: Animated.Value; paused: boolean }) {
   const player = useVideoPlayer({ uri: url }, (instance) => {
     instance.loop = false;
+    instance.timeUpdateEventInterval = 0.25;
     instance.play();
   });
-  return <VideoView player={player} style={styles.media} nativeControls contentFit="cover" />;
+  useEffect(() => {
+    const ended = player.addListener('playToEnd', onEnd);
+    const tick = player.addListener('timeUpdate', ({ currentTime }) => {
+      if (player.duration > 0) progress.setValue(Math.min(1, currentTime / player.duration));
+    });
+    return () => { ended.remove(); tick.remove(); };
+  }, [player]);
+  useEffect(() => { if (paused) player.pause(); else player.play(); }, [paused]);
+  return <VideoView player={player} style={styles.media} nativeControls={false} contentFit="cover" />;
 }
 
-function storyProgress(value?: string) {
-  if (!value) return 0.12;
-  const published = new Date(value).getTime();
-  if (Number.isNaN(published)) return 0.12;
-  const elapsed = Date.now() - published;
-  return Math.min(1, Math.max(0.04, elapsed / storyLifetimeMs));
-}
-
-function storyRemainingLabel(value?: string) {
-  if (!value) return '24h story';
-  const published = new Date(value).getTime();
-  if (Number.isNaN(published)) return '24h story';
-  const remainingMs = published + storyLifetimeMs - Date.now();
-  if (remainingMs <= 0) return 'expiring';
-  const hours = Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000)));
-  return `${hours}h left`;
-}
 
 function isVideoUrl(url: string) {
   const clean = url.split('?')[0].toLowerCase();

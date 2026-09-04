@@ -169,6 +169,22 @@ export async function moderateChatMessage(messageId: string, action: 'remove' | 
   return data;
 }
 
+// A member takes back their own message. Soft delete, so moderators can still see it.
+export async function deleteOwnChatMessage(messageId: string) {
+  if (!hasSupabase) return { id: messageId };
+  const { data: userResult } = await supabase.auth.getUser();
+  if (!userResult.user) throw new Error('Sign in before deleting messages.');
+  const { data, error } = await supabase
+    .from('chat_messages')
+    .update({ deleted_at: new Date().toISOString() })
+    .eq('id', messageId)
+    .eq('user_id', userResult.user.id)
+    .select('id')
+    .single();
+  if (error) throw error;
+  return data;
+}
+
 export async function reportChatMessage(messageId: string, reason = 'In-app report') {
   if (!hasSupabase) return { id: `local-report-${Date.now()}` };
   const { data: userResult } = await supabase.auth.getUser();

@@ -17,7 +17,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
-import { getAppStories, getEvents } from '../../lib/contentService';
+import { isStoryLive, storyRemainingLabel } from '../../lib/storyTime';
+import { getAppStories, getEvents, hasSupabase } from '../../lib/contentService';
 import { colors, shadows } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
 import { AppStory, Event } from '../../types/models';
@@ -30,6 +31,7 @@ type Story = {
   imageUrl?: string;
   actionUrl?: string;
   publishedAt?: string;
+  expiresAt?: string;
   image: ImageSourcePropType;
   accent: string;
   icon: keyof typeof Ionicons.glyphMap;
@@ -74,7 +76,17 @@ export default function HomeScreen() {
     getAppStories().then(setRemoteStories);
   }, []);
 
-  const activeRemoteStories = remoteStories.filter((story) => isActiveStory(story.publishedAt || story.createdAt));
+  // Tick once a minute so the little "23h left" labels stay honest and a story
+  // that just expired drops off without a reload.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const activeRemoteStories = remoteStories.filter((story) => isStoryLive({ publishedAt: story.publishedAt || story.createdAt, expiresAt: story.expiresAt }, now));
+  // Live backend with nothing live right now = an honest empty ring, not demo stories.
+  const storiesEmpty = hasSupabase && !activeRemoteStories.length;
   const displayStories: Story[] = activeRemoteStories.length
     ? activeRemoteStories.map((story, index) => {
       const fallback = fallbackStories[index % fallbackStories.length];
@@ -86,12 +98,13 @@ export default function HomeScreen() {
         imageUrl: story.imageUrl,
         actionUrl: story.actionUrl,
         publishedAt: story.publishedAt || story.createdAt,
+        expiresAt: story.expiresAt,
         image: story.imageUrl ? { uri: story.imageUrl } : fallback.image,
         accent: fallback.accent,
         icon: fallback.icon
       };
     })
-    : fallbackStories;
+    : storiesEmpty ? [] : fallbackStories;
 
   return (
     <LinearGradient colors={dark ? ['#020817', '#061334', '#071B45'] : ['#F8FBFF', '#FFFFFF', '#F4F8FF']} style={styles.root}>
@@ -165,7 +178,8 @@ export default function HomeScreen() {
             <Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>{access.canManageContent ? 'Manage' : 'View All'}</Text>
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyScroll}>
-            {displayStories.map((story) => <StoryCard key={story.id} story={story} dark={dark} />)}
+            {displayStories.map((story) => <StoryCard key={story.id} story={story} dark={dark} now={now} />)}
+            {storiesEmpty ? <StoriesEmpty dark={dark} /> : null}
           </ScrollView>
 
           {dark ? (
@@ -219,7 +233,7 @@ export default function HomeScreen() {
   );
 }
 
-function StoryCard({ story, dark }: { story: Story; dark: boolean }) {
+function StoryCard({ story, dark, now }: { story: Story; dark: boolean; now: number }) {
   const [imageFailed, setImageFailed] = useState(false);
   const storyHasVideo = Boolean(story.imageUrl && isVideoUrl(story.imageUrl));
   const resolveAsset = (Image as unknown as { resolveAssetSource?: (source: ImageSourcePropType) => { uri?: string } | undefined }).resolveAssetSource;
@@ -239,6 +253,7 @@ function StoryCard({ story, dark }: { story: Story; dark: boolean }) {
           actionUrl: story.actionUrl || '',
           accent: story.accent,
           publishedAt: story.publishedAt || '',
+          expiresAt: story.expiresAt || '',
         },
       } as any)}
       style={styles.storyCard}
@@ -259,25 +274,23 @@ function StoryCard({ story, dark }: { story: Story; dark: boolean }) {
       </LinearGradient>
       <Text style={[styles.storyTitle, dark && styles.storyTitleDark]}>{story.title}</Text>
       <Text style={[styles.storyCategory, { color: dark ? colors.gold : story.accent }]}>{story.category}</Text>
-      <Text style={[styles.storyTimer, dark && styles.storyTimerDark]}>{storyTimeLabel(story.publishedAt)}</Text>
+      <Text style={[styles.storyTimer, dark && styles.storyTimerDark]}>{storyRemainingLabel(story, now)}</Text>
     </Pressable>
   );
 }
 
-function isActiveStory(value?: string) {
-  if (!value) return true;
-  const published = new Date(value).getTime();
-  if (Number.isNaN(published)) return true;
-  return Date.now() - published <= 24 * 60 * 60 * 1000;
-}
-
-function storyTimeLabel(value?: string) {
-  if (!value) return '24h';
-  const published = new Date(value).getTime();
-  if (Number.isNaN(published)) return '24h';
-  const remainingMs = published + 24 * 60 * 60 * 1000 - Date.now();
-  if (remainingMs <= 0) return 'expiring';
-  return `${Math.max(1, Math.ceil(remainingMs / (60 * 60 * 1000)))}h left`;
+function StoriesEmpty({ dark }: { dark: boolean }) {
+  return (
+    <View style={styles.storyCard}>
+      <View style={[styles.storyRing, styles.storyRingEmpty, dark && styles.storyRingEmptyDark]}>
+        <View style={[styles.storyImageWrap, styles.storyEmptyInner, dark && styles.storyEmptyInnerDark]}>
+          <Ionicons name="sparkles-outline" size={22} color={dark ? 'rgba(255,255,255,0.7)' : colors.muted} />
+        </View>
+      </View>
+      <Text numberOfLines={2} style={[styles.storyTitle, dark && styles.storyTitleDark]}>No stories yet</Text>
+      <Text style={[styles.storyTimer, dark && styles.storyTimerDark]}>check back soon</Text>
+    </View>
+  );
 }
 
 function isVideoUrl(url: string) {
@@ -414,6 +427,10 @@ const styles = StyleSheet.create({
   storyCategory: { fontWeight: '800', fontSize: 12, marginTop: 3, textAlign: 'center' },
   storyTimer: { color: colors.muted, fontWeight: '800', fontSize: 10, marginTop: 2, textAlign: 'center' },
   storyTimerDark: { color: 'rgba(255,255,255,0.58)' },
+  storyRingEmpty: { borderWidth: 2, borderStyle: 'dashed', borderColor: 'rgba(15,23,42,0.18)' },
+  storyRingEmptyDark: { borderColor: 'rgba(255,255,255,0.28)' },
+  storyEmptyInner: { alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(15,23,42,0.05)' },
+  storyEmptyInnerDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
 
   prayerDarkApproved: { marginTop: 17, height: 104, borderRadius: 13, overflow: 'hidden', backgroundColor: '#071B45', ...shadows.soft },
   prayerLightApproved: { marginTop: 17, height: 104, borderRadius: 13, overflow: 'hidden', backgroundColor: colors.white, ...shadows.soft },
