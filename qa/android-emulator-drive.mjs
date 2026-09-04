@@ -376,6 +376,7 @@ async function signIn(tag) {
     await sleep(2000);
     if (await looksSignedIn()) break;
   }
+  signedInProof = await proveSignedIn();
 
   // A rejected sign-in raises a modal alert; record what it said and clear
   // it, or every later press lands on its OK button. Same guard as iOS.
@@ -387,7 +388,20 @@ async function signIn(tag) {
     await sleep(1200);
   }
 
-  return await looksSignedIn();
+  return signedInProof.ok;
+}
+
+/** Proof of sign-in on the More tab — see the iOS lane for why Home is not proof. */
+let signedInProof = { ok: false, why: "not checked yet" };
+async function proveSignedIn() {
+  await sh(["am", "start", "-a", "android.intent.action.VIEW", "-d", SCHEME + "://profile"]).catch(() => undefined);
+  await sleep(3500);
+  const words = (await tree()).map(labelOf).filter(Boolean).join(" | ");
+  const emailShown = words.toLowerCase().includes(EMAIL.toLowerCase()) || /fableqa@ove/i.test(words);
+  const askedToSignIn = /sign in to ogn|require an account/i.test(words);
+  if (emailShown) return { ok: true, why: "the More tab shows the account's email" };
+  if (askedToSignIn) return { ok: false, why: 'the More tab says "Sign in to OGN" — the app does not hold the session' };
+  return { ok: false, why: "the More tab shows neither the email nor a sign-in card" };
 }
 
 try {
@@ -445,10 +459,8 @@ if (PERMISSIONS.hasTestIdentity) {
   await shot("01-sign-in");
   report.signedIn = await signIn("first");
   await shot("02-after-sign-in");
-  note(
-    "sign-in",
-    report.signedIn ? "confirmed by what the home screen shows" : "NOT confirmed — everything behind it is unchecked"
-  );
+  report.signedInProof = signedInProof.why;
+  note("sign-in", (report.signedIn ? "confirmed: " : "NOT confirmed: ") + signedInProof.why);
 } else {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
