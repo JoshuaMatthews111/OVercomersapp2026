@@ -366,8 +366,11 @@ async function signIn(tag) {
       // still the focused one and something was sent, take that as typed
       // rather than clearing it and trying again — which is how the second
       // attempt emptied a correctly filled box.
+      // A password box comes back as dots or as nothing — fifteen dots plainly
+      // on screen read as "0 chars" — so a secret box is judged by "not empty,
+      // or the system marks it a password box", never by length.
       const ok = secret
-        ? value.length === text.length || (value.length === 0 && now?.focused === true)
+        ? value.length > 0 || now?.isPassword === true || now?.focused === true
         : value === text;
       if (ok) return { ok: true, why: attempt ? "read back correctly on the second try" : "read back correctly" };
       if (attempt === 1) return { ok: false, why: "box reads " + JSON.stringify(secret ? value.length + " chars" : value) + " after two tries" };
@@ -400,7 +403,9 @@ async function signIn(tag) {
    * thing (the account's last sign-in time belongs to the iPhone run). The
    * submit button is the lowest one on screen.
    */
-  const candidates = (await tree()).filter((n) => n.clickable && n.box && onScreen(n) && /^sign in$/i.test(labelOf(n)));
+  // Words and click can live on different nodes in the flat dump (as with
+  // Sign Out); tapping the words lands on the button all the same.
+  const candidates = (await tree()).filter((n) => n.box && onScreen(n) && /^sign in$/i.test(labelOf(n)));
   candidates.sort((a, b) => b.box[1] - a.box[1]);
   const submitNode = candidates[0] ?? null;
   let submit;
