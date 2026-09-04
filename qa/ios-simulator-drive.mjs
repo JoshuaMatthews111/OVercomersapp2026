@@ -505,6 +505,7 @@ async function signIn(tag) {
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
   await sleep(9000);
+  signedInProof = await proveSignedIn();
 
   // A rejected sign-in raises a modal alert. Left open, it swallows every
   // tap for the rest of the run and every control reads as dead — sixteen of
@@ -518,7 +519,30 @@ async function signIn(tag) {
     await sleep(1200);
   }
 
-  return await looksSignedIn();
+  return signedInProof.ok;
+}
+
+/**
+ * Proof of sign-in, not a hint of it.
+ *
+ * Home draws for signed-out people too, so "the home screen shows" proved
+ * nothing: on Android the app said signed in while its More tab showed
+ * "Sign in to OGN" and its Chat tab showed demo rooms with invented member
+ * counts. The one thing only a signed-in member sees is their own email on
+ * the More tab. That is what is checked, and its absence is the finding.
+ */
+let signedInProof = { ok: false, why: "not checked yet" };
+async function proveSignedIn() {
+  await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
+  await sleep(1500);
+  await tapLabelled(/^open$/i);
+  await sleep(3000);
+  const words = (await tree()).map(labelOf).filter(Boolean).join(" | ");
+  const emailShown = words.toLowerCase().includes(EMAIL.toLowerCase());
+  const askedToSignIn = /sign in to ogn|require an account/i.test(words);
+  if (emailShown) return { ok: true, why: "the More tab shows the account's email" };
+  if (askedToSignIn) return { ok: false, why: 'the More tab says "Sign in to OGN" — the app does not hold the session' };
+  return { ok: false, why: "the More tab shows neither the email nor a sign-in card" };
 }
 
 // ── Launch fresh ───────────────────────────────────────────────────────────
@@ -533,10 +557,8 @@ if (canTap && PERMISSIONS.hasTestIdentity) {
   await shot("01-sign-in");
   report.signedIn = await signIn("first");
   await shot("02-after-sign-in");
-  note(
-    "sign-in",
-    report.signedIn ? "confirmed by what the home screen shows" : "NOT confirmed — everything behind it is unchecked"
-  );
+  report.signedInProof = signedInProof.why;
+  note("sign-in", (report.signedIn ? "confirmed: " : "NOT confirmed: ") + signedInProof.why);
 } else if (!PERMISSIONS.hasTestIdentity) {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
