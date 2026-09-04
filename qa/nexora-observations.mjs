@@ -218,6 +218,23 @@ export function toNexora(drive, platform) {
     });
   }
 
+  if (drive.pickerAndReturn?.attempted && drive.pickerAndReturn.stillSignedIn === false) {
+    observations.push({
+      ruleId: "device.session-lost-on-return",
+      route: "/profile",
+      controlText: "Upload profile photo",
+      title: `Opening the photo picker and coming back signs you out on ${where}`,
+      expected: "Choosing a profile photo and returning leaves you signed in.",
+      actual: `After "Upload profile photo" opened the system picker and the app came back, ${drive.pickerAndReturn.why}. A plain relaunch and a browser detour both kept the session; this path does not.`,
+      reproSteps: [
+        { step: 1, action: `Sign in on ${where}, open More`, expected: "the email on the More tab", observed: "signed in" },
+        { step: 2, action: "Press Upload profile photo, answer the system, return", expected: "still signed in", observed: drive.pickerAndReturn.why }
+      ],
+      evidence: [],
+      data: { screenshots: [`${drive.shotDir ?? ""}/05-after-picker-and-return.png`] }
+    });
+  }
+
   // ── The active choice that assistive technology cannot tell is active ─────
   for (const a of drive.activeNotSelected ?? []) {
     observations.push({

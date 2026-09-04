@@ -193,6 +193,8 @@ const report = {
   coldStart: null,
   /** Whether the session survived leaving for another app and coming back. */
   leaveAndReturn: null,
+  /** Whether the session survived the system photo picker and coming back. */
+  pickerAndReturn: null,
   sessionFlow: null
 };
 /**
@@ -477,6 +479,37 @@ async function checkLeaveAndReturn() {
   if (!proof.ok) await signIn("re-entry");
 }
 
+/**
+ * The picker detour, on purpose.
+ *
+ * Quit-and-relaunch kept the session. A browser detour kept the session. What
+ * still lost it on Android, three runs running, happened after the crawl's
+ * "Upload profile photo" press opened the system photo picker. So that exact
+ * path is walked deliberately: open More, press Upload profile photo, answer
+ * the system, come back, and look for the email again.
+ */
+async function checkPickerAndReturn() {
+  await sh(["am", "start", "-a", "android.intent.action.VIEW", "-d", SCHEME + "://profile"]).catch(() => undefined);
+  await sleep(4000);
+  const upload = await tapLabelled(/upload profile photo/i);
+  if (!upload.ok) {
+    report.pickerAndReturn = { attempted: false, why: upload.why };
+    return;
+  }
+  await sleep(3000);
+  const asked = await handlePermissionSheet("/profile", "Upload profile photo");
+  if (!asked) await sh(["input", "keyevent", "4"]).catch(() => undefined);
+  await sleep(2000);
+  await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
+  await sleep(5000);
+  await clearSystemDialogs();
+  const proof = await proveSignedIn();
+  report.pickerAndReturn = { attempted: true, stillSignedIn: proof.ok, why: proof.why };
+  await shot("05-after-picker-and-return");
+  note("picker and return", proof.ok ? "the session survived the photo picker and coming back" : "SESSION LOST after the photo picker — " + proof.why);
+  if (!proof.ok) await signIn("re-entry");
+}
+
 
 
 try {
@@ -538,6 +571,7 @@ if (PERMISSIONS.hasTestIdentity) {
   note("sign-in", (report.signedIn ? "confirmed: " : "NOT confirmed: ") + signedInProof.why);
   if (report.signedIn) await checkColdStart();
   if (report.signedIn) await checkLeaveAndReturn();
+  if (report.signedIn) await checkPickerAndReturn();
 } else {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
