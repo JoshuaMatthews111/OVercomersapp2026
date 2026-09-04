@@ -636,9 +636,29 @@ for (const route of ROUTES) {
     const front = await inFront();
     const left = front && front !== BUNDLE;
     if (left) {
-      note("left the app", '"' + labelOf(control) + '" opened ' + front + " — bringing it back");
-      await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
-      await sleep(3000);
+      /**
+       * Come back the way a person does: the Back button. Relaunching through
+       * the launcher intent brought the app back as a fresh task, and every
+       * time the app then behaved as signed out — the More tab showed the
+       * sign-in card — while a deliberate quit-and-reopen kept the session.
+       * Until the crawler returns like a user, it cannot say whether that is
+       * the app's fault or its own.
+       */
+      note("left the app", '"' + labelOf(control) + '" opened ' + front + " — pressing Back to return");
+      await sh(["input", "keyevent", "4"]).catch(() => undefined);
+      await sleep(2500);
+      if ((await inFront()) !== BUNDLE) {
+        note("left the app", "Back did not return to the app — relaunching it");
+        await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
+        await sleep(3000);
+      }
+      // Was the session still there when we came back? Recorded either way.
+      const proof = await proveSignedIn();
+      report.returnChecks = report.returnChecks ?? [];
+      report.returnChecks.push({ route, control: labelOf(control), left_for: front, signedInOnReturn: proof.ok, why: proof.why });
+      note("return check", proof.ok ? "still signed in after coming back from " + front : "SESSION GONE after coming back from " + front + " — " + proof.why);
+      await openRoute();
+      await sleep(2500);
     }
     let after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
     // Patience before a verdict: a settings sheet on a shared emulator can

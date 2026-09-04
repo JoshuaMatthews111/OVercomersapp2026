@@ -168,6 +168,25 @@ export function toNexora(drive, platform) {
     });
   }
 
+  // ── Leaving for another app and coming back ──────────────────────────────
+  for (const r of drive.returnChecks ?? []) {
+    if (r.signedInOnReturn === false) {
+      observations.push({
+        ruleId: "device.session-lost-on-return",
+        route: r.route,
+        controlText: r.control,
+        title: `Coming back from ${r.left_for} finds the app signed out on ${where}`,
+        expected: "Leaving for another app and coming back returns to the same signed-in state.",
+        actual: `"${r.control}" opened ${r.left_for}; pressing Back returned to the app, and ${r.why}. A quit-and-reopen keeps the session, so this is about returning, not restarting.`,
+        reproSteps: [
+          { step: 1, action: `Sign in on ${where}`, expected: "the email on the More tab", observed: "signed in" },
+          { step: 2, action: `Press "${r.control}" and come back with Back`, expected: "still signed in", observed: r.why }
+        ],
+        evidence: []
+      });
+    }
+  }
+
   // ── The active choice that assistive technology cannot tell is active ─────
   for (const a of drive.activeNotSelected ?? []) {
     observations.push({
