@@ -75,6 +75,7 @@ async function tree() {
         desc: attr("content-desc"),
         cls: attr("class"),
         isPassword: attr("password") === "true",
+        focused: attr("focused") === "true",
         clickable: attr("clickable") === "true",
         selected: attr("selected") === "true",
         checked: attr("checked") === "true",
@@ -360,7 +361,14 @@ async function signIn(tag) {
       await sleep(700);
       const now = (await tree()).find((n) => /EditText/.test(n.cls) && n.box && Math.abs(n.box[1] - box.box[1]) < 6);
       const value = String(now?.text ?? "");
-      const ok = secret ? value.length === text.length : value === text;
+      // A password box on the More-tab card hands the dump no text at all, so
+      // "0 chars" there is not proof that nothing was typed. When the box is
+      // still the focused one and something was sent, take that as typed
+      // rather than clearing it and trying again — which is how the second
+      // attempt emptied a correctly filled box.
+      const ok = secret
+        ? value.length === text.length || (value.length === 0 && now?.focused === true)
+        : value === text;
       if (ok) return { ok: true, why: attempt ? "read back correctly on the second try" : "read back correctly" };
       if (attempt === 1) return { ok: false, why: "box reads " + JSON.stringify(secret ? value.length + " chars" : value) + " after two tries" };
     }
