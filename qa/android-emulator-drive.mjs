@@ -348,7 +348,24 @@ async function signIn(tag) {
   // and the form simply still there. Put the keyboard away, then press.
   await sh(["input", "keyevent", "111"]).catch(() => undefined);
   await sleep(900);
-  const submit = await tapLabelled(/^sign in$/i);
+  /**
+   * Two things on this screen say "Sign In": the mode tab at the top and the
+   * button at the bottom. The first match is the tab, which is already the
+   * mode — pressing it is a no-op — and that is why the boxes were full, the
+   * keyboard was away, "Sign In" was pressed, and the server never heard a
+   * thing (the account's last sign-in time belongs to the iPhone run). The
+   * submit button is the lowest one on screen.
+   */
+  const candidates = (await tree()).filter((n) => n.clickable && n.box && onScreen(n) && /^sign in$/i.test(labelOf(n)));
+  candidates.sort((a, b) => b.box[1] - a.box[1]);
+  const submitNode = candidates[0] ?? null;
+  let submit;
+  if (submitNode) {
+    await tapBox(submitNode.box);
+    submit = { ok: true, tapped: labelOf(submitNode) + " (lowest of " + candidates.length + ")" };
+  } else {
+    submit = { ok: false, why: "nothing on screen says Sign In" };
+  }
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
   // An emulator on a shared runner reaches Supabase slowly. Poll instead of
   // guessing a delay, up to twenty seconds.
