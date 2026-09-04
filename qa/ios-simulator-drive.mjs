@@ -241,12 +241,19 @@ const isControl = (el) => {
  * control that needs scrolling is named as not reached, never as broken.
  */
 const SCREEN = { width: 402, height: 874 };
+/**
+ * The WHOLE control must be on screen, not just its centre. A row whose
+ * bottom half sits under the tab bar has a centre "on screen" and a tap that
+ * lands on the tab bar; "Open OGN Member profile" was reported dead from a
+ * card cut off at the bottom of Chat for exactly that reason.
+ */
+const TAB_BAR = 84;
 const onScreen = (el) =>
   !!el.frame &&
-  el.frame.y + el.frame.height / 2 > 0 &&
-  el.frame.y + el.frame.height / 2 < SCREEN.height &&
-  el.frame.x + el.frame.width / 2 > 0 &&
-  el.frame.x + el.frame.width / 2 < SCREEN.width;
+  el.frame.y >= 0 &&
+  el.frame.y + el.frame.height <= SCREEN.height - TAB_BAR + 2 &&
+  el.frame.x >= 0 &&
+  el.frame.x + el.frame.width <= SCREEN.width + 1;
 
 /**
  * Which app is on screen. idb's tree starts with an AXApplication node whose
@@ -690,7 +697,17 @@ for (const route of ROUTES) {
     const front = await appInFront();
     const left = front && !OUR_APP.test(front);
     if (left) await bringAppBack('"' + labelOf(control) + '" opened ' + front);
-    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
+    /**
+     * Patience before a verdict. A settings row that opens a sheet took longer
+     * than the fixed wait on a shared runner, and four working rows were
+     * called dead. Read again at intervals; only "unchanged every time" is
+     * dead.
+     */
+    let after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
+    for (let extra = 0; extra < 2 && before === after; extra++) {
+      await sleep(2000);
+      after = quietPrint(await tree(), noisy);
+    }
     if (before === after) {
       // Proof, not just an assertion. A dead-control finding that cannot be
       // looked at is one nobody acts on.

@@ -91,11 +91,12 @@ const labelOf = (n) => (n.text + " " + n.desc).trim();
 
 /** On the visible screen, not merely in the scroll view. See the iOS lane for why. */
 let SCREEN = { width: 1080, height: 2400 };
+/** The whole control on screen, above the navigation bar. See the iOS lane. */
+const NAV_BAR_PX = 260;
 const onScreen = (n) => {
   if (!n.box) return false;
-  const cx = (n.box[0] + n.box[2]) / 2;
-  const cy = (n.box[1] + n.box[3]) / 2;
-  return cx > 0 && cy > 0 && cx < SCREEN.width && cy < SCREEN.height;
+  const [x1, y1, x2, y2] = n.box;
+  return x1 >= 0 && y1 >= 0 && x2 <= SCREEN.width && y2 <= SCREEN.height - NAV_BAR_PX + 4 && x2 > x1 && y2 > y1;
 };
 
 /**
@@ -582,7 +583,13 @@ for (const route of ROUTES) {
       await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
       await sleep(3000);
     }
-    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
+    let after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
+    // Patience before a verdict: a settings sheet on a shared emulator can
+    // take longer than the fixed wait. Only "unchanged every time" is dead.
+    for (let extra = 0; extra < 2 && before === after; extra++) {
+      await sleep(2000);
+      after = quietPrint(await tree(), noisy);
+    }
     if (before === after) {
       const proof = await shot("dead-" + name + "-" + report.deadControls.length).catch(() => null);
       report.deadControls.push({
@@ -616,7 +623,9 @@ if (report.signedIn) {
 
   let signOut = null;
   for (let hop = 0; hop < 4 && !signOut; hop++) {
-    signOut = (await tree()).find((n) => n.clickable && onScreen(n) && /^(sign ?out|log ?out|logout)$/i.test(labelOf(n)) && mayPress(labelOf(n), PERMISSIONS).allowed) ?? null;
+    // On Android the words "Sign Out" sit in a TextView inside the pressable row; the flat
+    // dump gives the words to a node not marked clickable. Tapping the words lands on the row.
+    signOut = (await tree()).find((n) => n.box && onScreen(n) && /^(sign ?out|log ?out|logout)$/i.test(labelOf(n)) && mayPress(labelOf(n), PERMISSIONS).allowed) ?? null;
     if (signOut) break;
     await sh(["input", "swipe", "540", "1900", "540", "600", "400"]).catch(() => undefined);
     await sleep(1200);
