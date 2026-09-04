@@ -93,13 +93,25 @@ export function toNexora(drive, platform) {
         title: `Pressing sign out did not end the session on ${where}`,
         expected: "Pressing sign out ends the session.",
         actual:
-          "The app still showed signed-in screens afterwards. On a shared or lost phone, " +
-          "somebody who was handed it stays signed in as the previous person.",
+          "The app still showed signed-in screens for ninety seconds after the press, while the server had already " +
+          "accepted the logout. On a shared or lost phone, somebody who was handed it stays signed in as the previous person.",
         reproSteps: repro(1, `Press sign out on ${where}`, "signed out", "still signed in"),
         evidence: [],
         // The two photographs that make this claim checkable: the button as
         // it was pressed, and the screen that came back.
         data: { screenshots: ["19-before-sign-out.png", "20-after-sign-out.png"].map((f) => `${drive.shotDir ?? ""}/${f}`) }
+      });
+    }
+    if (flow.signedOut === true && typeof flow.signedOutAfterMs === "number" && flow.signedOutAfterMs > 10000) {
+      observations.push({
+        ruleId: "device.signout-slow",
+        route: "/profile",
+        controlText: "Sign Out",
+        title: `Sign out takes ${Math.round(flow.signedOutAfterMs / 1000)} seconds to show on ${where}`,
+        expected: "Pressing sign out shows the signed-out screen at once.",
+        actual: `The server accepted the logout immediately; the app kept showing the signed-in screens for ${Math.round(flow.signedOutAfterMs / 1000)} seconds and then switched on its own — the look of a local session outliving the sign-out until its next refresh is refused.`,
+        reproSteps: repro(1, `Press sign out on ${where}`, "the sign-in screen at once", `still signed in for ${Math.round(flow.signedOutAfterMs / 1000)} s`),
+        evidence: []
       });
     }
     if (flow.signedOut === true && flow.signedBackIn === false) {

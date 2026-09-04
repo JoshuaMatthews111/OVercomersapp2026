@@ -765,12 +765,26 @@ if (report.signedIn) {
     // Some apps confirm first. Confirming a sign-out is still recoverable.
     const confirm = await tapLabelled(/^(sign ?out|log ?out|yes|confirm)$/i);
     if (confirm.ok) await sleep(2000);
+    /**
+     * When does the app notice it signed out?
+     *
+     * The server accepts the logout within a second. The app then shows Home,
+     * signed in, and on Android the sign-in card appeared about a minute
+     * later on its own — which looks like the local session surviving the
+     * sign-out and dying only when its next token refresh is refused. So the
+     * moment the screen flips is recorded, up to ninety seconds. "Never" and
+     * "after 60 s" are different findings.
+     */
     let signedOutOk = false;
-    for (let waited = 0; waited < 20000; waited += 2000) {
-      await sleep(2000);
-      if (!(await looksSignedIn())) { signedOutOk = true; break; }
+    let signedOutAfterMs = null;
+    const t0 = Date.now();
+    for (let waited = 0; waited < 90000; waited += 3000) {
+      await sleep(3000);
+      if (!(await looksSignedIn())) { signedOutOk = true; signedOutAfterMs = Date.now() - t0; break; }
+      if (waited === 15000) await shot("20-after-sign-out");
     }
-    await shot("20-after-sign-out");
+    await shot(signedOutOk ? "20b-signed-out-seen" : "20-after-sign-out-90s");
+    note("sign-out timing", signedOutOk ? "the app showed signed-out after " + Math.round(signedOutAfterMs / 1000) + " s" : "the app still showed signed-in after 90 s");
     note("sign-out result", signedOutOk ? "the session ended, as it should" : "STILL SIGNED IN after pressing sign out");
 
     // Put it back. Whether this works is the finding that matters most.
@@ -781,6 +795,7 @@ if (report.signedIn) {
     report.sessionFlow = {
       attempted: true,
       signedOut: signedOutOk,
+      signedOutAfterMs,
       signedBackIn: recovered,
       verdict: signedOutOk && recovered
         ? "sign out works and the app can be signed back into"
