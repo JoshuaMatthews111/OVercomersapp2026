@@ -100,11 +100,8 @@ export default function ProfileScreen() {
   async function signOut() {
     // Two phones, four cloud runs: the server accepted the logout within a
     // second, and the app kept showing the signed-in Home for up to a minute
-    // before the sign-in screen appeared on its own. The global sign-out waits
-    // on the network before it clears the phone's copy of the session, and on
-    // a slow link that wait is the whole minute. So: ask the server to revoke
-    // with a short leash, then clear the phone's copy regardless, then leave.
-    // Whether the server call finished or not, the person is signed out here.
+    // before the sign-in screen appeared on its own. Clearing the phone's copy
+    // first and leaving at once fixed that.
     // This device only. 'global' revoked every session on the account: the
     // Android lane was thrown to the welcome screen two minutes after the
     // iPhone lane signed out of the same test account, and a member would get
