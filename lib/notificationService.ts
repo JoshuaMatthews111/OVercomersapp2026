@@ -35,13 +35,24 @@ export async function getNotificationPreferences(): Promise<NotificationPreferen
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) return localPrefs;
 
+  // The table names two of these differently from the app. The query used to
+  // ask for "chat" and "prayer", got a 400 back, and silently fell back to
+  // the local copy; saving failed the same way, so choices never stuck.
   const { data } = await supabase
     .from('notification_preferences')
-    .select('announcements, sermons, articles, chat, prayer')
+    .select('announcements, sermons, articles, chat_messages, prayer_updates')
     .eq('user_id', userResult.user.id)
     .maybeSingle();
 
-  return data ? { ...defaultPreferences, ...data } : localPrefs;
+  if (!data) return localPrefs;
+  return {
+    ...defaultPreferences,
+    announcements: data.announcements ?? defaultPreferences.announcements,
+    sermons: data.sermons ?? defaultPreferences.sermons,
+    articles: data.articles ?? defaultPreferences.articles,
+    chat: data.chat_messages ?? defaultPreferences.chat,
+    prayer: data.prayer_updates ?? defaultPreferences.prayer,
+  };
 }
 
 export async function saveNotificationPreferences(preferences: NotificationPreferences) {
@@ -52,7 +63,15 @@ export async function saveNotificationPreferences(preferences: NotificationPrefe
 
   const { error } = await supabase
     .from('notification_preferences')
-    .upsert({ user_id: userResult.user.id, ...preferences, updated_at: new Date().toISOString() });
+    .upsert({
+      user_id: userResult.user.id,
+      announcements: preferences.announcements,
+      sermons: preferences.sermons,
+      articles: preferences.articles,
+      chat_messages: preferences.chat,
+      prayer_updates: preferences.prayer,
+      updated_at: new Date().toISOString(),
+    });
   if (error) throw error;
 }
 
