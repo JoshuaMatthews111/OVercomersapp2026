@@ -73,6 +73,8 @@ const report = {
   notReached: [],
   /** What the operating system asked for, and what this run answered. */
   permissionsRequested: [],
+  /** Controls that were the active choice and work otherwise, but are not marked selected. */
+  activeNotSelected: [],
   sessionFlow: null,
   /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
   idbRawSample: null
@@ -728,6 +730,40 @@ for (const route of ROUTES) {
           await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)\b/i);
           continue;
         }
+      }
+    }
+    /**
+     * The chip that is already chosen.
+     *
+     * "Sermons" on Media and "Private Messages" on Chat came back dead twice,
+     * and the screenshots show why: they are the active choice, drawn gold,
+     * and pressing the active choice does nothing by design. Android does not
+     * mark them selected, so the earlier rule could not tell. The test that
+     * settles it: press a neighbour in the same row, then press the original.
+     * If the original now moves the screen, it works — and the real finding
+     * is that the active choice is not exposed as selected to assistive tech.
+     */
+    if (before === after) {
+      const row = (await tree()).filter((n) => isControl(n) && onScreen(n) && labelOf(n) && labelOf(n) !== labelOf(control) && Math.abs(n.frame.y - control.frame.y) < 6 && mayPress(labelOf(n), PERMISSIONS).allowed);
+      const neighbour = row[0];
+      if (neighbour) {
+        await tapFrame(neighbour.frame);
+        await sleep(2500);
+        const mid = quietPrint(await tree(), noisy);
+        const orig = (await tree()).find((n) => labelOf(n) === labelOf(control) && isControl(n) && onScreen(n));
+        if (orig && mid !== before) {
+          await tapFrame(orig.frame);
+          await sleep(2500);
+          const back = quietPrint(await tree(), noisy);
+          if (back !== mid) {
+            report.activeNotSelected.push({ route, control: labelOf(control), neighbour: labelOf(neighbour) });
+            note("active choice", route + ' — "' + labelOf(control) + '" was the active choice; it works once "' + labelOf(neighbour) + '" is chosen, but is not marked selected');
+            report.liveControls++;
+            await restore();
+            continue;
+          }
+        }
+        await restore();
       }
     }
     if (before === after) {

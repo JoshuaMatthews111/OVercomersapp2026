@@ -139,6 +139,20 @@ export function toNexora(drive, platform) {
     });
   }
 
+  // ── The active choice that assistive technology cannot tell is active ─────
+  for (const a of drive.activeNotSelected ?? []) {
+    observations.push({
+      ruleId: "device.active-not-selected",
+      route: a.route,
+      controlText: a.control,
+      title: `"${a.control}" is the active choice but is not marked selected on ${where}`,
+      expected: "The chosen tab or chip is exposed as selected, so a screen reader can say which one is active.",
+      actual: `Pressing "${a.control}" while it was already chosen did nothing, as designed; after choosing "${a.neighbour}" it worked. Nothing in the accessibility tree says it was the active one.`,
+      reproSteps: repro(1, `Open ${a.route} on ${where} with a screen reader and land on "${a.control}"`, "announced as selected", "announced as a plain button"),
+      evidence: []
+    });
+  }
+
   // ── What this run did not look at ────────────────────────────────────────
   const notAssessed = [...(drive.notAssessed ?? [])];
   for (const n of drive.notJudged ?? []) {
