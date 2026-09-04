@@ -262,7 +262,15 @@ export default function ProfileScreen() {
       <SafeAreaView style={styles.safe} edges={['left', 'right', 'bottom']}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           <View style={[styles.brandHero, dark ? styles.brandHeroDark : styles.brandHeroLight, { height: 232 + insets.top, paddingTop: insets.top + 14 }]}>
-            <Image source={dark ? art.heroGlobeDark : art.heroGlobeLight} style={[styles.brandGlobe, dark && styles.brandGlobeDark, { height: 232 + insets.top }]} resizeMode="stretch" />
+            <Image source={dark ? art.heroGlobeDark : art.heroGlobeLight} style={[styles.brandGlobe, dark && styles.brandGlobeDark, { height: 232 + insets.top }]} resizeMode="cover" />
+            {/* Band behind the name so it never lands on the bright side of the globe. */}
+            <LinearGradient
+              pointerEvents="none"
+              colors={dark ? ['rgba(2,8,23,0.92)', 'rgba(2,8,23,0.6)', 'rgba(2,8,23,0)'] : ['rgba(255,255,255,0.96)', 'rgba(255,255,255,0.7)', 'rgba(255,255,255,0)']}
+              start={{ x: 0, y: 0.5 }}
+              end={{ x: 1, y: 0.5 }}
+              style={[styles.brandScrim, { height: 232 + insets.top }]}
+            />
             <Image source={art.seal} style={styles.brandSeal} resizeMode="contain" />
             <View style={styles.brandCopy}>
               <Text style={[styles.brandName, dark && styles.brandNameDark]}>Overcomers{'\n'}Global Network</Text>
@@ -533,6 +541,7 @@ const styles = StyleSheet.create({
   brandGlobeDark: { opacity: 0.82 },
   brandSeal: { width: 92, height: 74, zIndex: 2 },
   brandCopy: { flex: 1, zIndex: 2, marginLeft: 8 },
+  brandScrim: { position: 'absolute', left: 0, top: 0, width: '78%' },
   brandName: { color: colors.royalBlue, fontSize: 21, lineHeight: 24, fontWeight: '900', textTransform: 'uppercase' },
   brandNameDark: { color: colors.white },
   brandMotto: { color: colors.deepGold, fontSize: 12, fontWeight: '900', letterSpacing: 0, marginTop: 5, textTransform: 'uppercase' },

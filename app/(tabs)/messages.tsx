@@ -27,7 +27,9 @@ const art = {
   seal: require('../../assets/images/ogn-logo-transparent.png'),
   // Globe art only. The earlier full banners carried other ministries' names
   // and faces baked into the picture; the words now come from OGN's own data.
-  heroGlobeDark: require('../../assets/images/ogn-layers/media-hero-globe-dark.png'),
+  // The original dark globe had a play button baked in; it showed as a ghost
+  // behind the real one. This copy is cropped past it.
+  heroGlobeDark: require('../../assets/images/ogn-layers/media-hero-globe-dark-clean.png'),
   heroGlobeLight: require('../../assets/images/ogn-layers/media-hero-globe-light.png'),
 };
 

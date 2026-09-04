@@ -126,7 +126,8 @@ export async function getChatRooms(): Promise<ChatRoom[]> {
     name: row.name,
     region: row.region || 'Worldwide',
     members: 0,
-    unread: row.is_mandatory ? 1 : 0,
+    // No read tracking exists yet, so no invented unread counts.
+    unread: 0,
     type: normalizeRoomType(row.channel_type)
   }));
 }

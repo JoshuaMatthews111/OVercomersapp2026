@@ -84,6 +84,9 @@ export default function HomeScreen() {
     return () => clearInterval(timer);
   }, []);
 
+  // Past services are history, not 'upcoming'. Keep what starts from today on.
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const upcomingEvents = events.filter((event) => { const t = new Date(event.startsAt).getTime(); return Number.isNaN(t) || t >= dayStart.getTime(); });
   const activeRemoteStories = remoteStories.filter((story) => isStoryLive({ publishedAt: story.publishedAt || story.createdAt, expiresAt: story.expiresAt }, now));
   // Live backend with nothing live right now = an honest empty ring, not demo stories.
   const storiesEmpty = hasSupabase && !activeRemoteStories.length;
@@ -112,7 +115,18 @@ export default function HomeScreen() {
       <SafeAreaView style={styles.safe}>
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           <View style={styles.hero}>
-            <Image source={dark ? art.heroGlobeDark : art.heroGlobeLight} style={[styles.heroGlobe, dark ? styles.heroGlobeDark : styles.heroGlobeLight]} resizeMode="stretch" />
+            <Image source={dark ? art.heroGlobeDark : art.heroGlobeLight} style={[styles.heroGlobe, dark ? styles.heroGlobeDark : styles.heroGlobeLight]} resizeMode="cover" />
+            {/* A soft band behind the words, so gold never sits on gold and
+                white never sits on a lit-up continent. Fades to the page at
+                the bottom so the hero has no hard edge. */}
+            <LinearGradient
+              pointerEvents="none"
+              colors={dark
+                ? ['rgba(2,8,23,0)', 'rgba(2,8,23,0.55)', 'rgba(2,8,23,0.92)', '#020817']
+                : ['rgba(255,255,255,0)', 'rgba(255,255,255,0.72)', 'rgba(255,255,255,0.96)', '#F8FBFF']}
+              locations={[0.18, 0.5, 0.82, 1]}
+              style={styles.heroScrim}
+            />
             <View style={styles.topRow}>
               <Image source={art.seal} style={styles.seal} resizeMode="contain" />
               <View style={styles.headerActions}>
@@ -126,16 +140,14 @@ export default function HomeScreen() {
               </View>
             </View>
 
-            <Text style={[styles.welcome, !dark && styles.welcomeLight]}>Welcome to</Text>
+            <Text style={[styles.welcome, !dark && styles.welcomeLight]}>WELCOME TO</Text>
             <Text style={[styles.brandTitle, !dark && styles.brandTitleLight]}>Overcomers{'\n'}Global Network</Text>
             <Text style={[styles.motto, !dark && styles.mottoLight]}>Educate. Equip. Evolve.</Text>
             <View style={styles.missionLine}>
               <View style={styles.line} />
-              <View style={styles.swordMark}>
-                <Ionicons name="add" size={19} color={colors.gold} />
-                <Ionicons name="globe-outline" size={25} color={colors.gold} />
-              </View>
-              <Text style={[styles.mission, !dark && styles.missionLight]}>One Vision. Every Nation. Eternal Impact.</Text>
+              <Ionicons name="globe-outline" size={18} color={colors.gold} />
+              <Text numberOfLines={2} style={[styles.mission, !dark && styles.missionLight]}>One Vision. Every Nation.{'\n'}Eternal Impact.</Text>
+              <Ionicons name="globe-outline" size={18} color={colors.gold} />
               <View style={styles.line} />
             </View>
           </View>
@@ -174,7 +186,7 @@ export default function HomeScreen() {
           )}
 
           <View style={styles.sectionHeader}>
-            <Text numberOfLines={2} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Recent Stories Around the World</Text>
+            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Stories Around the World</Text>
             <Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>{access.canManageContent ? 'Manage' : 'View All'}</Text>
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyScroll}>
@@ -206,16 +218,16 @@ export default function HomeScreen() {
           </View>
 
           <View style={styles.sectionHeader}>
-            <Text numberOfLines={2} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Upcoming Services</Text>
+            <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Upcoming Services</Text>
             <Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>View All</Text>
           </View>
           <View style={styles.eventsRow}>
-            {(events.length ? events.slice(0, 2) : []).map((event) => <EventCard key={event.id} event={event} dark={dark} />)}
-            {!events.length ? (
-              <>
-                <EventCard event={{ id: 'global-prayer', title: 'Global Prayer Night', description: 'A night of intercession across every nation.', location: 'Online', startsAt: '2026-06-24T19:00:00Z' }} dark={dark} />
-                <EventCard event={{ id: 'sunday', title: 'Overcomers Sunday', description: 'Worship. Word. Wonders. Every Sunday.', location: 'OGN Broadcast', startsAt: '2026-06-26T10:00:00Z' }} dark={dark} />
-              </>
+            {upcomingEvents.slice(0, 3).map((event) => <EventCard key={event.id} event={event} dark={dark} />)}
+            {!upcomingEvents.length ? (
+              <View style={[styles.emptyEvents, dark && styles.emptyEventsDark]}>
+                <Ionicons name="calendar-outline" size={22} color={colors.gold} />
+                <Text style={[styles.emptyEventsText, dark && styles.emptyEventsTextDark]}>No services scheduled yet. Check back soon.</Text>
+              </View>
             ) : null}
           </View>
 
@@ -345,7 +357,8 @@ const styles = StyleSheet.create({
   safe: { flex: 1 },
   scroll: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 112 },
   hero: { minHeight: 430, marginHorizontal: -16, paddingHorizontal: 16, overflow: 'hidden' },
-  heroGlobe: { position: 'absolute', left: '-10%', top: -4, width: '120%', height: 344 },
+  heroGlobe: { position: 'absolute', left: '-4%', top: -4, width: '108%', height: 344 },
+  heroScrim: { position: 'absolute', left: 0, right: 0, top: 0, height: 430 },
   heroGlobeDark: { opacity: 0.72 },
   heroGlobeLight: { opacity: 0.98 },
   topRow: { zIndex: 2, flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
@@ -363,16 +376,15 @@ const styles = StyleSheet.create({
   },
   headerIconLight: { backgroundColor: 'rgba(255,255,255,0.88)', borderColor: 'rgba(212,175,55,0.24)', ...shadows.soft },
   notificationDot: { position: 'absolute', top: 7, right: 8, width: 11, height: 11, borderRadius: 6, backgroundColor: colors.gold },
-  welcome: { zIndex: 2, color: colors.white, fontSize: 24, fontWeight: '700', marginTop: 16 },
-  welcomeLight: { color: colors.deepGold },
-  brandTitle: { zIndex: 2, color: colors.white, fontWeight: '900', fontSize: 43, lineHeight: 47, marginTop: 5 },
-  brandTitleLight: { color: colors.royalBlue },
+  welcome: { zIndex: 2, color: 'rgba(255,255,255,0.86)', fontSize: 15, fontWeight: '800', letterSpacing: 2.2, marginTop: 34 },
+  welcomeLight: { color: colors.royalBlue, opacity: 0.8 },
+  brandTitle: { zIndex: 2, color: colors.white, fontWeight: '900', fontSize: 41, lineHeight: 45, marginTop: 6, textShadowColor: 'rgba(2,8,23,0.45)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 8 },
+  brandTitleLight: { color: colors.royalBlue, textShadowColor: 'rgba(255,255,255,0.9)' },
   motto: { zIndex: 2, color: colors.gold, fontWeight: '800', fontSize: 23, marginTop: 8 },
   mottoLight: { color: colors.royalBlue },
-  missionLine: { zIndex: 2, marginTop: 28, minHeight: 52, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  line: { flex: 1, height: 1.5, backgroundColor: colors.gold },
-  swordMark: { width: 45, height: 45, alignItems: 'center', justifyContent: 'center' },
-  mission: { flex: 3, color: colors.gold, fontSize: 16, fontWeight: '800', textAlign: 'center' },
+  missionLine: { zIndex: 2, marginTop: 22, minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
+  line: { flex: 1, height: 1.5, backgroundColor: colors.gold, opacity: 0.7 },
+  mission: { flexShrink: 1, color: colors.gold, fontSize: 14, lineHeight: 19, fontWeight: '800', textAlign: 'center', letterSpacing: 0.3 },
   missionLight: { color: colors.deepGold },
 
   broadcastCard: {
@@ -448,6 +460,10 @@ const styles = StyleSheet.create({
   impactLabelDark: { color: 'rgba(255,255,255,0.78)' },
 
   eventsRow: { gap: 11 },
+  emptyEvents: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 16, borderRadius: 16, borderWidth: 1, borderColor: 'rgba(212,175,55,0.3)', backgroundColor: colors.white },
+  emptyEventsDark: { backgroundColor: 'rgba(255,255,255,0.05)' },
+  emptyEventsText: { flex: 1, color: colors.slate, fontWeight: '700' },
+  emptyEventsTextDark: { color: 'rgba(255,255,255,0.75)' },
   eventCard: { minHeight: 110, borderRadius: 15, borderWidth: 1, borderColor: 'rgba(212,175,55,0.25)', backgroundColor: colors.white, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12, ...shadows.soft },
   eventCardDark: { backgroundColor: 'rgba(7,27,69,0.82)', borderColor: 'rgba(212,175,55,0.62)' },
   eventDate: { width: 72, minHeight: 86, borderRadius: 12, backgroundColor: colors.royalBlue, alignItems: 'center', justifyContent: 'center' },

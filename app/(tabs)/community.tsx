@@ -44,7 +44,7 @@ const art = {
 };
 
 const tabs: { key: ChatTab; label: string }[] = [
-  { key: 'private', label: 'Private Messages' },
+  { key: 'private', label: 'Messages' },
   { key: 'groups', label: 'Groups' },
   { key: 'announcements', label: 'Announcements' },
 ];
@@ -340,7 +340,6 @@ export default function CommunityScreen() {
                   <Text style={[styles.roomPreview, dark && styles.roomPreviewDark]}>{roomLabel(room.type)} • {room.region || 'Global'} • {room.members.toLocaleString()} members</Text>
                 </View>
                 <View style={styles.roomMetaRight}>
-                  <Text style={[styles.roomTime, dark && styles.roomTimeDark]}>{index === 0 ? '9:30 AM' : index === 1 ? '8:15 AM' : 'Yesterday'}</Text>
                   {room.unread > 0 ? (
                     <View style={styles.unreadBadge}>
                       <Text style={styles.unreadText}>{room.unread}</Text>
