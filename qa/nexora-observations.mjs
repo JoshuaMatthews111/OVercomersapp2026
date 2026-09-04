@@ -118,7 +118,9 @@ export function toNexora(drive, platform) {
         data: { screenshots: ["19-before-sign-out.png", "20-after-sign-out.png"].map((f) => `${drive.shotDir ?? ""}/${f}`) }
       });
     }
-    if (flow.signedOut === true && /tab bar/i.test(String(drive.sessionLandedOn ?? ""))) {
+    // "somewhere without the tab bar" also contains the words "tab bar"; the
+    // old test matched it and reported the welcome screen as the Home tab.
+    if (flow.signedOut === true && /^the tab bar/i.test(String(drive.sessionLandedOn ?? ""))) {
       observations.push({
         ruleId: "device.signout-no-signin-screen",
         route: "/profile",
