@@ -178,7 +178,7 @@ export default function MediaScreen() {
 
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabRow}>
             {tabs.map((tab) => (
-              <Pressable key={tab.key} onPress={() => setActiveTab(tab.key)} style={[styles.tab, dark && styles.tabDark, activeTab === tab.key && styles.tabActive, activeTab === tab.key && dark && styles.tabActiveDark]}>
+              <Pressable key={tab.key} accessibilityRole="tab" accessibilityState={{ selected: activeTab === tab.key }} onPress={() => setActiveTab(tab.key)} style={[styles.tab, dark && styles.tabDark, activeTab === tab.key && styles.tabActive, activeTab === tab.key && dark && styles.tabActiveDark]}>
                 <Ionicons name={tab.icon} size={18} color={activeTab === tab.key ? (dark ? colors.gold : colors.white) : dark ? colors.white : colors.deepGold} />
                 <Text style={[styles.tabText, dark && styles.tabTextDark, activeTab === tab.key && styles.tabTextActive, activeTab === tab.key && dark && styles.tabTextActiveDark]}>{tab.label}</Text>
               </Pressable>
