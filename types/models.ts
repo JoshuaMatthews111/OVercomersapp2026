@@ -73,6 +73,8 @@ export type Territory = {
   streetsUntapped?: number;
   metrics: TerritoryMetrics;
   streetNames?: string[];
+  // Outline rings, each a list of map points. First ring is the outer edge.
+  boundary?: { latitude: number; longitude: number }[][];
 };
 
 export type OutreachContact = {

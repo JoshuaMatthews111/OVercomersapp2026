@@ -1,15 +1,30 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import MapView, { Circle, Marker } from 'react-native-maps';
+// Evangelism map. Regions are drawn as real outlines, colored by status.
+// Workers on the field show up live. Leaders can outline a region by tapping
+// corners on the map or by pulling the shape from OpenStreetMap.
+import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { AppHeader } from '../components/AppHeader';
-import { Card } from '../components/Card';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import MapView, { LatLng, Marker, Polygon, Polyline } from 'react-native-maps';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { Screen } from '../components/Screen';
 import { useAccessProfile } from '../lib/accessControl';
-import { getOutreachContacts, getTerritories, saveOutreachContact, updateTerritoryMetrics } from '../lib/evangelismService';
+import {
+  endCheckin,
+  fetchOutlineFromOpenStreetMap,
+  getLiveWorkers,
+  getOutreachContacts,
+  getTerritories,
+  heartbeatCheckin,
+  LiveWorker,
+  saveOutreachContact,
+  setTerritoryBoundary,
+  startCheckin,
+  subscribeLiveWorkers,
+  updateTerritoryMetrics,
+} from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
 import { colors } from '../lib/theme';
 import { OutreachContact, Territory } from '../types/models';
@@ -20,28 +35,39 @@ const statusColor: Record<Territory['status'], string> = {
   covered: colors.green,
   follow_up_due: colors.purple,
   new_believer: colors.brightBlue,
-  discipled: colors.gold
+  discipled: colors.gold,
 };
+const statusLabel: Record<Territory['status'], string> = {
+  untapped: 'Untapped',
+  in_progress: 'In progress',
+  covered: 'Covered',
+  follow_up_due: 'Follow-up due',
+  new_believer: 'New believers',
+  discipled: 'Discipled',
+};
+const levelDelta: Record<Territory['level'], number> = { global: 110, country: 18, region: 5, city: 0.28, neighborhood: 0.045, street: 0.015 };
 
-const levelDelta: Record<Territory['level'], number> = {
-  global: 110,
-  country: 18,
-  region: 5,
-  city: 0.28,
-  neighborhood: 0.045,
-  street: 0.015
-};
+function withAlpha(hex: string, alpha: number) {
+  const clean = hex.replace('#', '');
+  const n = parseInt(clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
 
 export default function MapsScreen() {
   const { access } = useAccessProfile();
+  const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
   const [territoryList, setTerritoryList] = useState<Territory[]>([]);
   const [contactList, setContactList] = useState<OutreachContact[]>([]);
   const [selected, setSelected] = useState<Territory | null>(null);
   const [query, setQuery] = useState('');
-  const [pulseRadius, setPulseRadius] = useState(80);
-  const [myLocation, setMyLocation] = useState<{ latitude: number; longitude: number } | null>(null);
-  const [record, setRecord] = useState({ name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', assignedTo: '', nextFollowUpAt: '', notes: '', gospelShared: true, invitedToChurch: true, bibleStudyStarted: false, savedAcceptedChrist: false, followUpNeeded: true });
+  const [myLocation, setMyLocation] = useState<LatLng | null>(null);
+  const [workers, setWorkers] = useState<LiveWorker[]>([]);
+  const [checkinId, setCheckinId] = useState<string | null>(null);
+  const [drawing, setDrawing] = useState<LatLng[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [sheet, setSheet] = useState<'summary' | 'record' | 'people' | 'admin'>('summary');
+  const [record, setRecord] = useState({ name: '', phone: '', whatsapp: '', prayerRequest: '', notes: '', gospelShared: true, invitedToChurch: true, bibleStudyStarted: false, savedAcceptedChrist: false, followUpNeeded: true });
   const [metricEdits, setMetricEdits] = useState({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
 
   function goBack() {
@@ -49,113 +75,140 @@ export default function MapsScreen() {
     else router.replace('/(tabs)/profile' as any);
   }
 
-  useEffect(() => {
-    Promise.all([getTerritories(), getOutreachContacts()]).then(([territories, contacts]) => {
-      setTerritoryList(territories);
-      setContactList(contacts);
-      setSelected(territories[0] || null);
-    });
-  }, []);
+  async function loadAll() {
+    const [territories, contacts, live] = await Promise.all([getTerritories(), getOutreachContacts(), getLiveWorkers()]);
+    setTerritoryList(territories);
+    setContactList(contacts);
+    setWorkers(live);
+    setSelected((current) => (current ? territories.find((t) => t.id === current.id) || current : territories.find((t) => t.level !== 'global') || territories[0] || null));
+  }
 
   useEffect(() => {
-    const timer = setInterval(() => setPulseRadius((radius) => radius >= 210 ? 80 : radius + 18), 700);
-    return () => clearInterval(timer);
+    loadAll().catch(() => undefined);
+    const unsubscribe = subscribeLiveWorkers(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); });
+    const poll = setInterval(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); }, 60 * 1000);
+    return () => { unsubscribe(); clearInterval(poll); };
   }, []);
 
-  const children = useMemo(() => territoryList.filter((territory) => territory.parentId === selected?.id), [selected, territoryList]);
-  const relatedContacts = useMemo(() => {
-    if (!selected) return [];
-    return contactList.filter((contact) => contact.territoryId === selected.id || children.some((territory) => territory.id === contact.territoryId));
-  }, [children, contactList, selected]);
-  const ministryPoints = useMemo(() => selected ? nearbyMinistryPoints(selected) : [], [selected]);
-  const dueToday = contactList.filter((contact) => contact.nextFollowUpAt && isTodayOrOverdue(contact.nextFollowUpAt));
-  const overdue = contactList.filter((contact) => contact.nextFollowUpAt && new Date(contact.nextFollowUpAt) < startOfToday());
+  // While checked in, tell the server we are still here once a minute.
+  useEffect(() => {
+    if (!checkinId) return;
+    const beat = setInterval(async () => {
+      let here: LatLng | undefined;
+      try {
+        const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+        here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        setMyLocation(here);
+      } catch { /* keep last known */ }
+      heartbeatCheckin(checkinId, here).catch(() => undefined);
+    }, 60 * 1000);
+    return () => clearInterval(beat);
+  }, [checkinId]);
+
+  const children = useMemo(() => territoryList.filter((t) => t.parentId === selected?.id), [selected, territoryList]);
+  const drawn = useMemo(() => territoryList.filter((t) => t.boundary?.length), [territoryList]);
+  const relatedContacts = useMemo(() => selected ? contactList.filter((c) => c.territoryId === selected.id || children.some((t) => t.id === c.territoryId)) : [], [children, contactList, selected]);
+  const workersHere = useMemo(() => selected ? workers.filter((w) => w.territoryId === selected.id) : [], [workers, selected]);
 
   function focusTerritory(territory: Territory) {
     setSelected(territory);
-    mapRef.current?.animateToRegion({
-      latitude: territory.center.latitude,
-      longitude: territory.center.longitude,
-      latitudeDelta: levelDelta[territory.level],
-      longitudeDelta: levelDelta[territory.level]
-    }, 650);
+    setSheet('summary');
+    mapRef.current?.animateToRegion({ latitude: territory.center.latitude, longitude: territory.center.longitude, latitudeDelta: levelDelta[territory.level], longitudeDelta: levelDelta[territory.level] }, 650);
   }
 
   function runSearch() {
     const needle = query.trim().toLowerCase();
     if (!needle) return;
-    const found = territoryList.find((territory) =>
-      territory.name.toLowerCase().includes(needle) ||
-      territory.streetNames?.some((street) => street.toLowerCase().includes(needle))
-    );
+    const found = territoryList.find((t) => t.name.toLowerCase().includes(needle) || t.streetNames?.some((s) => s.toLowerCase().includes(needle)));
     if (found) focusTerritory(found);
-    else Alert.alert('No territory found', 'Try a country, city, neighborhood, street, or landmark name.');
+    else Alert.alert('No region found', 'Try a country, city, neighborhood, or street name.');
   }
 
-  async function locateMe() {
+  async function locateMe(): Promise<LatLng | null> {
     const { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') return Alert.alert('Location permission needed', 'Enable location to zoom to your exact place and find the nearest outreach territory.');
+    if (status !== 'granted') { Alert.alert('Location needed', 'Turn on location to see where you are on the map.'); return null; }
     const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
-    const exact = { latitude: position.coords.latitude, longitude: position.coords.longitude };
-    setMyLocation(exact);
-    const nearest = nearestTerritory(exact, territoryList);
-    if (nearest) setSelected(nearest);
-    mapRef.current?.animateToRegion({ ...exact, latitudeDelta: 0.008, longitudeDelta: 0.008 }, 850);
-    Alert.alert('Location found', nearest ? `Nearest territory: ${nearest.name}` : 'Add a record from this exact location.');
+    const here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+    setMyLocation(here);
+    mapRef.current?.animateToRegion({ ...here, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 800);
+    return here;
+  }
+
+  async function toggleCheckin() {
+    if (checkinId) {
+      await endCheckin(checkinId).catch(() => undefined);
+      setCheckinId(null);
+      setWorkers((current) => current.filter((w) => w.id !== checkinId));
+      return;
+    }
+    setBusy(true);
+    try {
+      const here = await locateMe();
+      const id = await startCheckin({ territoryId: selected?.id, location: here || undefined });
+      setCheckinId(id);
+      setWorkers(await getLiveWorkers());
+    } catch (err) {
+      Alert.alert('Could not check in', friendlyError(err, 'Your account may need outreach permission.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function autoOutline() {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const ring = await fetchOutlineFromOpenStreetMap(selected.name);
+      if (!ring) return Alert.alert('No outline found', `OpenStreetMap has no shape for "${selected.name}". Draw it by hand instead.`);
+      await setTerritoryBoundary(selected.id, ring);
+      await loadAll();
+      Alert.alert('Outline saved', `${selected.name} is now outlined on the map.`);
+    } catch (err) {
+      Alert.alert('Outline not saved', friendlyError(err, 'Only outreach leaders can outline a region.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveDrawing() {
+    if (!selected || !drawing || drawing.length < 3) return Alert.alert('Tap at least three corners');
+    setBusy(true);
+    try {
+      await setTerritoryBoundary(selected.id, drawing);
+      setDrawing(null);
+      await loadAll();
+      Alert.alert('Outline saved');
+    } catch (err) {
+      Alert.alert('Outline not saved', friendlyError(err, 'Only outreach leaders can outline a region.'));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function addRecord() {
     if (!selected) return;
-    if (!record.name.trim()) return Alert.alert('Name needed', 'Add a person or household name before saving.');
+    if (!record.name.trim()) return Alert.alert('Name needed', 'Add a person or household name first.');
     try {
+      const status = record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made';
       const saved = await saveOutreachContact({
-        territoryId: selected.id,
-        name: record.name,
-        phone: record.phone,
-        whatsapp: record.whatsapp,
-        email: record.email,
-        address: selected.streetNames?.[0] || selected.name,
-        location: myLocation || selected.center,
-        prayerRequest: record.prayerRequest,
-        gospelShared: record.gospelShared,
-        invitedToChurch: record.invitedToChurch,
-        bibleStudyStarted: record.bibleStudyStarted,
-        savedAcceptedChrist: record.savedAcceptedChrist,
-        followUpNeeded: record.followUpNeeded,
-        assignedTo: record.assignedTo,
-        nextFollowUpAt: record.nextFollowUpAt,
-        notes: record.notes,
-        status: record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made'
+        territoryId: selected.id, name: record.name, phone: record.phone, whatsapp: record.whatsapp,
+        address: selected.streetNames?.[0] || selected.name, location: myLocation || selected.center,
+        prayerRequest: record.prayerRequest, gospelShared: record.gospelShared, invitedToChurch: record.invitedToChurch,
+        bibleStudyStarted: record.bibleStudyStarted, savedAcceptedChrist: record.savedAcceptedChrist, followUpNeeded: record.followUpNeeded,
+        notes: record.notes, status,
       });
-      setContactList((current) => [
-        {
-          id: saved.id,
-          territoryId: selected.id,
-          name: record.name,
-          phone: record.phone,
-          whatsapp: record.whatsapp,
-          email: record.email,
-          address: selected.streetNames?.[0] || selected.name,
-          location: myLocation || selected.center,
-          prayerRequest: record.prayerRequest,
-          gospelShared: record.gospelShared,
-          invitedToChurch: record.invitedToChurch,
-          bibleStudyStarted: record.bibleStudyStarted,
-          savedAcceptedChrist: record.savedAcceptedChrist,
-          followUpNeeded: record.followUpNeeded,
-          assignedTo: record.assignedTo,
-          nextFollowUpAt: record.nextFollowUpAt,
-          notes: record.notes,
-          status: record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made',
-          createdBy: 'You',
-          statusHistory: [{ status: 'contact_made', at: new Date().toISOString(), by: 'You' }]
-        },
-        ...current
-      ]);
-      setRecord((current) => ({ ...current, name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', notes: '' }));
-      Alert.alert('Outreach record saved', 'The follow-up record is now attached to this territory.');
+      setContactList((current) => [{
+        id: saved.id, territoryId: selected.id, name: record.name, phone: record.phone, whatsapp: record.whatsapp,
+        address: selected.streetNames?.[0] || selected.name, location: myLocation || selected.center, prayerRequest: record.prayerRequest,
+        gospelShared: record.gospelShared, invitedToChurch: record.invitedToChurch, bibleStudyStarted: record.bibleStudyStarted,
+        savedAcceptedChrist: record.savedAcceptedChrist, followUpNeeded: record.followUpNeeded, notes: record.notes, status,
+        createdBy: 'You', statusHistory: [{ status: 'contact_made', at: new Date().toISOString(), by: 'You' }],
+      } as OutreachContact, ...current]);
+      setRecord((current) => ({ ...current, name: '', phone: '', whatsapp: '', prayerRequest: '', notes: '' }));
+      setSheet('summary');
+      Alert.alert('Saved', 'The record is attached to this region.');
     } catch (err) {
-      Alert.alert('Record not saved', friendlyError(err, 'Your account may need evangelism permission before saving outreach records.'));
+      Alert.alert('Not saved', friendlyError(err, 'Your account may need evangelism permission.'));
     }
   }
 
@@ -166,408 +219,313 @@ export default function MapsScreen() {
         reached: metricEdits.reached ? Number(metricEdits.reached) : undefined,
         soulsSaved: metricEdits.soulsSaved ? Number(metricEdits.soulsSaved) : undefined,
         prayerRequests: metricEdits.prayerRequests ? Number(metricEdits.prayerRequests) : undefined,
-        followUps: metricEdits.followUps ? Number(metricEdits.followUps) : undefined
+        followUps: metricEdits.followUps ? Number(metricEdits.followUps) : undefined,
       });
-      setSelected((current) => current ? {
-        ...current,
-        reached: metricEdits.reached ? Number(metricEdits.reached) : current.reached,
-        soulsSaved: metricEdits.soulsSaved ? Number(metricEdits.soulsSaved) : current.soulsSaved,
-        followUps: metricEdits.followUps ? Number(metricEdits.followUps) : current.followUps,
-        metrics: {
-          ...current.metrics,
-          peopleReached: metricEdits.reached ? Number(metricEdits.reached) : current.metrics.peopleReached,
-          soulsSaved: metricEdits.soulsSaved ? Number(metricEdits.soulsSaved) : current.metrics.soulsSaved,
-          prayerRequests: metricEdits.prayerRequests ? Number(metricEdits.prayerRequests) : current.metrics.prayerRequests,
-          followUpsDue: metricEdits.followUps ? Number(metricEdits.followUps) : current.metrics.followUpsDue
-        }
-      } : current);
       setMetricEdits({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
-      Alert.alert('Territory data updated', 'Super admin changes were saved to Supabase.');
+      await loadAll();
+      Alert.alert('Saved');
     } catch (err) {
-      Alert.alert('Metrics not updated', friendlyError(err, 'Only approved admins can update territory metrics.'));
+      Alert.alert('Not saved', friendlyError(err, 'Only approved admins can change region numbers.'));
     }
   }
 
   if (!access.canUseEvangelism) {
     return (
       <Screen>
-        <EvangelismBackButton onPress={goBack} />
-        <AppHeader title="Evangelism" subtitle="Leader access required." showMenu />
-        <Card>
-          <Text style={styles.title}>Leader Area</Text>
-          <Text style={styles.body}>Evangelism maps, follow-up records, and territory reports are visible to leaders and super admins only.</Text>
-        </Card>
+        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={goBack} style={styles.backInline}><Ionicons name="chevron-back" size={22} color={colors.royalBlue} /><Text style={styles.backText}>Back</Text></Pressable>
+        <View style={styles.gate}>
+          <Ionicons name="map-outline" size={40} color={colors.gold} />
+          <Text style={styles.gateTitle}>Leaders only</Text>
+          <Text style={styles.gateBody}>The evangelism map is for outreach leaders. Ask an admin to switch it on for you.</Text>
+        </View>
       </Screen>
     );
   }
 
   if (!selected) {
-    return <Screen><EvangelismBackButton onPress={goBack} /><AppHeader title="Evangelism Map" /><Card><Text style={styles.body}>Loading territories...</Text></Card></Screen>;
+    return <Screen><View style={styles.gate}><ActivityIndicator color={colors.gold} /><Text style={styles.gateBody}>Loading regions...</Text></View></Screen>;
   }
 
+  const accent = statusColor[selected.status];
   return (
-    <Screen scroll={false}>
-      <View style={styles.header}>
-        <EvangelismBackButton onPress={goBack} />
-        <View style={styles.headerCard}>
-          <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." showMenu />
-          <View style={styles.headerStats}>
-            <HeaderStat label="Contacts" value={contactList.length} />
-            <HeaderStat label="Due Today" value={dueToday.length} tone={colors.purple} />
-            <HeaderStat label="Territories" value={territoryList.length} tone={colors.gold} />
-          </View>
-        </View>
-      </View>
+    <View style={styles.root}>
       <MapView
         ref={mapRef}
-        style={styles.map}
-        initialRegion={{
-          latitude: selected.center.latitude,
-          longitude: selected.center.longitude,
-          latitudeDelta: levelDelta[selected.level],
-          longitudeDelta: levelDelta[selected.level]
-        }}
+        style={StyleSheet.absoluteFill}
+        mapType="standard"
+        showsUserLocation
+        initialRegion={{ latitude: selected.center.latitude, longitude: selected.center.longitude, latitudeDelta: levelDelta[selected.level], longitudeDelta: levelDelta[selected.level] }}
+        onPress={(event) => { if (drawing) setDrawing([...drawing, event.nativeEvent.coordinate]); }}
       >
-        {[selected, ...children].map((territory) => (
-          <React.Fragment key={territory.id}>
-            <Marker
-              coordinate={territory.center}
-              title={territory.name}
-              description={`${territory.level} • ${territory.status.replace('_', ' ')}`}
-              onPress={() => focusTerritory(territory)}
-            >
-              <View style={[styles.customMarker, { borderColor: statusColor[territory.status] }]}>
-                <View style={[styles.markerCore, { backgroundColor: statusColor[territory.status] }]} />
-                <Text numberOfLines={1} style={styles.customMarkerText}>{territory.name}</Text>
-              </View>
-            </Marker>
-            {territory.level === 'neighborhood' || territory.level === 'street' ? (
-              <Circle
-                center={territory.center}
-                radius={territory.level === 'street' ? 180 : 650}
-                strokeColor={statusColor[territory.status]}
-                fillColor={territory.status === 'untapped' ? 'rgba(180,35,24,0.08)' : territory.status === 'covered' ? 'rgba(31,157,85,0.12)' : 'rgba(217,154,16,0.13)'}
-                lineDashPattern={territory.status === 'untapped' ? [8, 6] : undefined}
-              />
-            ) : null}
-          </React.Fragment>
-        ))}
-        {relatedContacts.map((contact) => contact.location ? (
-          <Marker
-            key={contact.id}
-            coordinate={contact.location}
-            pinColor={contact.followUpNeeded ? colors.purple : colors.brightBlue}
-            title={contact.name}
-            description={contact.followUpNeeded ? 'Follow-up due' : 'Outreach record'}
+        {drawn.map((t) => t.boundary!.map((ring, index) => (
+          <Polygon
+            key={`${t.id}-${index}`}
+            coordinates={ring}
+            strokeColor={statusColor[t.status]}
+            strokeWidth={t.id === selected.id ? 3 : 2}
+            fillColor={withAlpha(statusColor[t.status], t.id === selected.id ? 0.28 : 0.16)}
+            tappable
+            onPress={() => focusTerritory(t)}
           />
-        ) : null)}
-        {ministryPoints.map((point) => (
-          <Marker
-            key={point.id}
-            coordinate={point.coordinate}
-            title={point.name}
-            description={point.type}
-          >
-            <View style={[styles.churchMarker, { borderColor: point.color }]}>
-              <View style={[styles.churchMarkerCore, { backgroundColor: point.color }]}>
-                <Ionicons name={point.icon} size={13} color={colors.white} />
-              </View>
+        )))}
+        {[selected, ...children].filter((t) => !t.boundary?.length && t.level !== 'global').map((t) => (
+          <Marker key={t.id} coordinate={t.center} onPress={() => focusTerritory(t)}>
+            <View style={[styles.pin, { borderColor: statusColor[t.status] }]}>
+              <View style={[styles.pinDot, { backgroundColor: statusColor[t.status] }]} />
+              <Text numberOfLines={1} style={styles.pinText}>{t.name}</Text>
             </View>
           </Marker>
         ))}
-        {myLocation ? (
+        {relatedContacts.map((c) => c.location ? (
+          <Marker key={c.id} coordinate={c.location} title={c.name} description={c.followUpNeeded ? 'Follow-up due' : 'Reached'}>
+            <View style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.brightBlue }]} />
+          </Marker>
+        ) : null)}
+        {workers.map((w) => w.location ? (
+          <Marker key={w.id} coordinate={w.location} title={w.displayName} description="On the field now">
+            <View style={styles.worker}>
+              <View style={styles.workerPulse} />
+              <Ionicons name="walk" size={14} color={colors.white} />
+            </View>
+          </Marker>
+        ) : null)}
+        {drawing?.length ? (
           <>
-            <Marker coordinate={myLocation} pinColor={colors.brightBlue} title="My exact location" />
-            <Circle center={myLocation} radius={pulseRadius} strokeColor={colors.brightBlue} fillColor="rgba(18,58,143,0.14)" />
+            <Polyline coordinates={drawing} strokeColor={colors.gold} strokeWidth={3} lineDashPattern={[6, 4]} />
+            {drawing.map((p, i) => <Marker key={i} coordinate={p} anchor={{ x: 0.5, y: 0.5 }}><View style={styles.corner} /></Marker>)}
           </>
         ) : null}
       </MapView>
-      <StatusLegend />
 
-      <ScrollView style={styles.panel}>
-        <View style={styles.searchRow}>
-          <TextInput value={query} onChangeText={setQuery} placeholder="Search address, city, neighborhood, street, landmark" placeholderTextColor={colors.slate} style={styles.searchInput} onSubmitEditing={runSearch} />
-          <PrimaryButton label="Search" onPress={runSearch} variant="outline" />
+      {/* Top bar */}
+      <View style={[styles.topBar, { top: insets.top + 8 }]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={goBack} style={styles.roundButton}><Ionicons name="chevron-back" size={22} color={colors.royalBlue} /></Pressable>
+        <View style={styles.search}>
+          <Ionicons name="search" size={16} color={colors.slate} />
+          <TextInput value={query} onChangeText={setQuery} onSubmitEditing={runSearch} placeholder="Find a region or street" placeholderTextColor={colors.slate} style={styles.searchInput} returnKeyType="search" />
         </View>
-        <View style={styles.panelHeader}>
-          <View>
-            <Text style={styles.kicker}>{selected.level.toUpperCase()}</Text>
-            <Text style={styles.title}>{selected.name}</Text>
-            <Text style={styles.statusLine}>{selected.status.replace('_', ' ')} • {selected.metrics.coveredStreets.toLocaleString()} covered • {selected.metrics.untappedTerritory.toLocaleString()} untapped</Text>
-          </View>
-          <PrimaryButton label="Locate Me" onPress={locateMe} variant="gold" />
-        </View>
+        <Pressable accessibilityRole="button" accessibilityLabel="My location" onPress={locateMe} style={styles.roundButton}><Ionicons name="locate" size={20} color={colors.royalBlue} /></Pressable>
+      </View>
 
-        <View style={styles.stats}>
-          <Stat label="Reached" value={selected.metrics.peopleReached} />
-          <Stat label="Saved" value={selected.metrics.soulsSaved} />
-          <Stat label="Prayer" value={selected.metrics.prayerRequests} />
-          <Stat label="Due" value={selected.metrics.followUpsDue} />
-        </View>
-        <View style={styles.stats}>
-          <Stat label="Studies" value={selected.metrics.bibleStudiesActive} />
-          <Stat label="Discipleship" value={selected.metrics.discipleshipProgress} suffix="%" />
-          <Stat label="Covered" value={selected.metrics.coveredStreets} />
-          <Stat label="Untapped" value={selected.metrics.untappedTerritory} />
-        </View>
-
-        <Text style={styles.section}>Nearby Churches & Follow-Up Points</Text>
-        <View style={styles.ministryGrid}>
-          {ministryPoints.map((point) => (
-            <View key={point.id} style={[styles.ministryPoint, { borderColor: point.color }]}>
-              <View style={[styles.ministryIcon, { backgroundColor: point.color }]}>
-                <Ionicons name={point.icon} size={16} color={colors.white} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.ministryName}>{point.name}</Text>
-                <Text style={styles.ministryType}>{point.type} • {point.distance}</Text>
-              </View>
-            </View>
-          ))}
-        </View>
-
-        <Text style={styles.section}>{children.length ? 'Tap To Drill Down' : 'Street-Level Territory'}</Text>
-        <View style={styles.chips}>
-          {children.map((territory) => (
-            <Pressable key={territory.id} onPress={() => focusTerritory(territory)} style={[styles.chip, { borderColor: statusColor[territory.status] }]}>
-              <Text style={styles.chipText}>{territory.name}</Text>
-              <Text style={styles.chipSub}>{territory.level} • {territory.status.replace('_', ' ')}</Text>
-            </Pressable>
-          ))}
-        </View>
-        {selected.streetNames?.length ? (
-          <View style={styles.streetList}>
-            {selected.streetNames.map((street) => <Text key={street} style={styles.streetName}>{street}</Text>)}
-          </View>
-        ) : null}
-
-        <Text style={styles.section}>Leader Follow-Up Dashboard</Text>
-        <View style={styles.stats}>
-          <Stat label="All" value={contactList.length} />
-          <Stat label="Today" value={dueToday.length} />
-          <Stat label="Overdue" value={overdue.length} />
-          <Stat label="Completed" value={contactList.filter((contact) => !contact.followUpNeeded).length} />
-        </View>
-        <Text style={styles.body}>Territory progress, worker activity, discipleship pipeline, and exportable reports are modeled here and backed by Supabase tables.</Text>
-
-        {access.canOverrideLeaderData ? (
-          <>
-            <Text style={styles.section}>Super Admin Data Override</Text>
-            <Card style={styles.form}>
-              <Text style={styles.body}>Correct territory data entered by leaders for {selected.name}.</Text>
-              <TextInput style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((current) => ({ ...current, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={colors.slate} />
-              <TextInput style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((current) => ({ ...current, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={colors.slate} />
-              <TextInput style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((current) => ({ ...current, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={colors.slate} />
-              <TextInput style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((current) => ({ ...current, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={colors.slate} />
-              <PrimaryButton label="Save Super Admin Corrections" variant="gold" onPress={saveMetricOverrides} />
-            </Card>
-          </>
-        ) : null}
-
-        <Text style={styles.section}>Outreach Records</Text>
-        {relatedContacts.map((contact) => (
-          <Card key={contact.id} style={styles.contact}>
-            <View style={styles.contactHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.contactName}>{contact.name}</Text>
-                <Text style={styles.contactSub}>{contact.status.replace('_', ' ')} • {contact.nextFollowUpAt ? `Next follow-up ${contact.nextFollowUpAt}` : 'No follow-up scheduled'}</Text>
-              </View>
-              <View style={styles.followUpBadge}>
-                <Ionicons name={contact.followUpNeeded ? 'alert-circle' : 'checkmark-circle'} size={15} color={contact.followUpNeeded ? colors.purple : colors.green} />
-                <Text style={[styles.followUpBadgeText, { color: contact.followUpNeeded ? colors.purple : colors.green }]}>{contact.followUpNeeded ? 'Follow up' : 'Complete'}</Text>
-              </View>
-            </View>
-            <View style={styles.contactMethods}>
-              {contact.phone ? <Text style={styles.contactMethod}>Phone: {contact.phone}</Text> : null}
-              {contact.whatsapp ? <Text style={styles.contactMethod}>WhatsApp: {contact.whatsapp}</Text> : null}
-            </View>
-            <Text style={styles.body}>{contact.prayerRequest || 'No prayer request recorded.'}</Text>
-          </Card>
+      {/* Legend + live count */}
+      <View style={[styles.legend, { top: insets.top + 62 }]}>
+        {(['covered', 'in_progress', 'untapped', 'follow_up_due'] as Territory['status'][]).map((s) => (
+          <View key={s} style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: statusColor[s] }]} /><Text style={styles.legendText}>{statusLabel[s]}</Text></View>
         ))}
+        <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.brightBlue }]} /><Text style={styles.legendText}>{workers.length} live</Text></View>
+      </View>
 
-        <Text style={styles.section}>Add Outreach Record</Text>
-        <Card style={styles.form}>
-          <TextInput style={styles.input} value={record.name} onChangeText={(name) => setRecord((current) => ({ ...current, name }))} placeholder="Person or household name" placeholderTextColor={colors.slate} />
-          <TextInput style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((current) => ({ ...current, phone }))} placeholder="Phone" placeholderTextColor={colors.slate} />
-          <TextInput style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((current) => ({ ...current, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={colors.slate} />
-          <TextInput style={styles.input} value={record.email} onChangeText={(email) => setRecord((current) => ({ ...current, email }))} placeholder="Email optional" placeholderTextColor={colors.slate} />
-          <TextInput style={[styles.input, styles.textArea]} value={record.prayerRequest} onChangeText={(prayerRequest) => setRecord((current) => ({ ...current, prayerRequest }))} placeholder="Prayer request" placeholderTextColor={colors.slate} multiline />
-          <View style={styles.flagRow}>
-            <Flag label="Gospel" value={record.gospelShared} onPress={() => setRecord((current) => ({ ...current, gospelShared: !current.gospelShared }))} />
-            <Flag label="Invited" value={record.invitedToChurch} onPress={() => setRecord((current) => ({ ...current, invitedToChurch: !current.invitedToChurch }))} />
-            <Flag label="Bible Study" value={record.bibleStudyStarted} onPress={() => setRecord((current) => ({ ...current, bibleStudyStarted: !current.bibleStudyStarted }))} />
-            <Flag label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((current) => ({ ...current, savedAcceptedChrist: !current.savedAcceptedChrist }))} />
+      {/* Drawing toolbar */}
+      {drawing ? (
+        <View style={[styles.drawBar, { bottom: insets.bottom + 16 }]}>
+          <Text style={styles.drawText}>Tap the corners of {selected.name}. {drawing.length} so far.</Text>
+          <View style={styles.drawActions}>
+            <Pressable accessibilityRole="button" onPress={() => setDrawing(drawing.slice(0, -1))} style={styles.drawBtn}><Text style={styles.drawBtnText}>Undo</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={() => setDrawing(null)} style={styles.drawBtn}><Text style={styles.drawBtnText}>Cancel</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={saveDrawing} style={[styles.drawBtn, styles.drawBtnGold]}><Text style={[styles.drawBtnText, { color: '#071231' }]}>Save outline</Text></Pressable>
           </View>
-          <TextInput style={styles.input} value={record.assignedTo} onChangeText={(assignedTo) => setRecord((current) => ({ ...current, assignedTo }))} placeholder="Assigned leader" placeholderTextColor={colors.slate} />
-          <TextInput style={styles.input} value={record.nextFollowUpAt} onChangeText={(nextFollowUpAt) => setRecord((current) => ({ ...current, nextFollowUpAt }))} placeholder="Next follow-up date YYYY-MM-DD" placeholderTextColor={colors.slate} />
-          <TextInput style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((current) => ({ ...current, notes }))} placeholder="Notes" placeholderTextColor={colors.slate} multiline />
-          <PrimaryButton label="Save From Exact Location" variant="gold" onPress={addRecord} />
-        </Card>
-      </ScrollView>
-    </Screen>
-  );
-}
-
-function Stat({ label, value, suffix = '' }: { label: string; value: number; suffix?: string }) {
-  return <View style={styles.stat}><Text style={styles.statValue}>{value.toLocaleString()}{suffix}</Text><Text style={styles.statLabel}>{label}</Text></View>;
-}
-
-function HeaderStat({ label, value, tone = colors.brightBlue }: { label: string; value: number; tone?: string }) {
-  return (
-    <View style={styles.headerStat}>
-      <Text style={[styles.headerStatValue, { color: tone }]}>{value.toLocaleString()}</Text>
-      <Text style={styles.headerStatLabel}>{label}</Text>
-    </View>
-  );
-}
-
-function StatusLegend() {
-  const items: { label: string; color: string }[] = [
-    { label: 'Covered', color: colors.green },
-    { label: 'In Progress', color: colors.amber },
-    { label: 'Untapped', color: colors.red },
-    { label: 'Follow-Up', color: colors.purple },
-  ];
-
-  return (
-    <View style={styles.legend}>
-      {items.map((item) => (
-        <View key={item.label} style={styles.legendItem}>
-          <View style={[styles.legendDot, { backgroundColor: item.color }]} />
-          <Text style={styles.legendText}>{item.label}</Text>
         </View>
-      ))}
+      ) : (
+        /* Bottom sheet */
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]}>
+          <View style={styles.grabber} />
+          <View style={styles.sheetHeader}>
+            <View style={[styles.statusChip, { backgroundColor: withAlpha(accent, 0.16) }]}><View style={[styles.legendDot, { backgroundColor: accent }]} /><Text style={[styles.statusChipText, { color: accent }]}>{statusLabel[selected.status]}</Text></View>
+            <Text style={styles.levelText}>{selected.level}</Text>
+          </View>
+          <Text style={styles.sheetTitle}>{selected.name}</Text>
+          {workersHere.length ? <Text style={styles.liveLine}>{workersHere.map((w) => w.displayName).join(', ')} on the field now</Text> : null}
+
+          <View style={styles.tabs}>
+            {([['summary', 'Region'], ['people', 'Records'], ['record', 'Add record'], ...(access.canOverrideLeaderData ? [['admin', 'Fix numbers']] : [])] as [typeof sheet, string][]).map(([key, label]) => (
+              <Pressable key={key} accessibilityRole="button" accessibilityState={{ selected: sheet === key }} onPress={() => setSheet(key)} style={[styles.tab, sheet === key && styles.tabOn]}>
+                <Text style={[styles.tabText, sheet === key && styles.tabTextOn]}>{label}</Text>
+              </Pressable>
+            ))}
+          </View>
+
+          <ScrollView style={styles.sheetBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+            {sheet === 'summary' ? (
+              <>
+                <View style={styles.stats}>
+                  <Stat label="Reached" value={selected.metrics.peopleReached} />
+                  <Stat label="Saved" value={selected.metrics.soulsSaved} tone={colors.green} />
+                  <Stat label="Prayer" value={selected.metrics.prayerRequests} tone={colors.purple} />
+                  <Stat label="Due" value={selected.metrics.followUpsDue} tone={colors.amber} />
+                </View>
+                <View style={styles.actionRow}>
+                  <Pressable accessibilityRole="button" disabled={busy} onPress={toggleCheckin} style={[styles.bigButton, checkinId ? styles.bigButtonLive : null]}>
+                    <Ionicons name={checkinId ? 'radio' : 'walk'} size={18} color={checkinId ? colors.white : '#071231'} />
+                    <Text style={[styles.bigButtonText, checkinId && { color: colors.white }]}>{checkinId ? "I'm done" : "I'm out here"}</Text>
+                  </Pressable>
+                  {!selected.boundary?.length ? (
+                    <Pressable accessibilityRole="button" disabled={busy} onPress={() => Alert.alert('Outline this region', 'Pull the shape from OpenStreetMap, or tap the corners yourself.', [
+                      { text: 'From map data', onPress: autoOutline },
+                      { text: 'Draw by hand', onPress: () => setDrawing([]) },
+                      { text: 'Cancel', style: 'cancel' },
+                    ])} style={styles.outlineButton}>
+                      {busy ? <ActivityIndicator color={colors.royalBlue} /> : <Ionicons name="shapes-outline" size={18} color={colors.royalBlue} />}
+                      <Text style={styles.outlineButtonText}>Outline</Text>
+                    </Pressable>
+                  ) : (
+                    <Pressable accessibilityRole="button" onPress={() => setDrawing([])} style={styles.outlineButton}>
+                      <Ionicons name="create-outline" size={18} color={colors.royalBlue} />
+                      <Text style={styles.outlineButtonText}>Redraw</Text>
+                    </Pressable>
+                  )}
+                </View>
+                {children.length ? (
+                  <>
+                    <Text style={styles.section}>Inside {selected.name}</Text>
+                    <View style={styles.chips}>
+                      {children.map((t) => (
+                        <Pressable key={t.id} accessibilityRole="button" onPress={() => focusTerritory(t)} style={[styles.chip, { borderColor: statusColor[t.status] }]}>
+                          <View style={[styles.legendDot, { backgroundColor: statusColor[t.status] }]} />
+                          <Text style={styles.chipText}>{t.name}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                ) : null}
+                {selected.parentId ? (
+                  <Pressable accessibilityRole="button" onPress={() => { const parent = territoryList.find((t) => t.id === selected.parentId); if (parent) focusTerritory(parent); }} style={styles.upLink}>
+                    <Ionicons name="arrow-up-circle-outline" size={16} color={colors.royalBlue} />
+                    <Text style={styles.upLinkText}>Zoom out to {territoryList.find((t) => t.id === selected.parentId)?.name || 'parent'}</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            ) : null}
+
+            {sheet === 'people' ? (
+              relatedContacts.length ? relatedContacts.map((c) => (
+                <View key={c.id} style={styles.contactRow}>
+                  <View style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.green, marginTop: 4 }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.contactName}>{c.name}</Text>
+                    <Text style={styles.contactSub}>{c.status.replace('_', ' ')}{c.nextFollowUpAt ? ` • next ${c.nextFollowUpAt}` : ''}{c.phone ? ` • ${c.phone}` : ''}</Text>
+                    {c.prayerRequest ? <Text style={styles.contactPrayer}>{c.prayerRequest}</Text> : null}
+                  </View>
+                </View>
+              )) : <Text style={styles.empty}>No records here yet. Add the first one.</Text>
+            ) : null}
+
+            {sheet === 'record' ? (
+              <View style={styles.form}>
+                <TextInput style={styles.input} value={record.name} onChangeText={(name) => setRecord((c) => ({ ...c, name }))} placeholder="Person or household name" placeholderTextColor={colors.slate} />
+                <TextInput style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((c) => ({ ...c, phone }))} placeholder="Phone" placeholderTextColor={colors.slate} keyboardType="phone-pad" />
+                <TextInput style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((c) => ({ ...c, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={colors.slate} keyboardType="phone-pad" />
+                <TextInput style={[styles.input, styles.textArea]} value={record.prayerRequest} onChangeText={(prayerRequest) => setRecord((c) => ({ ...c, prayerRequest }))} placeholder="Prayer request" placeholderTextColor={colors.slate} multiline />
+                <View style={styles.flagRow}>
+                  <Flag label="Gospel shared" value={record.gospelShared} onPress={() => setRecord((c) => ({ ...c, gospelShared: !c.gospelShared }))} />
+                  <Flag label="Invited" value={record.invitedToChurch} onPress={() => setRecord((c) => ({ ...c, invitedToChurch: !c.invitedToChurch }))} />
+                  <Flag label="Bible study" value={record.bibleStudyStarted} onPress={() => setRecord((c) => ({ ...c, bibleStudyStarted: !c.bibleStudyStarted }))} />
+                  <Flag label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((c) => ({ ...c, savedAcceptedChrist: !c.savedAcceptedChrist }))} />
+                  <Flag label="Follow up" value={record.followUpNeeded} onPress={() => setRecord((c) => ({ ...c, followUpNeeded: !c.followUpNeeded }))} />
+                </View>
+                <TextInput style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((c) => ({ ...c, notes }))} placeholder="Notes" placeholderTextColor={colors.slate} multiline />
+                <PrimaryButton label={myLocation ? 'Save at my location' : 'Save to this region'} variant="gold" onPress={addRecord} />
+              </View>
+            ) : null}
+
+            {sheet === 'admin' ? (
+              <View style={styles.form}>
+                <Text style={styles.empty}>Fix the numbers for {selected.name}. Leave a box empty to keep it.</Text>
+                <TextInput style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((c) => ({ ...c, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={colors.slate} />
+                <TextInput style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((c) => ({ ...c, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={colors.slate} />
+                <TextInput style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((c) => ({ ...c, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={colors.slate} />
+                <TextInput style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((c) => ({ ...c, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={colors.slate} />
+                <PrimaryButton label="Save" variant="gold" onPress={saveMetricOverrides} />
+              </View>
+            ) : null}
+          </ScrollView>
+        </View>
+      )}
     </View>
   );
+}
+
+function Stat({ label, value, tone = colors.royalBlue }: { label: string; value: number; tone?: string }) {
+  return <View style={styles.stat}><Text style={[styles.statValue, { color: tone }]}>{value.toLocaleString()}</Text><Text style={styles.statLabel}>{label}</Text></View>;
 }
 
 function Flag({ label, value, onPress }: { label: string; value: boolean; onPress: () => void }) {
   return (
-    <Pressable onPress={onPress} style={[styles.flag, value && styles.flagActive]}>
-      <Text style={[styles.flagText, value && styles.flagTextActive]}>{label}</Text>
+    <Pressable accessibilityRole="button" accessibilityState={{ selected: value }} onPress={onPress} style={[styles.flag, value && styles.flagOn]}>
+      {value ? <Ionicons name="checkmark" size={14} color="#071231" /> : null}
+      <Text style={[styles.flagText, value && styles.flagTextOn]}>{label}</Text>
     </Pressable>
   );
-}
-
-function EvangelismBackButton({ onPress }: { onPress: () => void }) {
-  return (
-    <Pressable accessibilityRole="button" accessibilityLabel="Back to More" onPress={onPress} style={styles.backButton}>
-      <Ionicons name="chevron-back" size={22} color={colors.royalBlue} />
-      <Text style={styles.backText}>Back</Text>
-    </Pressable>
-  );
-}
-
-function nearestTerritory(point: { latitude: number; longitude: number }, items: Territory[]) {
-  return items
-    .filter((item) => item.level !== 'global')
-    .map((item) => ({ item, distance: Math.hypot(point.latitude - item.center.latitude, point.longitude - item.center.longitude) }))
-    .sort((a, b) => a.distance - b.distance)[0]?.item;
-}
-
-function nearbyMinistryPoints(territory: Territory) {
-  const base = territory.center;
-  return [
-    {
-      id: `${territory.id}-church-hub`,
-      name: 'Partner Church Hub',
-      type: 'Church Partner',
-      distance: '0.7 mi',
-      color: colors.gold,
-      icon: 'business' as keyof typeof Ionicons.glyphMap,
-      coordinate: { latitude: base.latitude + 0.012, longitude: base.longitude - 0.014 },
-    },
-    {
-      id: `${territory.id}-follow-up`,
-      name: 'Prayer Follow-Up Point',
-      type: 'Prayer Team',
-      distance: '1.1 mi',
-      color: colors.purple,
-      icon: 'heart' as keyof typeof Ionicons.glyphMap,
-      coordinate: { latitude: base.latitude - 0.011, longitude: base.longitude + 0.012 },
-    },
-    {
-      id: `${territory.id}-study-home`,
-      name: 'Bible Study Home',
-      type: 'Discipleship',
-      distance: '1.4 mi',
-      color: colors.green,
-      icon: 'book' as keyof typeof Ionicons.glyphMap,
-      coordinate: { latitude: base.latitude + 0.007, longitude: base.longitude + 0.016 },
-    },
-  ];
-}
-
-function startOfToday() {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date;
-}
-
-function isTodayOrOverdue(value: string) {
-  const date = new Date(value);
-  const tomorrow = startOfToday();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  return date < tomorrow;
 }
 
 const styles = StyleSheet.create({
-  backButton: { alignSelf: 'flex-start', minHeight: 42, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 13, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  backText: { color: colors.royalBlue, fontWeight: '900' },
-  header: { padding: 14, paddingBottom: 8, backgroundColor: colors.royalBlue },
-  headerCard: { borderRadius: 18, overflow: 'hidden', backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.55)' },
-  headerStats: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingBottom: 12 },
-  headerStat: { flex: 1, borderRadius: 12, backgroundColor: '#F8FAFC', paddingVertical: 8, alignItems: 'center', borderWidth: 1, borderColor: colors.softLine },
-  headerStatValue: { fontWeight: '900', fontSize: 15 },
-  headerStatLabel: { color: colors.slate, fontSize: 10, fontWeight: '800', marginTop: 2, textAlign: 'center' },
-  map: { flex: 1 },
-  customMarker: { maxWidth: 128, minHeight: 34, borderRadius: 999, borderWidth: 2, paddingHorizontal: 8, paddingVertical: 5, backgroundColor: 'rgba(255,255,255,0.96)', flexDirection: 'row', alignItems: 'center', gap: 6 },
-  markerCore: { width: 12, height: 12, borderRadius: 999 },
-  customMarkerText: { color: colors.royalBlue, fontSize: 12, fontWeight: '900', maxWidth: 92 },
-  churchMarker: { width: 34, height: 34, borderRadius: 17, borderWidth: 2, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 5, shadowOffset: { width: 0, height: 2 } },
-  churchMarkerCore: { width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
-  legend: { position: 'absolute', top: 176, left: 14, right: 14, minHeight: 38, borderRadius: 19, backgroundColor: 'rgba(255,255,255,0.94)', borderWidth: 1, borderColor: 'rgba(212,175,55,0.75)', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: 8 },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  legendDot: { width: 9, height: 9, borderRadius: 999 },
-  legendText: { color: colors.royalBlue, fontSize: 10, fontWeight: '900' },
-  panel: { maxHeight: '60%', backgroundColor: colors.white, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 16, borderTopColor: colors.gold, borderTopWidth: 1.5 },
-  searchRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  searchInput: { flex: 1, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 12, color: '#111827' },
-  panelHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  kicker: { color: colors.gold, fontWeight: '800', fontSize: 12 },
-  title: { color: colors.royalBlue, fontSize: 22, fontWeight: '800' },
-  statusLine: { color: colors.slate, fontSize: 12, fontWeight: '700', marginTop: 3, textTransform: 'capitalize' },
-  stats: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  stat: { flex: 1, backgroundColor: '#F8FAFC', borderRadius: 12, padding: 8, alignItems: 'center' },
-  statValue: { color: colors.royalBlue, fontWeight: '800' },
-  statLabel: { color: colors.slate, fontSize: 10 },
-  section: { color: colors.royalBlue, fontWeight: '800', marginBottom: 8, marginTop: 16 },
-  ministryGrid: { gap: 8 },
-  ministryPoint: { minHeight: 56, borderRadius: 14, borderWidth: 1.5, backgroundColor: '#F8FAFC', flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10 },
-  ministryIcon: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
-  ministryName: { color: colors.royalBlue, fontWeight: '900' },
-  ministryType: { color: colors.slate, fontWeight: '700', fontSize: 12, marginTop: 2 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
-  chip: { borderWidth: 1.5, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
-  chipText: { color: colors.royalBlue, fontWeight: '700' },
-  chipSub: { color: colors.slate, fontSize: 10 },
-  streetList: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  streetName: { backgroundColor: colors.cream, color: colors.royalBlue, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, fontWeight: '700' },
-  contact: { padding: 10, marginBottom: 8 },
-  contactHeader: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  contactName: { color: colors.royalBlue, fontWeight: '800' },
-  contactSub: { color: colors.slate, marginTop: 3, marginBottom: 6 },
-  followUpBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 999, backgroundColor: '#F8FAFC', paddingHorizontal: 8, paddingVertical: 5 },
-  followUpBadgeText: { fontSize: 10, fontWeight: '900' },
-  contactMethods: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 6 },
-  contactMethod: { color: colors.royalBlue, fontSize: 12, fontWeight: '800', backgroundColor: colors.cream, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5 },
-  body: { color: '#111827', lineHeight: 21 },
-  form: { gap: 10, marginBottom: 36 },
-  input: { borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, color: '#111827' },
-  textArea: { minHeight: 76, textAlignVertical: 'top' },
+  root: { flex: 1, backgroundColor: '#E8EEF7' },
+  topBar: { position: 'absolute', left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  roundButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  search: { flex: 1, height: 44, borderRadius: 22, backgroundColor: colors.white, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
+  searchInput: { flex: 1, color: colors.royalBlue, fontWeight: '700' },
+  legend: { position: 'absolute', left: 12, flexDirection: 'row', flexWrap: 'wrap', gap: 6, maxWidth: '80%' },
+  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.92)' },
+  legendDot: { width: 9, height: 9, borderRadius: 5 },
+  legendText: { color: colors.royalBlue, fontSize: 11, fontWeight: '800' },
+  pin: { maxWidth: 140, minHeight: 32, borderRadius: 999, borderWidth: 2, paddingHorizontal: 9, paddingVertical: 5, backgroundColor: 'rgba(255,255,255,0.96)', flexDirection: 'row', alignItems: 'center', gap: 6 },
+  pinDot: { width: 9, height: 9, borderRadius: 5 },
+  pinText: { color: colors.royalBlue, fontSize: 12, fontWeight: '900', maxWidth: 100 },
+  contactDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 2, borderColor: colors.white },
+  worker: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.brightBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white },
+  workerPulse: { position: 'absolute', width: 44, height: 44, borderRadius: 22, backgroundColor: withAlpha('#2563EB', 0.22) },
+  corner: { width: 14, height: 14, borderRadius: 7, backgroundColor: colors.gold, borderWidth: 2, borderColor: colors.white },
+  drawBar: { position: 'absolute', left: 12, right: 12, borderRadius: 18, backgroundColor: '#071B45', padding: 14, gap: 10 },
+  drawText: { color: colors.white, fontWeight: '800' },
+  drawActions: { flexDirection: 'row', gap: 8 },
+  drawBtn: { flex: 1, minHeight: 42, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
+  drawBtnGold: { backgroundColor: colors.gold, flex: 1.6 },
+  drawBtnText: { color: colors.white, fontWeight: '900' },
+  sheet: { position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '58%', borderTopLeftRadius: 24, borderTopRightRadius: 24, backgroundColor: colors.white, paddingHorizontal: 16, paddingTop: 8, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: -3 }, elevation: 8 },
+  grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.18)', marginBottom: 8 },
+  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  statusChipText: { fontWeight: '900', fontSize: 12 },
+  levelText: { color: colors.slate, fontWeight: '800', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.6 },
+  sheetTitle: { color: colors.royalBlue, fontSize: 22, fontWeight: '900', marginTop: 6 },
+  liveLine: { color: colors.brightBlue, fontWeight: '800', fontSize: 12, marginTop: 2 },
+  tabs: { flexDirection: 'row', gap: 6, marginTop: 10 },
+  tab: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.06)' },
+  tabOn: { backgroundColor: colors.royalBlue },
+  tabText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
+  tabTextOn: { color: colors.white },
+  sheetBody: { marginTop: 10 },
+  stats: { flexDirection: 'row', gap: 8 },
+  stat: { flex: 1, borderRadius: 14, backgroundColor: 'rgba(15,23,42,0.05)', paddingVertical: 10, alignItems: 'center' },
+  statValue: { fontSize: 18, fontWeight: '900' },
+  statLabel: { color: colors.slate, fontSize: 11, fontWeight: '800', marginTop: 2 },
+  actionRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
+  bigButton: { flex: 1.4, minHeight: 50, borderRadius: 14, backgroundColor: colors.gold, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  bigButtonLive: { backgroundColor: colors.brightBlue },
+  bigButtonText: { color: '#071231', fontWeight: '900', fontSize: 15 },
+  outlineButton: { flex: 1, minHeight: 50, borderRadius: 14, borderWidth: 1.5, borderColor: colors.royalBlue, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6 },
+  outlineButtonText: { color: colors.royalBlue, fontWeight: '900' },
+  section: { color: colors.slate, fontWeight: '800', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 14, marginBottom: 6 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1.5, backgroundColor: colors.white },
+  chipText: { color: colors.royalBlue, fontWeight: '800', fontSize: 13 },
+  upLink: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 8 },
+  upLinkText: { color: colors.royalBlue, fontWeight: '800', fontSize: 13 },
+  contactRow: { flexDirection: 'row', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(15,23,42,0.06)' },
+  contactName: { color: colors.royalBlue, fontWeight: '900' },
+  contactSub: { color: colors.slate, fontSize: 12, marginTop: 2 },
+  contactPrayer: { color: colors.textBody, marginTop: 4 },
+  empty: { color: colors.slate, paddingVertical: 8 },
+  form: { gap: 10, paddingBottom: 12 },
+  input: { minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 12, color: colors.royalBlue, backgroundColor: colors.white },
+  textArea: { minHeight: 76, paddingTop: 10, textAlignVertical: 'top' },
   flagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  flag: { borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 8 },
-  flagActive: { backgroundColor: colors.royalBlue, borderColor: colors.royalBlue },
-  flagText: { color: colors.royalBlue, fontWeight: '700', fontSize: 12 },
-  flagTextActive: { color: colors.white }
+  flag: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: colors.softLine },
+  flagOn: { backgroundColor: colors.gold, borderColor: colors.gold },
+  flagText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
+  flagTextOn: { color: '#071231' },
+  backInline: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 8 },
+  backText: { color: colors.royalBlue, fontWeight: '800' },
+  gate: { alignItems: 'center', gap: 10, padding: 32 },
+  gateTitle: { color: colors.royalBlue, fontSize: 20, fontWeight: '900' },
+  gateBody: { color: colors.slate, textAlign: 'center' },
 });
