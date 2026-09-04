@@ -91,8 +91,14 @@ const labelOf = (n) => (n.text + " " + n.desc).trim();
 
 /** On the visible screen, not merely in the scroll view. See the iOS lane for why. */
 let SCREEN = { width: 1080, height: 2400 };
-/** The whole control on screen, above the navigation bar. See the iOS lane. */
-const NAV_BAR_PX = 260;
+/**
+ * The whole control on screen, above the SYSTEM navigation bar. The earlier
+ * margin (260 px) also swallowed the app's own tab bar, so Home / Media /
+ * Give / Chat / Bible / More were never pressed on Android and were listed as
+ * "below the fold". The system bar on this emulator is ~130 px; the app's tab
+ * bar sits above it and is a control like any other.
+ */
+const NAV_BAR_PX = 130;
 const onScreen = (n) => {
   if (!n.box) return false;
   const [x1, y1, x2, y2] = n.box;
