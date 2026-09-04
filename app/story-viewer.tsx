@@ -7,6 +7,7 @@ import { Animated, Easing } from 'react-native';
 import { Image, Linking, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
 import { colors } from '../lib/theme';
 import { storyRemainingLabel } from '../lib/storyTime';
+import { ShareToChatSheet } from '../components/ShareToChat';
 
 // A picture story plays for this long, then the viewer closes on its own,
 // the way Snapchat and WhatsApp stories do. A video plays until it ends.
@@ -32,6 +33,8 @@ export default function StoryViewerScreen() {
   const remaining = useMemo(() => storyRemainingLabel({ publishedAt, expiresAt }), [publishedAt, expiresAt]);
   const isVideo = Boolean(mediaUrl && isVideoUrl(mediaUrl));
   const [paused, setPaused] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+  const title = Array.isArray(params.title) ? params.title[0] : params.title;
 
   // The bar across the top is the playback timer. It fills over 7 seconds for
   // a picture and is driven by the player for a video. Holding a finger on the
@@ -45,7 +48,7 @@ export default function StoryViewerScreen() {
     else router.replace('/(tabs)' as any);
   }
   useEffect(() => {
-    if (isVideo || paused) return;
+    if (isVideo || paused || shareOpen) return;
     const current = (playback as any).__getValue ? (playback as any).__getValue() : 0;
     const animation = Animated.timing(playback, {
       toValue: 1,
@@ -55,7 +58,7 @@ export default function StoryViewerScreen() {
     });
     animation.start(({ finished }) => { if (finished) close(); });
     return () => animation.stop();
-  }, [isVideo, paused]);
+  }, [isVideo, paused, shareOpen]);
   const progressWidth = playback.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   async function openAction() {
@@ -100,13 +103,25 @@ export default function StoryViewerScreen() {
         <Text style={styles.category}>{params.category || 'Story'}</Text>
         <Text style={styles.title}>{params.title || 'OGN Story'}</Text>
         <Text style={styles.body}>{params.body || 'This story update is live for 24 hours.'}</Text>
-        {actionUrl ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Open story link" onPress={openAction} style={styles.actionButton}>
-            <Text style={styles.actionText}>Open Link</Text>
-            <Ionicons name="arrow-forward" size={18} color="#071231" />
+        <View style={styles.actionRow}>
+          {actionUrl ? (
+            <Pressable accessibilityRole="button" accessibilityLabel="Open story link" onPress={openAction} style={styles.actionButton}>
+              <Text style={styles.actionText}>Open Link</Text>
+              <Ionicons name="arrow-forward" size={18} color="#071231" />
+            </Pressable>
+          ) : null}
+          <Pressable accessibilityRole="button" accessibilityLabel="Share story to a group" onPress={() => setShareOpen(true)} style={styles.shareButton}>
+            <Ionicons name="people-outline" size={18} color={colors.white} />
+            <Text style={styles.shareText}>To a group</Text>
           </Pressable>
-        ) : null}
+        </View>
       </LinearGradient>
+      <ShareToChatSheet
+        item={{ kind: 'story', title: title || 'OGN Story', url: mediaUrl, artwork: mediaUrl }}
+        visible={shareOpen}
+        dark
+        onClose={() => setShareOpen(false)}
+      />
     </LinearGradient>
   );
 }
@@ -138,6 +153,9 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#020817', paddingTop: 62 },
   progressTrack: { position: 'absolute', top: 52, left: 14, right: 14, height: 4, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.24)', overflow: 'hidden' },
   progressFill: { height: '100%', borderRadius: 999 },
+  actionRow: { flexDirection: 'row', gap: 10, alignItems: 'center', flexWrap: 'wrap' },
+  shareButton: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, minHeight: 44, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.16)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)' },
+  shareText: { color: colors.white, fontWeight: '800' },
   topBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14, paddingBottom: 10, zIndex: 2 },
   storyAvatar: { width: 40, height: 40, borderRadius: 20, borderWidth: 2, backgroundColor: colors.royalBlue, alignItems: 'center', justifyContent: 'center' },
   storyHeaderCopy: { flex: 1 },

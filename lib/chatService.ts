@@ -15,6 +15,16 @@ export type ChatAttachment = {
   size?: number;
 };
 
+// A card for something shared from the app into a chat.
+export type SharedRef = {
+  kind: 'sermon' | 'music' | 'video' | 'story' | 'article';
+  title: string;
+  speaker?: string;
+  url?: string;
+  artwork?: string;
+  noteType?: 'takeaway' | 'question' | 'note' | 'quote';
+};
+
 export type ChatMessage = {
   id: string;
   channelId: string;
@@ -25,6 +35,7 @@ export type ChatMessage = {
   createdAt: string;
   isFlagged?: boolean;
   attachment?: ChatAttachment;
+  shared?: SharedRef;
 };
 
 const ATTACHMENT_BUCKET = 'chat-attachments';
@@ -130,7 +141,7 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
 
   const { data, error } = await supabase
     .from('chat_messages')
-    .select('id, channel_id, user_id, body, created_at, is_flagged, attachment_path, attachment_type, attachment_name, attachment_size')
+    .select('id, channel_id, user_id, body, created_at, is_flagged, attachment_path, attachment_type, attachment_name, attachment_size, shared_ref')
     .eq('channel_id', channelId)
     .is('deleted_at', null)
     .order('created_at', { ascending: true })
@@ -151,10 +162,11 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     createdAt: row.created_at,
     isFlagged: row.is_flagged,
     attachment: rowAttachment(row, links),
+    shared: row.shared_ref || undefined,
   }));
 }
 
-export async function sendChatMessage(channelId: string, body: string, attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number }) {
+export async function sendChatMessage(channelId: string, body: string, attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number }, shared?: SharedRef) {
   if (!hasSupabase) return { id: `local-${Date.now()}`, isFlagged: false };
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) throw new Error('Sign in before posting to chat.');
@@ -170,6 +182,7 @@ export async function sendChatMessage(channelId: string, body: string, attachmen
       attachment_type: attachment?.kind ?? null,
       attachment_name: attachment?.name ?? null,
       attachment_size: attachment?.size ?? null,
+      shared_ref: shared ?? null,
     })
     .select('id, is_flagged')
     .single();
@@ -188,11 +201,8 @@ export async function forwardMediaToChat(input: {
     ? rooms.find((room) => room.id === input.targetChannelId)
     : rooms.find((room) => room.type === 'announcement') || rooms.find((room) => room.type === 'global') || rooms[0];
   if (!target) throw new Error('No chat channel is available for forwarding.');
-  const body = [
-    `Forwarded ${input.kind || 'media'}: ${input.title}`,
-    input.url ? input.url : undefined,
-  ].filter(Boolean).join('\n');
-  return sendChatMessage(target.id, body);
+  const kind = (input.kind === 'audio' ? 'music' : input.kind === 'embed' ? 'video' : input.kind) as SharedRef['kind'];
+  return sendChatMessage(target.id, '', undefined, { kind: kind || 'sermon', title: input.title, url: input.url });
 }
 
 export function subscribeToChat(channelId: string, onMessage: (message: ChatMessage) => void): RealtimeChannel | undefined {
@@ -212,6 +222,7 @@ export function subscribeToChat(channelId: string, onMessage: (message: ChatMess
           displayName: 'OGN Member',
           createdAt: row.created_at,
           isFlagged: row.is_flagged,
+          shared: row.shared_ref || undefined,
         };
         Promise.all([
           getProfilesByIds(row.user_id ? [row.user_id] : []),

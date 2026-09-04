@@ -26,6 +26,9 @@ import {
 } from '../../lib/chatService';
 import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../../components/ChatAttachments';
 import { useNowPlaying } from '../../lib/nowPlaying';
+import { SharedCard } from '../../components/ShareToChat';
+import { SharedRef } from '../../lib/chatService';
+import { playbackKind } from '../../lib/embed';
 import { friendlyError } from '../../lib/errorMessages';
 import { supabase } from '../../lib/supabase';
 import { colors, shadows } from '../../lib/theme';
@@ -264,6 +267,13 @@ export default function CommunityScreen() {
     }
   }
 
+  function openShared(shared: SharedRef) {
+    if (!shared.url) return;
+    if (shared.kind === 'story') return setPhotoUrl(shared.url);
+    if (shared.kind === 'article') return openExternalUrl(shared.url);
+    nowPlaying.play({ title: shared.title, speaker: shared.speaker, url: shared.url, artwork: shared.artwork, type: playbackKind(shared.url, shared.kind === 'music' ? 'audio' : 'video') });
+  }
+
   function openAttachment(attachment: ChatAttachment) {
     if (attachment.kind === 'image') return setPhotoUrl(attachment.url);
     if (attachment.kind === 'video' || attachment.kind === 'audio') {
@@ -410,6 +420,7 @@ export default function CommunityScreen() {
                       </View>
                     ) : null}
                   </View>
+                  {message.shared ? <SharedCard shared={message.shared} dark={dark} own={own} onOpen={openShared} /> : null}
                   {message.attachment ? <AttachmentBubble attachment={message.attachment} dark={dark} own={own} onOpen={openAttachment} /> : null}
                   {message.body ? <MessageBody message={message.body} dark={dark} onOpenUrl={openExternalUrl} /> : null}
                 </View>

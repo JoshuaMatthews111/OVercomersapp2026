@@ -7,12 +7,12 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { usePathname } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { Alert, Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
-import { forwardMediaToChat } from './chatService';
+import { SharedRef } from './chatService';
+import { ShareToChatSheet } from '../components/ShareToChat';
 import { embedUrl, PlaybackKind } from './embed';
-import { friendlyError } from './errorMessages';
 import { colors, shadows } from './theme';
 import { useThemePreference } from './themePreference';
 
@@ -141,6 +141,8 @@ function PlayerSheet({ ctx, visible, onMinimize, videoPlayer, isVideo, isEmbed }
   const dark = themePreference === 'dark';
   const item = ctx.item;
   const embed = item && isEmbed ? embedUrl(item.url) : null;
+  const [shareOpen, setShareOpen] = useState(false);
+  const shared: SharedRef | null = item ? { kind: item.type === 'audio' ? 'music' : item.type === 'video' || item.type === 'embed' ? 'video' : 'sermon', title: item.title, speaker: item.speaker, url: item.url, artwork: item.artwork } : null;
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onMinimize}>
       <Pressable style={styles.backdrop} onPress={onMinimize} accessibilityLabel="Minimize the player">
@@ -185,14 +187,9 @@ function PlayerSheet({ ctx, visible, onMinimize, videoPlayer, isVideo, isEmbed }
               <Ionicons name="share-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
               <Text style={[styles.actionText, dark && styles.actionTextDark]}>Share</Text>
             </Pressable>
-            <Pressable
-              onPress={() => item && forwardMediaToChat({ title: item.title, url: item.url, kind: item.type })
-                .then(() => Alert.alert('Forwarded', 'Sent to an OGN chat channel.'))
-                .catch((err) => Alert.alert('Forward failed', friendlyError(err, 'Please sign in and try again.')))}
-              style={[styles.action, dark && styles.actionDark]}
-            >
-              <Ionicons name="arrow-redo-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-              <Text style={[styles.actionText, dark && styles.actionTextDark]}>Forward</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Share to a group" onPress={() => setShareOpen(true)} style={[styles.action, dark && styles.actionDark]}>
+              <Ionicons name="people-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
+              <Text style={[styles.actionText, dark && styles.actionTextDark]}>To a group</Text>
             </Pressable>
             <Pressable onPress={ctx.stop} style={[styles.action, dark && styles.actionDark]}>
               <Ionicons name="stop-circle-outline" size={18} color={colors.red} />
@@ -201,6 +198,7 @@ function PlayerSheet({ ctx, visible, onMinimize, videoPlayer, isVideo, isEmbed }
           </View>
         </Pressable>
       </Pressable>
+      <ShareToChatSheet item={shared} visible={shareOpen} dark={dark} onClose={() => setShareOpen(false)} />
     </Modal>
   );
 }
