@@ -98,7 +98,16 @@ export default function ProfileScreen() {
   }
 
   async function signOut() {
-    await supabase.auth.signOut();
+    // Two phones, four cloud runs: the server accepted the logout within a
+    // second, and the app kept showing the signed-in Home for up to a minute
+    // before the sign-in screen appeared on its own. The global sign-out waits
+    // on the network before it clears the phone's copy of the session, and on
+    // a slow link that wait is the whole minute. So: ask the server to revoke
+    // with a short leash, then clear the phone's copy regardless, then leave.
+    // Whether the server call finished or not, the person is signed out here.
+    const revoke = supabase.auth.signOut({ scope: 'global' }).catch(() => undefined);
+    await Promise.race([revoke, new Promise((resolve) => setTimeout(resolve, 3000))]);
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
     router.replace('/');
   }
 
@@ -137,11 +146,9 @@ export default function ProfileScreen() {
       Alert.alert('Sign in required', 'Sign in before uploading a profile photo.');
       return;
     }
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Photo access needed', 'Allow photo access to choose a profile picture.');
-      return;
-    }
+    // The system photo picker needs no library permission on iOS 14+ or Android 13+.
+    // Asking for the whole library first raised the "full access to your Photo Library"
+    // sheet that store reviewers flag, for a single profile picture.
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       allowsEditing: true,

@@ -18,7 +18,8 @@
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": [
           "audio"
-        ]
+        ],
+        "CFBundleDisplayName": "Overcomers"
       }
     },
     "android": {

@@ -140,11 +140,9 @@ export default function WelcomeScreen() {
   }
 
   async function pickSignupAvatar() {
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert('Photo access needed', 'Allow photo access to choose a profile picture.');
-      return;
-    }
+    // The system photo picker needs no library permission on iOS 14+ or Android 13+.
+    // Asking for the whole library first raised the "full access to your Photo Library"
+    // sheet that store reviewers flag, for a single profile picture.
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       allowsEditing: true,

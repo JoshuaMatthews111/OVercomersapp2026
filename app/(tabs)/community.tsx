@@ -212,8 +212,8 @@ export default function CommunityScreen() {
 
   async function attachFile() {
     if (!selectedRoomId) return Alert.alert('Select a chat', 'Choose a chat before attaching media.');
-    const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permission.granted) return Alert.alert('Photo access needed', 'Allow photo access to attach photos or videos.');
+    // The system picker needs no library permission on iOS 14+ / Android 13+;
+    // asking first raised the "full access" sheet that store reviewers flag.
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images', 'videos'],
       allowsEditing: false,

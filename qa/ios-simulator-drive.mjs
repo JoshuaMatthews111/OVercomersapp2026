@@ -775,6 +775,23 @@ for (const route of ROUTES) {
       await sleep(2000);
       after = quietPrint(await tree(), noisy);
     }
+    // A press can change the screen BELOW the fold: the profile rows open a
+    // detail panel underneath the list, out of view, and the dump only holds
+    // what is visible. Three working rows were called dead for it. Look down
+    // once before judging.
+    if (before === after) {
+      await idbRun(["ui", "swipe", "200", "700", "200", "250", "--duration", "0.4"]).catch(() => undefined);
+      await sleep(1200);
+      const lower = quietPrint(await tree(), noisy);
+      await idbRun(["ui", "swipe", "200", "250", "200", "700", "--duration", "0.4"]).catch(() => undefined);
+      await sleep(1000);
+      if (lower !== before && lower !== after) {
+        note("below the fold", route + ' — "' + labelOf(control) + '" changed the screen below the fold; not dead');
+        report.liveControls++;
+        await restore();
+        continue;
+      }
+    }
     // A second opinion before a verdict: restore the screen and press once
     // more. A press lost to a scroll settling or a slow emulator is not a
     // dead control; "dead twice, on a restored screen" is a claim worth making.

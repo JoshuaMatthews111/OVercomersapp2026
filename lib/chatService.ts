@@ -43,7 +43,10 @@ function normalizeRoomType(type?: string): ChatRoom['type'] {
 export async function getChatRooms(): Promise<ChatRoom[]> {
   if (!hasSupabase) return chatRooms;
   const { data, error } = await supabase.from('chat_channels').select('*').order('created_at');
-  if (error || !data) return chatRooms;
+  // Never show invented rooms to a real member. The mock list (1,245 members
+  // in a "Global Prayer Room") is for a build with no Supabase at all; a failed
+  // query on the live backend must read as empty, not as a thriving community.
+  if (error || !data) return [];
   return data.map((row) => ({
     id: row.id,
     name: row.name,

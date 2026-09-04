@@ -751,11 +751,7 @@ async function pickImageUpload(input: {
   relatedTable: string;
   onSelected?: (fileName: string) => void;
 }) {
-  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
-  if (!permission.granted) {
-    Alert.alert('Photo access needed', 'Allow photo access to upload images.');
-    return null;
-  }
+  // The system picker needs no library permission on iOS 14+ / Android 13+.
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: input.purpose === 'story' ? ['images', 'videos'] : ['images'],
     allowsEditing: input.purpose !== 'story',
