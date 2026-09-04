@@ -296,9 +296,19 @@ async function signIn(tag) {
    * very fields the next step went looking for — so the run blamed the app
    * for a fault that was entirely in the order it pressed things.
    */
-  const door = await tapLabelled(/get started/i);
+  // Scroll to the top first: the in-tab sign-in card can sit half off screen
+  // after a scroll, and its boxes then do not appear in the dump at all.
+  await sh(["input", "swipe", "540", "600", "540", "1900", "500"]).catch(() => undefined);
+  await sleep(800);
+  let door = { ok: false, why: "not pressed" };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    door = await tapLabelled(/get started/i);
+    await sleep(2500);
+    const opened = (await tree()).some((n) => /EditText/.test(n.cls));
+    if (opened || !door.ok) break;
+    note(tag + " door", 'pressed "' + door.tapped + '" but no form appeared — pressing again');
+  }
   note(tag + " door", door.ok ? 'pressed "' + door.tapped + '"' : door.why);
-  await sleep(2500);
   const leftover = await tapLabelled(/^(ok|dismiss|close)$/i);
   if (leftover.ok) {
     note(tag + " alert", 'dismissed "' + leftover.tapped + '" before reading the form');
@@ -741,19 +751,26 @@ if (report.signedIn) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
     note("sign-out", "not found on the profile screen");
   } else {
+    for (let i = 0; i < 4; i++) {
+      await sleep(900);
+      const a = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && n.box && onScreen(n));
+      await sleep(600);
+      const b = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && n.box && onScreen(n));
+      if (a && b && a.box[1] === b.box[1]) { signOut.box = b.box; break; }
+    }
     await shot("19-before-sign-out");
-    const settled = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && n.clickable && onScreen(n));
-    if (settled) signOut.box = settled.box;
     note("sign-out", 'pressing "' + labelOf(signOut) + '" deliberately — the stored account can restore the session');
     await tapBox(signOut.box);
     await sleep(4000);
     // Some apps confirm first. Confirming a sign-out is still recoverable.
     const confirm = await tapLabelled(/^(sign ?out|log ?out|yes|confirm)$/i);
-    if (confirm.ok) await sleep(4000);
+    if (confirm.ok) await sleep(2000);
+    let signedOutOk = false;
+    for (let waited = 0; waited < 20000; waited += 2000) {
+      await sleep(2000);
+      if (!(await looksSignedIn())) { signedOutOk = true; break; }
+    }
     await shot("20-after-sign-out");
-
-    const stillIn = await looksSignedIn();
-    const signedOutOk = !stillIn;
     note("sign-out result", signedOutOk ? "the session ended, as it should" : "STILL SIGNED IN after pressing sign out");
 
     // Put it back. Whether this works is the finding that matters most.

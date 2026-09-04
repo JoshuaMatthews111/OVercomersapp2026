@@ -420,9 +420,20 @@ async function signIn(tag) {
    * for were not reachable, and the run reported the sign-in as broken when
    * the only thing broken was the order it pressed things in.
    */
-  const door = await tapLabelled(/get started/i);
+  /**
+   * Press the door and make sure it opened. One run pressed "Get started"
+   * before the screen took input, saw no form, and gave up — the screenshot
+   * still shows the welcome screen with the button on it.
+   */
+  let door = { ok: false, why: "not pressed" };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    door = await tapLabelled(/get started/i);
+    await sleep(2500);
+    const opened = (await tree()).some(isTextField);
+    if (opened || !door.ok) break;
+    note(tag + " door", 'pressed "' + door.tapped + '" but no form appeared — pressing again');
+  }
   note(tag + " door", door.ok ? 'pressed "' + door.tapped + '"' : door.why);
-  await sleep(2500);
 
   // Clear anything modal left over before reading the form.
   const leftover = await tapLabelled(/^(ok|dismiss|close)$/i);
@@ -869,19 +880,30 @@ if (canTap && report.signedIn) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
     note("sign-out", "not found on the profile screen");
   } else {
+    // Let the scroll settle until two reads agree on where Sign Out is. A
+    // press on stale coordinates landed on the Theme row and turned Home light.
+    for (let i = 0; i < 4; i++) {
+      await sleep(900);
+      const a = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && isControl(n) && onScreen(n));
+      await sleep(600);
+      const b = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && isControl(n) && onScreen(n));
+      if (a && b && Math.round(a.frame.y) === Math.round(b.frame.y)) { signOut.frame = b.frame; break; }
+    }
     await shot("19-before-sign-out");
-    // Re-read after the swipes settled: on one run the coordinates were stale
-    // and the press landed on the Theme row, turning Home light.
-    const settled = (await tree()).find((n) => labelOf(n) === labelOf(signOut) && isControl(n) && onScreen(n));
-    if (settled) signOut.frame = settled.frame;
     note("sign-out", 'pressing "' + labelOf(signOut) + '" deliberately — the stored account can restore the session');
     await tapFrame(signOut.frame);
     await sleep(4000);
     const confirm = await tapLabelled(/^(sign ?out|log ?out|yes|confirm)$/i);
-    if (confirm.ok) await sleep(4000);
+    if (confirm.ok) await sleep(2000);
+    // Signing out is slow on a shared runner: Android showed Home four
+    // seconds after the press and the sign-in card a minute later. Wait for
+    // the signed-out state for up to twenty seconds before judging.
+    let signedOutOk = false;
+    for (let waited = 0; waited < 20000; waited += 2000) {
+      await sleep(2000);
+      if (!(await looksSignedIn())) { signedOutOk = true; break; }
+    }
     await shot("20-after-sign-out");
-
-    const signedOutOk = !(await looksSignedIn());
     note("sign-out result", signedOutOk ? "the session ended, as it should" : "STILL SIGNED IN after pressing sign out");
 
     const recovered = await signIn("recovery");
