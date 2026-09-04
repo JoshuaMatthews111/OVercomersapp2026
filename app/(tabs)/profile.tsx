@@ -254,6 +254,9 @@ export default function ProfileScreen() {
     { label: 'Community Standards', icon: 'shield-checkmark-outline', action: () => Linking.openURL('https://overcomersglobalnetwork.com/terms') },
     { label: 'Request Account Deletion', icon: 'trash-outline', action: requestAccountDeletion },
     { label: 'About Overcomers Global Network', icon: 'information-circle-outline', action: () => openSettingsDetail('about') },
+    // Both pages are live on the ministry site; the stores ask for them too.
+    { label: 'Privacy Policy', icon: 'shield-checkmark-outline', action: () => Linking.openURL('https://overcomersglobalnetwork.com/privacy') },
+    { label: 'Terms of Service', icon: 'document-text-outline', action: () => Linking.openURL('https://overcomersglobalnetwork.com/terms') },
   ];
 
   return (
