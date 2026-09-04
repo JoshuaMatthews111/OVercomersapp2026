@@ -675,12 +675,22 @@ async function crashReason() {
   const m = String(out).match(/Unhandled JS Exception: ([^\n'"]{0,240})/) || String(out).match(/reason: '([^']{0,240})/);
   return m ? m[1].trim() : "";
 }
+// `launchctl list` inside the simulator does not list apps on this runner:
+// the first version of this check read "not listed" as "dead" and called a
+// healthy launch a crash. simctl launch prints the pid, and a simulator app
+// is an ordinary host process, so the pid is what is checked.
+let appPid = 0;
 async function appProcessAlive() {
-  const out = await simctl(["spawn", UDID, "launchctl", "list"]).catch(() => "");
-  return String(out).includes("UIKitApplication:" + BUNDLE);
+  if (!appPid) return true; // unknown is not dead
+  const out = await run("ps", ["-p", String(appPid), "-o", "pid="]).catch(() => "");
+  return String(out).trim() === String(appPid);
 }
 await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
-await simctl(["launch", UDID, BUNDLE]);
+{
+  const launched = await simctl(["launch", UDID, BUNDLE]);
+  const m = String(launched).match(/:\s*(\d+)\s*$/m);
+  appPid = m ? Number(m[1]) : 0;
+}
 await sleep(10000);
 {
   const launchTree = await tree();
@@ -688,8 +698,11 @@ await sleep(10000);
   const onSpringboard = /\bFitness\b/.test(words) && /\bFiles\b/.test(words) && /\bSearch\b/.test(words);
   const alive = await appProcessAlive();
   report.screens.push({ route: "(launch)", shot: await shot("00-launch"), labels: fingerprint(launchTree).slice(0, 400) });
-  if (onSpringboard || !alive) {
-    const reason = await crashReason();
+  // A crash needs two signs, never one: the home screen showing, or the
+  // process gone together with a crash line in the device log.
+  const reasonEarly = (!alive || onSpringboard) ? await crashReason() : "";
+  if (onSpringboard || (!alive && reasonEarly)) {
+    const reason = reasonEarly || await crashReason();
     report.crashAtLaunch = { onSpringboard, processAlive: alive, reason };
     report.notAssessed.push("Everything — the app crashed at launch" + (reason ? ": " + reason : ""));
     note("launch", "CRASHED at launch" + (reason ? " — " + reason : " — the iPhone home screen is showing and the app process is gone"));
