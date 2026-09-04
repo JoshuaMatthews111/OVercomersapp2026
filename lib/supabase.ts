@@ -2,8 +2,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
 import { AppState, Platform } from 'react-native';
 
-const url = process.env.EXPO_PUBLIC_SUPABASE_URL || '';
-const anon = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || '';
+import { SUPABASE_ANON_KEY, SUPABASE_URL } from './publicEnv';
+
+// A blank address would crash the whole app at launch inside supabase-js.
+// Fall back to a harmless placeholder so the app opens and shows its
+// sign-in screen with a clear error instead of dying on the home screen.
+const url = SUPABASE_URL || 'https://not-configured.supabase.co';
+const anon = SUPABASE_ANON_KEY || 'not-configured';
 
 export const supabase = createClient(url, anon, {
   auth: {

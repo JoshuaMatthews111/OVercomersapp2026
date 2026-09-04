@@ -83,6 +83,17 @@ jobs:
         # Release so the JavaScript is bundled in. A debug build expects Metro
         # and would show a red error screen instead of the app. Expo's template
         # signs release with the debug key, which is all an emulator needs.
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_BIBLE_PROVIDER: ${{ secrets.EXPO_PUBLIC_BIBLE_PROVIDER }}
+          EXPO_PUBLIC_BIBLE_API_ENDPOINT: ${{ secrets.EXPO_PUBLIC_BIBLE_API_ENDPOINT }}
+          EXPO_PUBLIC_BIBLE_API_KEY: ${{ secrets.EXPO_PUBLIC_BIBLE_API_KEY }}
+          EXPO_PUBLIC_BIBLE_ID_KJV: ${{ secrets.EXPO_PUBLIC_BIBLE_ID_KJV }}
+          EXPO_PUBLIC_BIBLE_ID_NLT: ${{ secrets.EXPO_PUBLIC_BIBLE_ID_NLT }}
+          EXPO_PUBLIC_BIBLE_ID_AMP: ${{ secrets.EXPO_PUBLIC_BIBLE_ID_AMP }}
+          EXPO_PUBLIC_GIVING_URL: ${{ secrets.EXPO_PUBLIC_GIVING_URL }}
+          EXPO_PUBLIC_LIVE_STREAM_URL: ${{ secrets.EXPO_PUBLIC_LIVE_STREAM_URL }}
         run: |
           cd android
           chmod +x gradlew

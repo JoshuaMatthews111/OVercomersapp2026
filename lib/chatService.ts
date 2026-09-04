@@ -3,7 +3,7 @@ import { chatRooms } from '../data/mockData';
 import { ChatRoom } from '../types/models';
 import { supabase } from './supabase';
 
-const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+import { hasSupabase } from './publicEnv';
 
 export type ChatAttachmentKind = 'image' | 'video' | 'audio' | 'file';
 

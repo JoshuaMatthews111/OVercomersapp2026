@@ -1,3 +1,4 @@
+import { publicEnv } from '../../lib/publicEnv';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -27,8 +28,8 @@ const allVersions: BibleVersion[] = ['KJV', 'NLT', 'AMP'];
 type PickerMode = 'book' | 'chapter' | 'verse' | 'quick' | null;
 const configuredVersions: Record<BibleVersion, boolean> = {
   KJV: true,
-  NLT: Boolean(process.env.EXPO_PUBLIC_BIBLE_ID_NLT),
-  AMP: Boolean(process.env.EXPO_PUBLIC_BIBLE_ID_AMP),
+  NLT: Boolean(publicEnv('EXPO_PUBLIC_BIBLE_ID_NLT')),
+  AMP: Boolean(publicEnv('EXPO_PUBLIC_BIBLE_ID_AMP')),
 };
 
 const art = {

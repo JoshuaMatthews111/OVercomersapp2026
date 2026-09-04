@@ -660,10 +660,43 @@ async function checkPickerAndReturn() {
 
 
 // ── Launch fresh ───────────────────────────────────────────────────────────
+/**
+ * Two runs in a row said "the More tab shows neither the email nor a sign-in
+ * card" and photographed the iPhone home screen. The app had crashed at
+ * launch ("supabaseUrl is required") and the crawler kept typing into
+ * Springboard. A crash at launch is its own finding, and everything after it
+ * is not assessed — never "session gone".
+ */
+async function crashReason() {
+  const out = await simctl([
+    "spawn", UDID, "log", "show", "--last", "3m", "--style", "compact",
+    "--predicate", 'eventMessage CONTAINS "Terminating app due to uncaught exception" OR eventMessage CONTAINS "ErrorRecovery fatal exception"'
+  ]).catch(() => "");
+  const m = String(out).match(/Unhandled JS Exception: ([^\n'"]{0,240})/) || String(out).match(/reason: '([^']{0,240})/);
+  return m ? m[1].trim() : "";
+}
+async function appProcessAlive() {
+  const out = await simctl(["spawn", UDID, "launchctl", "list"]).catch(() => "");
+  return String(out).includes("UIKitApplication:" + BUNDLE);
+}
 await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
 await simctl(["launch", UDID, BUNDLE]);
 await sleep(10000);
-report.screens.push({ route: "(launch)", shot: await shot("00-launch"), labels: fingerprint(await tree()).slice(0, 400) });
+{
+  const launchTree = await tree();
+  const words = launchTree.map(labelOf).filter(Boolean).join(" | ");
+  const onSpringboard = /\bFitness\b/.test(words) && /\bFiles\b/.test(words) && /\bSearch\b/.test(words);
+  const alive = await appProcessAlive();
+  report.screens.push({ route: "(launch)", shot: await shot("00-launch"), labels: fingerprint(launchTree).slice(0, 400) });
+  if (onSpringboard || !alive) {
+    const reason = await crashReason();
+    report.crashAtLaunch = { onSpringboard, processAlive: alive, reason };
+    report.notAssessed.push("Everything — the app crashed at launch" + (reason ? ": " + reason : ""));
+    note("launch", "CRASHED at launch" + (reason ? " — " + reason : " — the iPhone home screen is showing and the app process is gone"));
+    finalize();
+    process.exit(0);
+  }
+}
 note("launch", "app opened");
 
 // ── Sign in ────────────────────────────────────────────────────────────────

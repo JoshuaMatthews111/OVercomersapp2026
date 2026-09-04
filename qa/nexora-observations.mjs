@@ -52,6 +52,22 @@ export function toNexora(drive, platform) {
     });
   }
 
+  // ── The app never came up ────────────────────────────────────────────────
+  if (drive.crashAtLaunch) {
+    const reason = drive.crashAtLaunch.reason ? ` (${drive.crashAtLaunch.reason})` : "";
+    observations.push({
+      ruleId: "device.crash-at-launch",
+      route: "(launch)",
+      title: `The app crashes at launch on ${where}${reason}`,
+      expected: "The app opens to its first screen and stays open.",
+      actual:
+        "The app process ended right after launch and the phone's home screen came back. " +
+        "Nothing else in this run could be checked." + reason,
+      reproSteps: repro(1, `Open the app on ${where}`, "the first screen", "the home screen, app gone"),
+      evidence: []
+    });
+  }
+
   // ── Screens that came up with nothing on them ────────────────────────────
   for (const route of drive.blankScreens ?? []) {
     observations.push({

@@ -582,6 +582,18 @@ for (let attempt = 0; attempt < 3; attempt++) {
   await sleep(4000);
 }
 report.screens.push({ route: "(launch)", shot: await shot("00-launch"), labels: fingerprint(await tree()).slice(0, 400) });
+// Same lesson as iPhone: if the app is not in front after three launches, it
+// crashed. Say so, and stop; do not type into the launcher.
+if ((await inFront()) !== BUNDLE) {
+  const log = await sh(["logcat", "-d", "-t", "400", "*:E"]).catch(() => "");
+  const m = String(log).match(/FATAL EXCEPTION[^\n]*\n[^\n]*?([A-Za-z.]*(?:Error|Exception)[^\n]{0,240})/) || String(log).match(/(supabaseUrl is required|Unable to load script|[^\n]{0,80}Exception[^\n]{0,160})/);
+  const reason = m ? m[1].trim() : "";
+  report.crashAtLaunch = { onSpringboard: true, processAlive: false, reason };
+  report.notAssessed.push("Everything — the app crashed at launch" + (reason ? ": " + reason : ""));
+  note("launch", "CRASHED at launch" + (reason ? " — " + reason : " — the launcher is in front and the app is not"));
+  finalize();
+  process.exit(0);
+}
 note("launch", "app opened");
 
 // ── Sign in ────────────────────────────────────────────────────────────────

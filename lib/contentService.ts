@@ -2,7 +2,8 @@ import { events, givingLinks, prayerRequests, series, sermons } from '../data/mo
 import { AppStory, Event, GivingLink, MediaItem, MediaKind, PrayerRequest, Series, Sermon } from '../types/models';
 import { supabase } from './supabase';
 
-export const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+import { hasSupabase } from './publicEnv';
+export { hasSupabase };
 
 export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: Sermon[] }> {
   if (!hasSupabase) return { series, sermons };

@@ -29,7 +29,7 @@ export type AccessProfile = {
   canOverrideLeaderData: boolean;
 };
 
-const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+import { hasSupabase } from './publicEnv';
 
 const memberAccess: AccessProfile = {
   rawRoles: ['member'],

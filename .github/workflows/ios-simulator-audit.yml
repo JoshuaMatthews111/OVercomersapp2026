@@ -68,6 +68,20 @@ jobs:
         # Release so the JavaScript is bundled into the app: a Debug build
         # expects Metro to be running and would show a red error screen.
         # No signing is needed or wanted for a simulator build.
+        # The public settings are passed straight into Xcode's bundle phase as
+        # well as via .env.local: a cloud build once shipped with them blank
+        # and the app crashed at launch with "supabaseUrl is required".
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: ${{ secrets.EXPO_PUBLIC_SUPABASE_URL }}
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.EXPO_PUBLIC_SUPABASE_ANON_KEY }}
+          EXPO_PUBLIC_BIBLE_PROVIDER: ${{ secrets.EXPO_PUBLIC_BIBLE_PROVIDER }}
+          EXPO_PUBLIC_BIBLE_API_ENDPOINT: ${{ secrets.EXPO_PUBLIC_BIBLE_API_ENDPOINT }}
+          EXPO_PUBLIC_BIBLE_API_KEY: ${{ secrets.EXPO_PUBLIC_BIBLE_API_KEY }}
+          EXPO_PUBLIC_BIBLE_ID_KJV: ${{ secrets.EXPO_PUBLIC_BIBLE_ID_KJV }}
+          EXPO_PUBLIC_BIBLE_ID_NLT: ${{ secrets.EXPO_PUBLIC_BIBLE_ID_NLT }}
+          EXPO_PUBLIC_BIBLE_ID_AMP: ${{ secrets.EXPO_PUBLIC_BIBLE_ID_AMP }}
+          EXPO_PUBLIC_GIVING_URL: ${{ secrets.EXPO_PUBLIC_GIVING_URL }}
+          EXPO_PUBLIC_LIVE_STREAM_URL: ${{ secrets.EXPO_PUBLIC_LIVE_STREAM_URL }}
         run: |
           SCHEME=$(ls ios | grep '\.xcworkspace$' | sed 's/\.xcworkspace//')
           echo "scheme: $SCHEME"

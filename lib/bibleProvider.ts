@@ -1,3 +1,4 @@
+import { publicEnv } from './publicEnv';
 import { BibleVersion } from '../types/models';
 
 export type BibleBook = {
@@ -119,9 +120,9 @@ const KJV_FALLBACKS: Record<string, string> = {
 };
 
 const bibleIds: Record<BibleVersion, string | undefined> = {
-  KJV: process.env.EXPO_PUBLIC_BIBLE_ID_KJV || 'de4e12af7f28f599-02',
-  NLT: process.env.EXPO_PUBLIC_BIBLE_ID_NLT,
-  AMP: process.env.EXPO_PUBLIC_BIBLE_ID_AMP
+  KJV: publicEnv('EXPO_PUBLIC_BIBLE_ID_KJV') || 'de4e12af7f28f599-02',
+  NLT: publicEnv('EXPO_PUBLIC_BIBLE_ID_NLT'),
+  AMP: publicEnv('EXPO_PUBLIC_BIBLE_ID_AMP')
 };
 
 export function getBibleBook(bookId: string) {
@@ -150,8 +151,8 @@ export function getBiblePassageId(selection: BibleSelection, mode: BibleReadMode
 
 export async function getBibleVerseNumbers(version: BibleVersion, selection: BibleSelection): Promise<number[]> {
   const normalized = normalizeBibleSelection(selection);
-  const apiKey = process.env.EXPO_PUBLIC_BIBLE_API_KEY;
-  const configuredEndpoint = process.env.EXPO_PUBLIC_BIBLE_API_ENDPOINT || 'https://rest.api.bible';
+  const apiKey = publicEnv('EXPO_PUBLIC_BIBLE_API_KEY');
+  const configuredEndpoint = publicEnv('EXPO_PUBLIC_BIBLE_API_ENDPOINT') || 'https://rest.api.bible';
   const baseEndpoint = configuredEndpoint.replace(/\/+$/, '').replace(/\/v1$/, '');
   const bibleId = bibleIds[version];
 
@@ -183,8 +184,8 @@ export async function getBiblePassage(
   const passageId = typeof input === 'string' ? input : getBiblePassageId(selection, mode);
   const fallbackText = mode === 'verse' ? KJV_FALLBACKS[passageId] : undefined;
   const reference = getBibleReference(selection, mode);
-  const apiKey = process.env.EXPO_PUBLIC_BIBLE_API_KEY;
-  const configuredEndpoint = process.env.EXPO_PUBLIC_BIBLE_API_ENDPOINT || 'https://rest.api.bible';
+  const apiKey = publicEnv('EXPO_PUBLIC_BIBLE_API_KEY');
+  const configuredEndpoint = publicEnv('EXPO_PUBLIC_BIBLE_API_ENDPOINT') || 'https://rest.api.bible';
   const baseEndpoint = configuredEndpoint.replace(/\/+$/, '').replace(/\/v1$/, '');
   const bibleId = bibleIds[version];
 

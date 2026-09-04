@@ -3,7 +3,7 @@ import { DocumentPickerAsset } from 'expo-document-picker';
 import { supabase } from './supabase';
 import { UploadPurpose, recordUploadedFile } from './uploadAnalysis';
 
-const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+import { hasSupabase } from './publicEnv';
 
 export type AppUpload = {
   publicUrl: string;

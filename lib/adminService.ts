@@ -1,7 +1,7 @@
 import { prayerRequests, territories } from '../data/mockData';
 import { supabase } from './supabase';
 
-const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+import { hasSupabase } from './publicEnv';
 
 export type AdminDashboard = {
   stories: number;

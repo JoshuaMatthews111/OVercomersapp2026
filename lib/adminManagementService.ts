@@ -1,7 +1,7 @@
 import { AppRole, MediaKind } from '../types/models';
 import { supabase } from './supabase';
 
-const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
+import { hasSupabase } from './publicEnv';
 
 export type ManagedRole = { userId: string; role: AppRole; displayName?: string; phone?: string };
 export type ManagedPrayer = { id: string; name?: string; category?: string; request: string; status: string; assignedTo?: string; createdAt?: string };
