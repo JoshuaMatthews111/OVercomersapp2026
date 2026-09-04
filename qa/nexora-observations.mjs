@@ -187,6 +187,23 @@ export function toNexora(drive, platform) {
     }
   }
 
+  // ── Does the session survive leaving for another app? ────────────────────
+  if (drive.leaveAndReturn?.attempted && drive.leaveAndReturn.stillSignedIn === false) {
+    observations.push({
+      ruleId: "device.session-lost-on-return",
+      route: "/profile",
+      title: `Leaving for the browser and coming back signs you out on ${where}`,
+      expected: "A signed-in person who taps a link and returns is still signed in.",
+      actual: `After opening a web page and returning to the app, ${drive.leaveAndReturn.why}. Quitting and relaunching the app kept the session, so this is specific to the app going to the background behind another app.`,
+      reproSteps: [
+        { step: 1, action: `Sign in on ${where}`, expected: "the email on the More tab", observed: "signed in" },
+        { step: 2, action: "Open a web link, wait a few seconds, return to the app", expected: "still signed in", observed: drive.leaveAndReturn.why }
+      ],
+      evidence: [],
+      data: { screenshots: [`${drive.shotDir ?? ""}/04-after-leave-and-return.png`] }
+    });
+  }
+
   // ── The active choice that assistive technology cannot tell is active ─────
   for (const a of drive.activeNotSelected ?? []) {
     observations.push({

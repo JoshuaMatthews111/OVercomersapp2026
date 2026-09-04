@@ -77,6 +77,8 @@ const report = {
   activeNotSelected: [],
   /** Whether the session survived quitting and relaunching the app. */
   coldStart: null,
+  /** Whether the session survived leaving for another app and coming back. */
+  leaveAndReturn: null,
   sessionFlow: null,
   /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
   idbRawSample: null
@@ -582,6 +584,29 @@ async function checkColdStart() {
   }
 }
 
+/**
+ * Does the session survive LEAVING the app and coming back?
+ *
+ * A quit-and-relaunch kept the session on both phones. What lost it, three
+ * Android runs in a row, was a detour: Watch Live opening the browser, or
+ * Upload photo opening the picker, and the app being brought back. That is
+ * the second most common thing a person does — tap a link, come back — so it
+ * is tested on purpose right after the cold start: open a web page, wait,
+ * return, look for the email on the More tab again.
+ */
+async function checkLeaveAndReturn() {
+  await simctl(["openurl", UDID, "https://overcomersglobalnetwork.com"]).catch(() => undefined);
+  await sleep(6000);
+  await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
+  await sleep(5000);
+  const proof = await proveSignedIn();
+  report.leaveAndReturn = { attempted: true, stillSignedIn: proof.ok, why: proof.why };
+  await shot("04-after-leave-and-return");
+  note("leave and return", proof.ok ? "the session survived leaving for the browser and coming back" : "SESSION LOST after leaving for the browser and coming back — " + proof.why);
+  if (!proof.ok) await signIn("re-entry");
+}
+
+
 
 // ── Launch fresh ───────────────────────────────────────────────────────────
 await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
@@ -598,6 +623,7 @@ if (canTap && PERMISSIONS.hasTestIdentity) {
   report.signedInProof = signedInProof.why;
   note("sign-in", (report.signedIn ? "confirmed: " : "NOT confirmed: ") + signedInProof.why);
   if (report.signedIn) await checkColdStart();
+  if (report.signedIn) await checkLeaveAndReturn();
 } else if (!PERMISSIONS.hasTestIdentity) {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
