@@ -531,10 +531,42 @@ if (canTap && PERMISSIONS.hasTestIdentity) {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
 
+
 /**
- * Does this screen move on its own? Measured with no press at all, so a
- * ticking clock is never mistaken for a button having worked.
+ * Subtract what moves on its own, instead of refusing to judge the screen.
+ *
+ * Signed in, every screen has something alive on it — a story carousel, a
+ * "Live" pill, a clock — and "does this screen move on its own?" was true for
+ * all eight. The run then pressed nothing at all, honestly, and learned
+ * nothing. Nexora's web lane does better: it measures the ambient movement
+ * first and subtracts it. So each screen is read twice with no press; every
+ * node that differed between the two reads is noise, and is left out of every
+ * before/after comparison on that screen. What remains is what a press moved.
  */
+const nodeKey = (n) => (n.role ?? "") + ":" + labelOf(n).slice(0, 60);
+const nodeState = (n) => {
+  const f = n.frame ?? { x: 0, y: 0, width: 0, height: 0 };
+  const traits = Array.isArray(n.traits) ? n.traits.join(",") : "";
+  return traits + "|" + [f.x, f.y, f.width, f.height].map((v) => Math.round(v)).join(",");
+};
+const stateMap = (nodes) => {
+  const m = new Map();
+  for (const n of nodes.filter((x) => x.frame)) m.set(nodeKey(n), (m.get(nodeKey(n)) ?? "") + ";" + nodeState(n));
+  return m;
+};
+async function measureNoise() {
+  const a = stateMap(await tree());
+  await sleep(2000);
+  const b = stateMap(await tree());
+  const noisy = new Set();
+  for (const [k, v] of a) if (b.get(k) !== v) noisy.add(k);
+  for (const k of b.keys()) if (!a.has(k)) noisy.add(k);
+  return noisy;
+}
+const quietPrint = (nodes, noisy) =>
+  [...stateMap(nodes)].filter(([k]) => !noisy.has(k)).map(([k, v]) => k + "=" + v).join(" ~ ");
+
+/** Kept for the record; no longer used to skip a screen. */
 async function movesOnItsOwn() {
   const a = fingerprint(await tree());
   await sleep(2000);
@@ -572,9 +604,11 @@ for (const route of ROUTES) {
 
   if (!canTap) continue;
 
-  if (await movesOnItsOwn()) {
-    report.notJudged.push({ route, why: "the screen changes on its own, so a press cannot be told from ambient movement" });
-    note("not judged", route + " moves on its own — no dead-control verdict given here");
+  const noisy = await measureNoise();
+  if (noisy.size > 0) note("noise", route + " — " + noisy.size + " element(s) move on their own and are left out of the comparison");
+  if (noisy.size > 40) {
+    report.notJudged.push({ route, why: "almost everything on this screen moves on its own, so a press cannot be told from ambient movement" });
+    note("not judged", route + " — too much moves on its own");
     continue;
   }
 
@@ -638,7 +672,7 @@ for (const route of ROUTES) {
       note("not judged", route + " — could not restore the screen; stopping here");
       break;
     }
-    const before = fingerprint(await tree());
+    const before = quietPrint(await tree(), noisy);
     // Prove the control is still where the tree said, then press it.
     const live = (await tree()).find((n) => labelOf(n) === labelOf(control) && isControl(n) && onScreen(n));
     if (!live) {
@@ -655,7 +689,7 @@ for (const route of ROUTES) {
     const front = await appInFront();
     const left = front && !OUR_APP.test(front);
     if (left) await bringAppBack('"' + labelOf(control) + '" opened ' + front);
-    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : fingerprint(await tree());
+    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
     if (before === after) {
       // Proof, not just an assertion. A dead-control finding that cannot be
       // looked at is one nobody acts on.

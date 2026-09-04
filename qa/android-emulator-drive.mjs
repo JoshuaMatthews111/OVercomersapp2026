@@ -432,13 +432,42 @@ if (PERMISSIONS.hasTestIdentity) {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
 
+
 /**
- * Does this screen move on its own?
+ * Subtract what moves on its own, instead of refusing to judge the screen.
  *
- * Measured with no press at all. If it does, a before/after comparison cannot
- * separate "the button worked" from "the clock ticked", so this screen is
- * named as not judged rather than filled with guesses.
+ * Signed in, every screen has something alive on it — a story carousel, a
+ * "Live" pill, a clock — and "does this screen move on its own?" was true for
+ * all eight. The run then pressed nothing at all, honestly, and learned
+ * nothing. Nexora's web lane does better: it measures the ambient movement
+ * first and subtracts it. So each screen is read twice with no press; every
+ * node that differed between the two reads is noise, and is left out of every
+ * before/after comparison on that screen. What remains is what a press moved.
  */
+const nodeKey = (n) => ((n.cls ?? "").split(".").pop()) + ":" + labelOf(n).slice(0, 60);
+const nodeState = (n) => {
+  const f = n.box ?? [0, 0, 0, 0];
+  const traits = (n.selected ? "sel" : "") + (n.checked ? "chk" : "");
+  return traits + "|" + f.join(",");
+};
+const stateMap = (nodes) => {
+  const m = new Map();
+  for (const n of nodes.filter((x) => x.box)) m.set(nodeKey(n), (m.get(nodeKey(n)) ?? "") + ";" + nodeState(n));
+  return m;
+};
+async function measureNoise() {
+  const a = stateMap(await tree());
+  await sleep(2000);
+  const b = stateMap(await tree());
+  const noisy = new Set();
+  for (const [k, v] of a) if (b.get(k) !== v) noisy.add(k);
+  for (const k of b.keys()) if (!a.has(k)) noisy.add(k);
+  return noisy;
+}
+const quietPrint = (nodes, noisy) =>
+  [...stateMap(nodes)].filter(([k]) => !noisy.has(k)).map(([k, v]) => k + "=" + v).join(" ~ ");
+
+/** Kept for the record; no longer used to skip a screen. */
 async function movesOnItsOwn() {
   const a = fingerprint(await tree());
   await sleep(2000);
@@ -465,9 +494,11 @@ for (const route of ROUTES) {
   report.screens.push({ route, shot: shotPath, labels: labels.slice(0, 40), controls: controlCount });
   note("screen", route + " — " + labels.length + " labels, " + controlCount + " controls");
 
-  if (await movesOnItsOwn()) {
-    report.notJudged.push({ route, why: "the screen changes on its own, so a press cannot be told from ambient movement" });
-    note("not judged", route + " moves on its own — no dead-control verdict given here");
+  const noisy = await measureNoise();
+  if (noisy.size > 0) note("noise", route + " — " + noisy.size + " element(s) move on their own and are left out of the comparison");
+  if (noisy.size > 40) {
+    report.notJudged.push({ route, why: "almost everything on this screen moves on its own, so a press cannot be told from ambient movement" });
+    note("not judged", route + " — too much moves on its own");
     continue;
   }
 
@@ -516,7 +547,7 @@ for (const route of ROUTES) {
       note("not judged", route + " — could not restore the screen; stopping here");
       break;
     }
-    const before = fingerprint(await tree());
+    const before = quietPrint(await tree(), noisy);
     const live = (await tree()).find((n) => labelOf(n) === labelOf(control) && n.clickable && onScreen(n));
     if (!live) {
       report.notReached.push({ route, control: labelOf(control), why: "no longer on screen when its turn came" });
@@ -533,7 +564,7 @@ for (const route of ROUTES) {
       await sh(["monkey", "-p", BUNDLE, "-c", "android.intent.category.LAUNCHER", "1"]).catch(() => undefined);
       await sleep(3000);
     }
-    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : fingerprint(await tree());
+    const after = asked ? before + " +permission-sheet" : left ? before + " +left-for-" + front : quietPrint(await tree(), noisy);
     if (before === after) {
       const proof = await shot("dead-" + name + "-" + report.deadControls.length).catch(() => null);
       report.deadControls.push({
