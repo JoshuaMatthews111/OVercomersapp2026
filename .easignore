@@ -1,0 +1,12 @@
+# Not needed to build the app; keeps the EAS upload small (was 180 MB).
+store-builds/
+store-screenshots/
+fastlane/screenshots/
+qa/ios-shots/
+qa/android-shots/
+dist-ios/
+dist-android/
+*_HANDOFF.md
+HANDOVER.md
+GPT55_FEEDBACK_AUDIT.md
+.github/
