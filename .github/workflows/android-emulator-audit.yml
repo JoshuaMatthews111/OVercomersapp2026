@@ -108,9 +108,12 @@ jobs:
           # swallowed its output. Keep the whole log and print the lines
           # around the failure so the cause is in the job log, not a guess.
           set -o pipefail
-          if ! ./gradlew assembleRelease --no-daemon -x lint --stacktrace 2>&1 | tee /tmp/gradle.log | grep -v -E "^\s*$" | tail -80; then
+          if ! ./gradlew assembleRelease --no-daemon -x lint --stacktrace --info 2>&1 | tee /tmp/gradle.log | grep -v -E "^\s*$" | tail -80; then
             echo "::group::Around the failure"
             grep -n -B 40 -A 10 -E "non-zero exit|FAILURE:" /tmp/gradle.log | head -200
+            echo "::endgroup::"
+            echo "::group::Every external process Gradle started (last 40)"
+            grep -n -A 3 "Starting process 'command" /tmp/gradle.log | tail -160
             echo "::endgroup::"
             echo "::group::Every node/expo error line"
             grep -n -i -E "error|throw|cannot find|not found" /tmp/gradle.log | grep -v -i "checkKotlin|warning improvements|HeapDump" | head -60
