@@ -139,6 +139,23 @@ export function toNexora(drive, platform) {
     });
   }
 
+  // ── Does the session survive a cold start? ───────────────────────────────
+  if (drive.coldStart?.attempted && drive.coldStart.stillSignedIn === false) {
+    observations.push({
+      ruleId: "device.session-not-persisted",
+      route: "/profile",
+      title: `Closing and reopening the app signs you out on ${where}`,
+      expected: "A signed-in person stays signed in after quitting and reopening the app.",
+      actual: `After the app was quit and launched again, ${drive.coldStart.why}. The server had accepted the sign-in minutes earlier. Every person will meet this the next time they open the app.`,
+      reproSteps: [
+        { step: 1, action: `Sign in on ${where}`, expected: "the email on the More tab", observed: "signed in" },
+        { step: 2, action: "Quit the app and open it again", expected: "still signed in", observed: drive.coldStart.why }
+      ],
+      evidence: [],
+      data: { screenshots: [`${drive.shotDir ?? ""}/03-after-cold-start.png`] }
+    });
+  }
+
   // ── The active choice that assistive technology cannot tell is active ─────
   for (const a of drive.activeNotSelected ?? []) {
     observations.push({

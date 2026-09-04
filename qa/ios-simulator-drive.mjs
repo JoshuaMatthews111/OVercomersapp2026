@@ -75,6 +75,8 @@ const report = {
   permissionsRequested: [],
   /** Controls that were the active choice and work otherwise, but are not marked selected. */
   activeNotSelected: [],
+  /** Whether the session survived quitting and relaunching the app. */
+  coldStart: null,
   sessionFlow: null,
   /** The first raw reply from idb, so an empty screen can be told from a parse failure. */
   idbRawSample: null
@@ -545,6 +547,31 @@ async function proveSignedIn() {
   return { ok: false, why: "the More tab shows neither the email nor a sign-in card" };
 }
 
+/**
+ * Does the session survive a cold start?
+ *
+ * Both phones signed in, and both later showed the More tab's "Sign in to
+ * OGN" card after the crawler had closed and reopened the app. That is the
+ * defect a person meets every morning: open the app, sign in again. So it is
+ * tested on purpose, once, right after sign-in is proven: quit the app,
+ * launch it, and look for the email on the More tab again.
+ */
+async function checkColdStart() {
+  await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
+  await sleep(1500);
+  await simctl(["launch", UDID, BUNDLE]).catch(() => undefined);
+  await sleep(9000);
+  const proof = await proveSignedIn();
+  report.coldStart = { attempted: true, stillSignedIn: proof.ok, why: proof.why };
+  await shot("03-after-cold-start");
+  note("cold start", proof.ok ? "the session survived closing and reopening the app" : "SESSION LOST after closing and reopening the app — " + proof.why);
+  if (!proof.ok) {
+    // Sign back in so the rest of the run is still a signed-in run.
+    await signIn("re-entry");
+  }
+}
+
+
 // ── Launch fresh ───────────────────────────────────────────────────────────
 await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
 await simctl(["launch", UDID, BUNDLE]);
@@ -559,6 +586,7 @@ if (canTap && PERMISSIONS.hasTestIdentity) {
   await shot("02-after-sign-in");
   report.signedInProof = signedInProof.why;
   note("sign-in", (report.signedIn ? "confirmed: " : "NOT confirmed: ") + signedInProof.why);
+  if (report.signedIn) await checkColdStart();
 } else if (!PERMISSIONS.hasTestIdentity) {
   note("sign-in", "no account supplied, so only the signed-out screens were seen");
 }
@@ -814,6 +842,12 @@ for (const route of ROUTES) {
 
 // ── The sign-out flow, pressed on purpose and then undone ──────────────────
 if (canTap && report.signedIn) {
+  // A relaunch during the crawl may have cost the session (see cold start).
+  // Sign back in first, or the profile shows a sign-in card and no Sign Out.
+  if (!(await proveSignedIn()).ok) {
+    note("sign-out", "the session was gone before the sign-out check — signing in again first");
+    await signIn("before-sign-out");
+  }
   await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
   await sleep(1500);
   await tapLabelled(/^open$/i);
@@ -826,7 +860,10 @@ if (canTap && report.signedIn) {
     signOut = (await tree()).find((n) => isControl(n) && onScreen(n) && /^(sign ?out|log ?out|logout)$/i.test(labelOf(n)) && mayPress(labelOf(n), PERMISSIONS).allowed) ?? null;
     if (signOut) break;
     await idbRun(["ui", "swipe", "200", "700", "200", "200", "--duration", "0.4"]).catch(() => undefined);
-    await sleep(1200);
+    await sleep(1500);
+    const seen = (await tree()).map(labelOf).filter(Boolean);
+    note("sign-out hunt", "hop " + (hop + 1) + " — " + seen.length + " labels, last: " + seen.slice(-3).join(" / "));
+    await shot("18-scroll-" + (hop + 1));
   }
   if (!signOut) {
     report.sessionFlow = { attempted: false, why: "no sign-out control was found on the profile screen" };
