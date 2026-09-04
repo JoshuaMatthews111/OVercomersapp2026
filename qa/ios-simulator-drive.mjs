@@ -314,7 +314,7 @@ const sameScreen = (a, b) => {
   const A = new Set(a.split("~")), B = new Set(b.split("~"));
   let shared = 0;
   for (const k of A) if (B.has(k)) shared++;
-  return shared / Math.max(A.size, B.size, 1) >= 0.85;
+  return shared / Math.max(A.size, B.size, 1) >= 0.75;
 };
 
 const fingerprint = (nodes) =>
@@ -658,7 +658,11 @@ for (const route of ROUTES) {
    * route was first opened, backed out of if it differs, and relaunched if it
    * still differs. A press is only judged on the screen it was meant for.
    */
-  const baseline = structure(nodes);
+  // The chat screen never matched its own baseline: the live room card and
+  // the message list are exactly the elements measured as noise. Leave them
+  // out of the identity too, and accept three-quarters overlap.
+  const quietStructure = (ns) => structure(ns.filter((n) => !noisy.has(nodeKey(n))));
+  const baseline = quietStructure(nodes);
   const restore = async () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt === 1) await tapLabelled(/^(back|go back|close|cancel|done)\b/i);
@@ -669,13 +673,13 @@ for (const route of ROUTES) {
       }
       await openRoute();
       await sleep(2000);
-      if (sameScreen(structure(await tree()), baseline)) return true;
+      if (sameScreen(quietStructure(await tree()), baseline)) return true;
     }
     return false;
   };
 
   for (const control of pressable.slice(0, 6)) {
-    if (!sameScreen(structure(await tree()), baseline) && !(await restore())) {
+    if (!sameScreen(quietStructure(await tree()), baseline) && !(await restore())) {
       report.notJudged.push({ route, why: "the screen could not be put back to how it was, so the remaining controls here were not judged" });
       note("not judged", route + " — could not restore the screen; stopping here");
       break;
@@ -707,6 +711,24 @@ for (const route of ROUTES) {
     for (let extra = 0; extra < 2 && before === after; extra++) {
       await sleep(2000);
       after = quietPrint(await tree(), noisy);
+    }
+    // A second opinion before a verdict: restore the screen and press once
+    // more. A press lost to a scroll settling or a slow emulator is not a
+    // dead control; "dead twice, on a restored screen" is a claim worth making.
+    if (before === after && (await restore())) {
+      const again = (await tree()).find((n) => labelOf(n) === labelOf(control) && isControl(n) && onScreen(n));
+      if (again) {
+        const b2 = quietPrint(await tree(), noisy);
+        await tapFrame(again.frame);
+        await sleep(3000);
+        const a2 = quietPrint(await tree(), noisy);
+        if (b2 !== a2) {
+          note("second opinion", route + ' — "' + labelOf(control) + '" worked on the second press; not dead');
+          report.liveControls++;
+          await tapLabelled(/^(ok|close|cancel|done|dismiss|got it)\b/i);
+          continue;
+        }
+      }
     }
     if (before === after) {
       // Proof, not just an assertion. A dead-control finding that cannot be
