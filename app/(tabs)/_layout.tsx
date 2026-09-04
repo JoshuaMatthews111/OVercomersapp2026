@@ -67,7 +67,8 @@ export default function TabLayout() {
     checkSession();
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session) router.replace('/');
+      // The welcome screen, not "/", which is also this Home tab.
+      if (!session) router.replace('/welcome');
     });
 
     return () => {

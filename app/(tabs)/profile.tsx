@@ -108,7 +108,8 @@ export default function ProfileScreen() {
     const revoke = supabase.auth.signOut({ scope: 'global' }).catch(() => undefined);
     await Promise.race([revoke, new Promise((resolve) => setTimeout(resolve, 3000))]);
     await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
-    router.replace('/');
+    // "/" is also the tabs' Home; the welcome screen has its own address.
+    router.replace('/welcome');
   }
 
   async function sendPasswordReset() {
