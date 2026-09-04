@@ -1,5 +1,4 @@
 import { Ionicons } from '@expo/vector-icons';
-import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Image, Linking, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -15,7 +14,9 @@ import {
   getChatMessages,
   getChatRooms,
   joinChatRoom,
+  ChatAttachment,
   deleteOwnChatMessage,
+  uploadChatAttachment,
   moderateChatMessage,
   reportChatMessage,
   removeChatMember,
@@ -23,11 +24,12 @@ import {
   sendChatMessage,
   subscribeToChat,
 } from '../../lib/chatService';
+import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../../components/ChatAttachments';
+import { useNowPlaying } from '../../lib/nowPlaying';
 import { friendlyError } from '../../lib/errorMessages';
 import { supabase } from '../../lib/supabase';
 import { colors, shadows } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
-import { uploadPickedAsset } from '../../lib/uploadService';
 import { ChatRoom } from '../../types/models';
 
 type ChatTab = 'private' | 'groups' | 'announcements';
@@ -50,6 +52,11 @@ export default function CommunityScreen() {
   const dark = themePreference === 'dark';
   const scrollRef = useRef<ScrollView | null>(null);
   const composerRef = useRef<TextInput | null>(null);
+  const nowPlaying = useNowPlaying();
+  const [attachOpen, setAttachOpen] = useState(false);
+  const [pendingFile, setPendingFile] = useState<PickedFile | null>(null);
+  const [sendingFile, setSendingFile] = useState(false);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [chatPanelY, setChatPanelY] = useState(0);
   const [chatTab, setChatTab] = useState<ChatTab>('private');
   const [rooms, setRooms] = useState<ChatRoom[]>([]);
@@ -122,8 +129,9 @@ export default function CommunityScreen() {
     setError(null);
     try {
       const result = await sendChatMessage(selectedRoomId, text);
-      setMessages((current) => [...current, { id: result.id, channelId: selectedRoomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString() }]);
+      setMessages((current) => [...current, { id: result.id, channelId: selectedRoomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString(), isFlagged: result.isFlagged }]);
       setBody('');
+      if (result.isFlagged) Alert.alert('Held for review', 'Your message has words our filter flags. A moderator will look at it before others see it.');
     } catch (err) {
       setError(friendlyError(err, 'Unable to send message. Please sign in and try again.'));
     }
@@ -225,32 +233,43 @@ export default function CommunityScreen() {
     }
   }
 
-  async function attachFile() {
+  function openAttachSheet() {
     if (!selectedRoomId) return Alert.alert('Select a chat', 'Choose a chat before attaching media.');
-    // The system picker needs no library permission on iOS 14+ / Android 13+;
-    // asking first raised the "full access" sheet that store reviewers flag.
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images', 'videos'],
-      allowsEditing: false,
-      quality: 0.82,
-      videoQuality: ImagePicker.UIImagePickerControllerQualityType.Medium,
-    });
-    if (result.canceled || !result.assets[0]) return;
+    setAttachOpen(true);
+  }
+
+  async function sendAttachment(caption: string) {
+    if (!selectedRoomId || !pendingFile) return;
+    setSendingFile(true);
     try {
       await joinChatRoom(selectedRoomId);
-      const upload = await uploadPickedAsset({
-        asset: result.assets[0],
-        bucketId: 'chat-attachments',
-        purpose: 'chat_attachment',
-        pathPrefix: selectedRoomId,
-        relatedTable: 'chat_messages',
-      });
-      const text = `Shared attachment: ${upload.fileName}\n${upload.publicUrl}`;
-      const sent = await sendChatMessage(selectedRoomId, text);
-      setMessages((current) => [...current, { id: sent.id, channelId: selectedRoomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString() }]);
+      const uploaded = await uploadChatAttachment(selectedRoomId, pendingFile);
+      const sent = await sendChatMessage(selectedRoomId, caption, uploaded);
+      setMessages((current) => [...current, {
+        id: sent.id,
+        channelId: selectedRoomId,
+        userId: currentUserId || undefined,
+        body: caption,
+        displayName: 'You',
+        createdAt: new Date().toISOString(),
+        isFlagged: sent.isFlagged,
+        attachment: { path: uploaded.path, url: pendingFile.uri, kind: uploaded.kind, name: uploaded.name, size: uploaded.size },
+      }]);
+      setPendingFile(null);
+      if (sent.isFlagged) Alert.alert('Held for review', 'Your message has words our filter flags. A moderator will look at it before others see it.');
     } catch (err) {
       Alert.alert('Attachment failed', friendlyError(err, 'Please choose another file and try again.'));
+    } finally {
+      setSendingFile(false);
     }
+  }
+
+  function openAttachment(attachment: ChatAttachment) {
+    if (attachment.kind === 'image') return setPhotoUrl(attachment.url);
+    if (attachment.kind === 'video' || attachment.kind === 'audio') {
+      return nowPlaying.play({ title: attachment.name || (attachment.kind === 'video' ? 'Shared video' : 'Shared audio'), speaker: selectedRoom?.name, url: attachment.url, type: attachment.kind });
+    }
+    openExternalUrl(attachment.url);
   }
 
   return (
@@ -391,7 +410,8 @@ export default function CommunityScreen() {
                       </View>
                     ) : null}
                   </View>
-                  <MessageBody message={message.body} dark={dark} onOpenUrl={openExternalUrl} />
+                  {message.attachment ? <AttachmentBubble attachment={message.attachment} dark={dark} own={own} onOpen={openAttachment} /> : null}
+                  {message.body ? <MessageBody message={message.body} dark={dark} onOpenUrl={openExternalUrl} /> : null}
                 </View>
               </View>
               );
@@ -430,8 +450,8 @@ export default function CommunityScreen() {
             ) : null}
 
             <View style={styles.composer}>
-              <Pressable onPress={attachFile} style={[styles.attachButton, dark && styles.attachButtonDark]}>
-                <Ionicons name="attach-outline" size={20} color={dark ? colors.gold : colors.royalBlue} />
+              <Pressable accessibilityRole="button" accessibilityLabel="Add attachment" onPress={openAttachSheet} style={[styles.attachButton, dark && styles.attachButtonDark]}>
+                <Ionicons name="add" size={24} color={dark ? colors.gold : colors.royalBlue} />
               </Pressable>
               <TextInput
                 ref={composerRef}
@@ -541,6 +561,9 @@ export default function CommunityScreen() {
           ) : null}
         </ScrollView>
       </SafeAreaView>
+      <AttachSheet visible={attachOpen} dark={dark} onClose={() => setAttachOpen(false)} onPicked={setPendingFile} />
+      <AttachmentPreview file={pendingFile} dark={dark} sending={sendingFile} onCancel={() => setPendingFile(null)} onSend={sendAttachment} />
+      <PhotoViewer url={photoUrl} onClose={() => setPhotoUrl(null)} />
     </LinearGradient>
   );
 }

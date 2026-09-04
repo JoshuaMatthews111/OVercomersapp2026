@@ -5,6 +5,16 @@ import { supabase } from './supabase';
 
 const hasSupabase = Boolean(process.env.EXPO_PUBLIC_SUPABASE_URL && process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY);
 
+export type ChatAttachmentKind = 'image' | 'video' | 'audio' | 'file';
+
+export type ChatAttachment = {
+  path: string;
+  url: string;
+  kind: ChatAttachmentKind;
+  name?: string;
+  size?: number;
+};
+
 export type ChatMessage = {
   id: string;
   channelId: string;
@@ -14,7 +24,60 @@ export type ChatMessage = {
   avatarUrl?: string;
   createdAt: string;
   isFlagged?: boolean;
+  attachment?: ChatAttachment;
 };
+
+const ATTACHMENT_BUCKET = 'chat-attachments';
+const ATTACHMENT_LINK_TTL = 60 * 60 * 24; // one day; links are re-signed on every load
+
+export function attachmentKindFromMime(mime?: string | null): ChatAttachmentKind {
+  if (!mime) return 'file';
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'file';
+}
+
+// The bucket is private. Members get short-lived links, all signed in one call.
+async function signAttachmentLinks(paths: string[]) {
+  const unique = Array.from(new Set(paths.filter(Boolean)));
+  const links = new Map<string, string>();
+  if (!unique.length) return links;
+  const { data } = await supabase.storage.from(ATTACHMENT_BUCKET).createSignedUrls(unique, ATTACHMENT_LINK_TTL);
+  for (const entry of data || []) {
+    if (entry.path && entry.signedUrl) links.set(entry.path, entry.signedUrl);
+  }
+  return links;
+}
+
+function rowAttachment(row: any, links: Map<string, string>): ChatAttachment | undefined {
+  if (!row.attachment_path) return undefined;
+  const url = links.get(row.attachment_path);
+  if (!url) return undefined;
+  return {
+    path: row.attachment_path,
+    url,
+    kind: (row.attachment_type as ChatAttachmentKind) || 'file',
+    name: row.attachment_name || undefined,
+    size: row.attachment_size || undefined,
+  };
+}
+
+// Uploads a picked photo, video, or document for a room. The object path is
+// <channel>/<user>/<time>-<name>, which is what the storage policy checks.
+export async function uploadChatAttachment(channelId: string, file: { uri: string; name?: string | null; mimeType?: string | null; size?: number | null }) {
+  if (!hasSupabase) throw new Error('Supabase is not configured for uploads.');
+  const { data: userResult } = await supabase.auth.getUser();
+  const userId = userResult.user?.id;
+  if (!userId) throw new Error('Sign in before sending attachments.');
+  const mimeType = file.mimeType || 'application/octet-stream';
+  const safeName = (file.name || `attachment`).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'attachment';
+  const path = `${channelId}/${userId}/${Date.now()}-${safeName}`;
+  const blob = await (await fetch(file.uri)).blob();
+  const { error } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(path, blob, { contentType: mimeType, upsert: false });
+  if (error) throw error;
+  return { path, kind: attachmentKindFromMime(mimeType), name: safeName, size: file.size || blob.size || undefined };
+}
 
 export type ChatProfileSearchResult = {
   id: string;
@@ -67,14 +130,17 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
 
   const { data, error } = await supabase
     .from('chat_messages')
-    .select('id, channel_id, user_id, body, created_at, is_flagged')
+    .select('id, channel_id, user_id, body, created_at, is_flagged, attachment_path, attachment_type, attachment_name, attachment_size')
     .eq('channel_id', channelId)
     .is('deleted_at', null)
     .order('created_at', { ascending: true })
     .limit(50);
 
   if (error || !data) return [];
-  const profiles = await getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean));
+  const [profiles, links] = await Promise.all([
+    getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean)),
+    signAttachmentLinks(data.map((row: any) => row.attachment_path).filter(Boolean)),
+  ]);
   return data.map((row: any) => ({
     id: row.id,
     channelId: row.channel_id,
@@ -83,23 +149,32 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     displayName: profiles.get(row.user_id)?.displayName || 'OGN Member',
     avatarUrl: profiles.get(row.user_id)?.avatarUrl,
     createdAt: row.created_at,
-    isFlagged: row.is_flagged
+    isFlagged: row.is_flagged,
+    attachment: rowAttachment(row, links),
   }));
 }
 
-export async function sendChatMessage(channelId: string, body: string) {
-  if (!hasSupabase) return { id: `local-${Date.now()}` };
+export async function sendChatMessage(channelId: string, body: string, attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number }) {
+  if (!hasSupabase) return { id: `local-${Date.now()}`, isFlagged: false };
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) throw new Error('Sign in before posting to chat.');
 
   await ensureChatMember(channelId, userResult.user.id);
   const { data, error } = await supabase
     .from('chat_messages')
-    .insert({ channel_id: channelId, user_id: userResult.user.id, body })
-    .select('id')
+    .insert({
+      channel_id: channelId,
+      user_id: userResult.user.id,
+      body,
+      attachment_path: attachment?.path ?? null,
+      attachment_type: attachment?.kind ?? null,
+      attachment_name: attachment?.name ?? null,
+      attachment_size: attachment?.size ?? null,
+    })
+    .select('id, is_flagged')
     .single();
   if (error) throw error;
-  return data;
+  return { id: data.id as string, isFlagged: Boolean(data.is_flagged) };
 }
 
 export async function forwardMediaToChat(input: {
@@ -135,12 +210,16 @@ export function subscribeToChat(channelId: string, onMessage: (message: ChatMess
           userId: row.user_id,
           body: row.body,
           displayName: 'OGN Member',
-          createdAt: row.created_at
+          createdAt: row.created_at,
+          isFlagged: row.is_flagged,
         };
-        getProfilesByIds(row.user_id ? [row.user_id] : [])
-          .then((profiles) => {
+        Promise.all([
+          getProfilesByIds(row.user_id ? [row.user_id] : []),
+          signAttachmentLinks(row.attachment_path ? [row.attachment_path] : []),
+        ])
+          .then(([profiles, links]) => {
             const profile = row.user_id ? profiles.get(row.user_id) : undefined;
-            onMessage({ ...base, displayName: profile?.displayName || base.displayName, avatarUrl: profile?.avatarUrl });
+            onMessage({ ...base, displayName: profile?.displayName || base.displayName, avatarUrl: profile?.avatarUrl, attachment: rowAttachment(row, links) });
           })
           .catch(() => onMessage(base));
       }
