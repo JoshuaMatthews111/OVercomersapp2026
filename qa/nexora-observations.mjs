@@ -195,7 +195,8 @@ export function toNexora(drive, platform) {
           { step: 1, action: `Sign in on ${where}`, expected: "the email on the More tab", observed: "signed in" },
           { step: 2, action: `Press "${r.control}" and come back with Back`, expected: "still signed in", observed: r.why }
         ],
-        evidence: []
+        evidence: [],
+        data: r.shot ? { screenshots: [r.shot] } : undefined
       });
     }
   }

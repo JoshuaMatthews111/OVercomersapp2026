@@ -693,8 +693,14 @@ for (const route of ROUTES) {
       // Was the session still there when we came back? Recorded either way.
       const proof = await proveSignedIn();
       report.returnChecks = report.returnChecks ?? [];
-      report.returnChecks.push({ route, control: labelOf(control), left_for: front, signedInOnReturn: proof.ok, why: proof.why });
+      const returnShot = await shot("30-return-" + report.returnChecks.length).catch(() => null);
+      report.returnChecks.push({ route, control: labelOf(control), left_for: front, signedInOnReturn: proof.ok, why: proof.why, shot: returnShot });
       note("return check", proof.ok ? "still signed in after coming back from " + front : "SESSION GONE after coming back from " + front + " — " + proof.why);
+      if (!proof.ok) {
+        // Counted once, above. Sign back in so every later screen is still
+        // judged as a member would see it, not as a signed-out visitor.
+        await signIn("re-entry after " + front);
+      }
       await openRoute();
       await sleep(2500);
     }

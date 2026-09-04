@@ -796,7 +796,20 @@ for (const route of ROUTES) {
     // control doing its job, not the screen staying the same.
     const front = await appInFront();
     const left = front && !OUR_APP.test(front);
-    if (left) await bringAppBack('"' + labelOf(control) + '" opened ' + front);
+    if (left) {
+      await bringAppBack('"' + labelOf(control) + '" opened ' + front);
+      // Did the session survive the trip? On Android the second return from
+      // Chrome came back signed out. Recorded, photographed, and if lost,
+      // signed back in so the rest of the run is still a member's view.
+      const proof = await proveSignedIn();
+      report.returnChecks = report.returnChecks ?? [];
+      const returnShot = await shot("30-return-" + report.returnChecks.length).catch(() => null);
+      report.returnChecks.push({ route, control: labelOf(control), left_for: front, signedInOnReturn: proof.ok, why: proof.why, shot: returnShot });
+      note("return check", proof.ok ? "still signed in after coming back from " + front : "SESSION GONE after coming back from " + front + " — " + proof.why);
+      if (!proof.ok) await signIn("re-entry after " + front);
+      await openRoute();
+      await sleep(2500);
+    }
     /**
      * Patience before a verdict. A settings row that opens a sheet took longer
      * than the fixed wait on a shared runner, and four working rows were
