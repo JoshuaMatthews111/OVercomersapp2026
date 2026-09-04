@@ -104,7 +104,19 @@ jobs:
           org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError -Dfile.encoding=UTF-8
           org.gradle.workers.max=3
           PROPS
-          ./gradlew assembleRelease --no-daemon -x lint
+          # A node helper failed inside Gradle's configure phase and Gradle
+          # swallowed its output. Keep the whole log and print the lines
+          # around the failure so the cause is in the job log, not a guess.
+          set -o pipefail
+          if ! ./gradlew assembleRelease --no-daemon -x lint --stacktrace 2>&1 | tee /tmp/gradle.log | grep -v -E "^\s*$" | tail -80; then
+            echo "::group::Around the failure"
+            grep -n -B 40 -A 10 -E "non-zero exit|FAILURE:" /tmp/gradle.log | head -200
+            echo "::endgroup::"
+            echo "::group::Every node/expo error line"
+            grep -n -i -E "error|throw|cannot find|not found" /tmp/gradle.log | grep -v -i "checkKotlin|warning improvements|HeapDump" | head -60
+            echo "::endgroup::"
+            exit 1
+          fi
           # Hand the emulator step an absolute path. Its script ran with a
           # different working directory, its own find came back empty, and
           # adb was asked to install "" — which is how a green build turned
