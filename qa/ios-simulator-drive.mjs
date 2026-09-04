@@ -463,8 +463,15 @@ async function signIn(tag) {
     (Array.isArray(f.traits) && f.traits.some((t) => /secure/i.test(String(t)))) ||
     /password/i.test(labelOf(f)) ||
     /password/i.test(String(f.AXPlaceholderValue ?? f.placeholder ?? ""));
-  const passwordField = fields.find(saysPassword) ?? (fields.length >= 2 ? fields[1] : null);
-  const emailField = fields.find((f) => f !== passwordField) ?? null;
+  const passwordField = fields.find(saysPassword) ?? (fields.length >= 1 ? fields[fields.length - 1] : null);
+  // The More tab's sign-in card has a Display-name box above the email box;
+  // pick the email box by its words, else the box directly above the password.
+  const hintOf = (f) => (labelOf(f) + " " + String(f.AXPlaceholderValue ?? f.placeholder ?? "")).toLowerCase();
+  const byHint = fields.find((f) => f !== passwordField && /email|phone/.test(hintOf(f)));
+  const abovePassword = passwordField
+    ? fields.filter((f) => f !== passwordField && f.frame.y < passwordField.frame.y).sort((a, b) => b.frame.y - a.frame.y)[0]
+    : null;
+  const emailField = byHint ?? abovePassword ?? fields.find((f) => f !== passwordField) ?? null;
 
   /**
    * Type, then read it back.

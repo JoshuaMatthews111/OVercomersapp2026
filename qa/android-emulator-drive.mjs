@@ -324,9 +324,20 @@ async function signIn(tag) {
    * marks a password box as one, so those are what this asks for. Then the
    * box is read back, because a tap that "worked" proves nothing.
    */
+  /**
+   * The in-tab sign-in card on More has THREE boxes: Display name, Email,
+   * Password. "The first box" typed the email into Display name, and the
+   * re-sign-in failed with the address sitting in the wrong field. An empty
+   * EditText carries its hint as its text, so the email box is the one whose
+   * hint says so; failing that, the box directly above the password.
+   */
   const inputs = (await tree()).filter((n) => /EditText/.test(n.cls) && n.box);
-  const passwordBox = inputs.find((n) => n.isPassword) ?? inputs[1] ?? null;
-  const emailBox = inputs.find((n) => n !== passwordBox) ?? null;
+  const passwordBox = inputs.find((n) => n.isPassword) ?? inputs[inputs.length - 1] ?? null;
+  const byHint = inputs.find((n) => n !== passwordBox && /email|phone/i.test(n.text));
+  const abovePassword = passwordBox
+    ? inputs.filter((n) => n !== passwordBox && n.box[1] < passwordBox.box[1]).sort((a, b) => b.box[1] - a.box[1])[0]
+    : null;
+  const emailBox = byHint ?? abovePassword ?? inputs.find((n) => n !== passwordBox) ?? null;
 
   const typeInto = async (box, text, label, secret) => {
     if (!box) return { ok: false, why: "no " + label + " box on this screen" };
