@@ -102,6 +102,19 @@ export function toNexora(drive, platform) {
         data: { screenshots: ["19-before-sign-out.png", "20-after-sign-out.png"].map((f) => `${drive.shotDir ?? ""}/${f}`) }
       });
     }
+    if (flow.signedOut === true && /tab bar/i.test(String(drive.sessionLandedOn ?? ""))) {
+      observations.push({
+        ruleId: "device.signout-no-signin-screen",
+        route: "/profile",
+        controlText: "Sign Out",
+        title: `After sign out the app shows the Home tab, not a sign-in screen, on ${where}`,
+        expected: "Signing out returns to the welcome or sign-in screen, so the next person knows nobody is signed in.",
+        actual: "The session ended, but the app stayed in the tab bar on Home, which draws for signed-out people too. Only the More tab shows that nobody is signed in. router.replace('/') resolves to the tabs' Home, not the welcome screen.",
+        reproSteps: repro(1, `Press sign out on ${where}`, "the welcome or sign-in screen", "the Home tab"),
+        evidence: [],
+        data: { screenshots: ["20-after-sign-out.png", "21-after-recovery.png"].map((f) => `${drive.shotDir ?? ""}/${f}`) }
+      });
+    }
     if (flow.signedOut === true && typeof flow.signedOutAfterMs === "number" && flow.signedOutAfterMs > 10000) {
       observations.push({
         ruleId: "device.signout-slow",

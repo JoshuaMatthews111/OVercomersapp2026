@@ -958,13 +958,25 @@ if (canTap && report.signedIn) {
      * moment the screen flips is recorded, up to ninety seconds. "Never" and
      * "after 60 s" are different findings.
      */
+    /**
+     * Judge the sign-out where it can be seen, not on whatever screen is up.
+     *
+     * After Sign Out the app lands on the Home tab — a screen that draws for
+     * signed-out people too. Reading Home as "still signed in" produced a
+     * false critical finding four runs in a row; the More tab, photographed a
+     * minute later, showed the sign-in card the whole time. So the More tab is
+     * asked, and where the app landed is recorded as its own, smaller fact.
+     */
+    await sleep(3000);
+    await shot("20-after-sign-out");
+    report.sessionLandedOn = (await tree()).some((n) => /tab, \d of \d/i.test(labelOf(n))) ? "the tab bar (Home)" : "somewhere without the tab bar";
     let signedOutOk = false;
     let signedOutAfterMs = null;
     const t0 = Date.now();
-    for (let waited = 0; waited < 90000; waited += 3000) {
-      await sleep(3000);
-      if (!(await looksSignedIn())) { signedOutOk = true; signedOutAfterMs = Date.now() - t0; break; }
-      if (waited === 15000) await shot("20-after-sign-out");
+    for (let waited = 0; waited < 90000; waited += 6000) {
+      const p = await proveSignedIn();
+      if (!p.ok && /sign-in card|Sign in to OGN/i.test(p.why)) { signedOutOk = true; signedOutAfterMs = Date.now() - t0; break; }
+      await sleep(6000);
     }
     await shot(signedOutOk ? "20b-signed-out-seen" : "20-after-sign-out-90s");
     note("sign-out timing", signedOutOk ? "the app showed signed-out after " + Math.round(signedOutAfterMs / 1000) + " s" : "the app still showed signed-in after 90 s");
