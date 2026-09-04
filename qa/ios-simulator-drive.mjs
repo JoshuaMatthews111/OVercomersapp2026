@@ -59,6 +59,7 @@ try {
 const report = {
   startedAt: new Date().toISOString(),
   permissions: PERMISSIONS,
+  shotDir: OUT,
   canPressControls: canTap,
   signedIn: false,
   steps: [],

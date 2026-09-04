@@ -176,6 +176,7 @@ async function looksSignedIn() {
 const report = {
   startedAt: new Date().toISOString(),
   permissions: PERMISSIONS,
+  shotDir: OUT,
   signedIn: false,
   steps: [],
   screens: [],

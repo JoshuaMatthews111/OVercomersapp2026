@@ -47,7 +47,8 @@ export function toNexora(drive, platform) {
         "Something on screen changes",
         "the screen read identically before and after"
       ),
-      evidence: []
+      evidence: [],
+      data: d.shot ? { screenshots: [d.shot] } : undefined
     });
   }
 
@@ -95,7 +96,10 @@ export function toNexora(drive, platform) {
           "The app still showed signed-in screens afterwards. On a shared or lost phone, " +
           "somebody who was handed it stays signed in as the previous person.",
         reproSteps: repro(1, `Press sign out on ${where}`, "signed out", "still signed in"),
-        evidence: []
+        evidence: [],
+        // The two photographs that make this claim checkable: the button as
+        // it was pressed, and the screen that came back.
+        data: { screenshots: ["19-before-sign-out.png", "20-after-sign-out.png"].map((f) => `${drive.shotDir ?? ""}/${f}`) }
       });
     }
     if (flow.signedOut === true && flow.signedBackIn === false) {
