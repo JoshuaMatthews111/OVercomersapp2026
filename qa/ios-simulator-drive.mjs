@@ -667,11 +667,12 @@ async function checkPickerAndReturn() {
  * Springboard. A crash at launch is its own finding, and everything after it
  * is not assessed — never "session gone".
  */
+const textOf = (r) => (typeof r === "string" ? r : (r && r.stdout) || "");
 async function crashReason() {
-  const out = await simctl([
+  const out = textOf(await simctl([
     "spawn", UDID, "log", "show", "--last", "3m", "--style", "compact",
     "--predicate", 'eventMessage CONTAINS "Terminating app due to uncaught exception" OR eventMessage CONTAINS "ErrorRecovery fatal exception"'
-  ]).catch(() => "");
+  ]).catch(() => ""));
   const m = String(out).match(/Unhandled JS Exception: ([^\n'"]{0,240})/) || String(out).match(/reason: '([^']{0,240})/);
   return m ? m[1].trim() : "";
 }
@@ -682,13 +683,13 @@ async function crashReason() {
 let appPid = 0;
 async function appProcessAlive() {
   if (!appPid) return true; // unknown is not dead
-  const out = await run("ps", ["-p", String(appPid), "-o", "pid="]).catch(() => "");
-  return String(out).trim() === String(appPid);
+  const out = textOf(await run("ps", ["-p", String(appPid), "-o", "pid="]).catch(() => ""));
+  return out.trim() === String(appPid);
 }
 await simctl(["terminate", UDID, BUNDLE]).catch(() => undefined);
 {
-  const launched = await simctl(["launch", UDID, BUNDLE]);
-  const m = String(launched).match(/:\s*(\d+)\s*$/m);
+  const launched = textOf(await simctl(["launch", UDID, BUNDLE]));
+  const m = launched.match(/:\s*(\d+)\s*$/m);
   appPid = m ? Number(m[1]) : 0;
 }
 await sleep(10000);
