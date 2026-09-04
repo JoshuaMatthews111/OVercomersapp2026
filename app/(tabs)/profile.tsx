@@ -105,8 +105,11 @@ export default function ProfileScreen() {
     // a slow link that wait is the whole minute. So: ask the server to revoke
     // with a short leash, then clear the phone's copy regardless, then leave.
     // Whether the server call finished or not, the person is signed out here.
-    const revoke = supabase.auth.signOut({ scope: 'global' }).catch(() => undefined);
-    await Promise.race([revoke, new Promise((resolve) => setTimeout(resolve, 3000))]);
+    // This device only. 'global' revoked every session on the account: the
+    // Android lane was thrown to the welcome screen two minutes after the
+    // iPhone lane signed out of the same test account, and a member would get
+    // the same surprise on their second phone. "Sign out everywhere" can be
+    // its own switch in Account Settings later.
     await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
     // "/" is also the tabs' Home; the welcome screen has its own address.
     router.replace('/welcome');
