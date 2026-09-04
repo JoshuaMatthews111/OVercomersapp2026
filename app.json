@@ -83,6 +83,13 @@
         "projectId": "8e9b3da8-b8dc-4275-a247-e226a4eca99a"
       }
     },
-    "owner": "joshflaww"
+    "owner": "joshflaww",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/8e9b3da8-b8dc-4275-a247-e226a4eca99a",
+      "fallbackToCacheTimeout": 0
+    }
   }
 }

@@ -564,8 +564,14 @@ async function proveSignedIn() {
   await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
   await sleep(1500);
   await tapLabelled(/^open$/i);
-  await sleep(3000);
-  const words = (await tree()).map(labelOf).filter(Boolean).join(" | ");
+  // "Neither the email nor a sign-in card" three runs in a row turned out to
+  // be the More tab still drawing. Read it up to three times before deciding.
+  let words = "";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await sleep(3000);
+    words = (await tree()).map(labelOf).filter(Boolean).join(" | ");
+    if (words.toLowerCase().includes(EMAIL.toLowerCase()) || /sign in to ogn|require an account/i.test(words)) break;
+  }
   const emailShown = words.toLowerCase().includes(EMAIL.toLowerCase());
   const askedToSignIn = /sign in to ogn|require an account/i.test(words);
   if (emailShown) return { ok: true, why: "the More tab shows the account's email" };
