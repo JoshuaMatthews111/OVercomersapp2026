@@ -49,6 +49,7 @@ Deno.serve(async (req) => {
   const { data: tokens, error: tokenError } = await serviceClient
     .from('push_tokens')
     .select('token,user_id')
+    .is('disabled_at', null)
     .order('updated_at', { ascending: false });
   if (tokenError) return json({ error: tokenError.message }, 500);
 
@@ -56,7 +57,8 @@ Deno.serve(async (req) => {
   const { data: prefs } = userIds.length
     ? await serviceClient
       .from('notification_preferences')
-      .select('user_id,announcements,sermons,articles,chat,prayer')
+      // The table's column names, not the app's short names.
+      .select('user_id,announcements,sermons,articles,chat_messages,prayer_updates')
       .in('user_id', userIds)
     : { data: [] };
   const prefsByUser = new Map((prefs || []).map((row) => [row.user_id, row]));
@@ -98,7 +100,8 @@ function normalizeCategory(category: PushBody['category']) {
 function shouldReceive(category: NonNullable<PushBody['category']>, prefs?: Record<string, unknown>) {
   if (category === 'all') return true;
   if (!prefs) return true;
-  return prefs[category] !== false;
+  const column = category === 'chat' ? 'chat_messages' : category === 'prayer' ? 'prayer_updates' : category;
+  return prefs[column] !== false;
 }
 
 function json(payload: unknown, status = 200) {

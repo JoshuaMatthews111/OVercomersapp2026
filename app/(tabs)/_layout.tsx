@@ -7,6 +7,7 @@ import { useThemePreference } from '../../lib/themePreference';
 import { supabase } from '../../lib/supabase';
 import { getAccessProfile } from '../../lib/accessControl';
 import { friendlyError } from '../../lib/errorMessages';
+import { ensurePushRegistered } from '../../lib/pushBootstrap';
 
 function icon(name: keyof typeof Ionicons.glyphMap, activeName?: keyof typeof Ionicons.glyphMap) {
   return ({ color, size, focused }: { color: ColorValue; size: number; focused: boolean }) => (
@@ -58,6 +59,8 @@ export default function TabLayout() {
           return;
         }
         setCheckingSession(false);
+        // Signed in and allowed: make sure this phone can receive notices.
+        ensurePushRegistered().catch(() => undefined);
       } catch (error) {
         if (!mounted) return;
         setSessionError(friendlyError(error, 'We could not finish loading your account. Please try again.'));
