@@ -189,10 +189,13 @@ export default function HomeScreen() {
             <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Stories Around the World</Text>
             <Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>{access.canManageContent ? 'Manage' : 'View All'}</Text>
           </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyScroll}>
-            {displayStories.map((story) => <StoryCard key={story.id} story={story} dark={dark} now={now} />)}
-            {storiesEmpty ? <StoriesEmpty dark={dark} /> : null}
-          </ScrollView>
+          {storiesEmpty ? (
+            <StoriesEmpty dark={dark} />
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.storyScroll}>
+              {displayStories.map((story) => <StoryCard key={story.id} story={story} dark={dark} now={now} />)}
+            </ScrollView>
+          )}
 
           {dark ? (
             <Pressable onPress={() => router.push('/prayer' as any)} style={styles.prayerDarkApproved}>

@@ -100,7 +100,7 @@ export default function GiveScreen() {
                 placeholderTextColor={dark ? 'rgba(255,255,255,0.5)' : colors.muted}
                 style={[styles.customInput, dark && styles.customInputDark]}
               />
-              <Text style={[styles.customBody, dark && styles.customBodyDark]}>Open the dedicated Stripe custom giving page.</Text>
+              <Text style={[styles.customBody, dark && styles.customBodyDark]}>Stripe's page will ask you to type the amount again. That is a Stripe limit we are replacing.</Text>
             </View>
             <Pressable accessibilityRole="button" accessibilityLabel="Open custom giving" onPress={() => openGiving(undefined, true)} style={styles.customOpenButton}>
               <Ionicons name="chevron-forward" size={20} color="#071231" />
