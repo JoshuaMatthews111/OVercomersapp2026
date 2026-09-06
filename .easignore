@@ -10,3 +10,7 @@ dist-android/
 HANDOVER.md
 GPT55_FEEDBACK_AUDIT.md
 .github/
+.xcode-derived-data/
+ios/build/
+android/build/
+android/app/build/
