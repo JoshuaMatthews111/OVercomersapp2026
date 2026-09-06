@@ -194,6 +194,12 @@ export default function ChatRoomScreen() {
     openExternalUrl(attachment.url);
   }
 
+  /** Everyone has a page. A message without a user id shows the small card. */
+  function openPerson(message: ChatMessage) {
+    if (message.userId) return router.push({ pathname: '/person', params: { id: message.userId, name: message.displayName } } as any);
+    setSelectedProfile({ userId: message.userId, displayName: message.displayName, avatarUrl: message.avatarUrl });
+  }
+
   function messageActions(message: ChatMessage, own: boolean) {
     const buttons: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [];
     if (own) {
@@ -250,7 +256,7 @@ export default function ChatRoomScreen() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`Open ${message.displayName} profile`}
-            onPress={() => setSelectedProfile({ userId: message.userId, displayName: message.displayName, avatarUrl: message.avatarUrl })}
+            onPress={() => openPerson(message)}
             style={styles.messageAvatar}
           >
             {message.avatarUrl ? <Image source={{ uri: message.avatarUrl }} style={styles.avatarImage} resizeMode="cover" /> : <Text style={styles.avatarInitial}>{initials(message.displayName)}</Text>}
@@ -262,7 +268,11 @@ export default function ChatRoomScreen() {
           accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message. Hold for options.`}
           style={[styles.bubble, dark && styles.bubbleDark, own && (dark ? styles.bubbleOwnDark : styles.bubbleOwn)]}
         >
-          {!own ? <Text style={[styles.senderName, dark && styles.senderNameDark]}>{message.displayName}</Text> : null}
+          {!own ? (
+            <Pressable onPress={() => openPerson(message)} hitSlop={6}>
+              <Text style={[styles.senderName, dark && styles.senderNameDark]}>{message.displayName}</Text>
+            </Pressable>
+          ) : null}
           {message.shared ? <SharedCard shared={message.shared} dark={dark} own={own} onOpen={openShared} /> : null}
           {message.attachment ? <AttachmentBubble attachment={message.attachment} dark={dark} own={own} onOpen={openAttachment} /> : null}
           {message.body ? <MessageBody message={message.body} dark={dark} own={own} onOpenUrl={openExternalUrl} /> : null}
