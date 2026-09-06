@@ -326,7 +326,7 @@ function SectionHeader({ title, dark }: { title: string; dark: boolean }) {
 function SeriesCard({ title, count, colors: palette }: { title: string; count: string; colors: [string, string] }) {
   return (
     <LinearGradient colors={palette} style={styles.seriesCard}>
-      <Text style={styles.seriesTitle}>{title}</Text>
+      <Text style={styles.seriesTitle} numberOfLines={3} adjustsFontSizeToFit minimumFontScale={0.7}>{title}</Text>
       <Text style={styles.seriesCount}>{count}</Text>
     </LinearGradient>
   );
@@ -437,8 +437,8 @@ const styles = StyleSheet.create({
   viewAll: { color: colors.deepGold, fontWeight: '800' },
   viewAllDark: { color: colors.gold },
   seriesRow: { gap: 12, paddingRight: 12 },
-  seriesCard: { width: 162, height: 126, borderRadius: 13, padding: 14, justifyContent: 'space-between', borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)' },
-  seriesTitle: { color: colors.white, fontSize: 20, lineHeight: 22, fontWeight: '900', textTransform: 'uppercase' },
+  seriesCard: { width: 172, height: 126, borderRadius: 13, padding: 14, justifyContent: 'space-between', borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)' },
+  seriesTitle: { color: colors.white, fontSize: 18, lineHeight: 21, fontWeight: '900', textTransform: 'uppercase' },
   seriesCount: { color: 'rgba(255,255,255,0.88)', fontWeight: '800', fontSize: 12 },
   sermonList: { gap: 10 },
   sermonRow: { minHeight: 94, borderRadius: 14, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, padding: 12, flexDirection: 'row', alignItems: 'center', gap: 12, ...shadows.soft },

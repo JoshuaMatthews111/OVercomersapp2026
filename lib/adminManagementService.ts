@@ -1,5 +1,6 @@
 import { AppRole, MediaKind } from '../types/models';
 import { supabase } from './supabase';
+import { postAnnouncement } from './announcementsService';
 
 import { hasSupabase } from './publicEnv';
 
@@ -24,7 +25,9 @@ export async function getAdminWorkbench(): Promise<AdminWorkbench> {
     supabase.from('user_roles').select('user_id, role').limit(80),
     supabase.from('profiles').select('id, display_name, phone').limit(200),
     supabase.from('prayer_requests').select('id, name, category, request, status, assigned_to, created_at').order('created_at', { ascending: false }).limit(40),
-    supabase.from('chat_messages').select('id, channel_id, user_id, body, is_flagged, created_at').order('created_at', { ascending: false }).limit(40),
+    // Only messages the filter actually held. The unfiltered version listed every
+    // recent message under "Held chat messages", so a plain "Hello" looked held.
+    supabase.from('chat_messages').select('id, channel_id, user_id, body, is_flagged, created_at').eq('is_flagged', true).is('deleted_at', null).order('created_at', { ascending: false }).limit(40),
     supabase.from('chat_channels').select('id, name').limit(100),
     supabase.from('app_stories').select('id, title, category, region, status, published_at, expires_at').order('updated_at', { ascending: false }).limit(40),
     supabase.from('media_items').select('id, title, media_type, speaker, status, is_featured, published_at').order('updated_at', { ascending: false }).limit(60),
@@ -139,12 +142,16 @@ export async function updateMediaRecord(id: string, patch: { title?: string; spe
 }
 
 export async function sendAdminPush(input: { title: string; body: string; audience: PushAudience }) {
+  // Store first, so the notice is in the Announcements feed even for phones
+  // that never got the push. Then push. A push failure is reported, but the
+  // announcement stays.
+  const stored = await postAnnouncement({ title: input.title, body: input.body, audience: input.audience });
   const { data, error } = await supabase.functions.invoke('send-push-notification', {
     body: {
       title: input.title,
       body: input.body,
       category: input.audience,
-      data: { source: 'mobile-admin' },
+      data: { source: 'mobile-admin', announcementId: stored.id },
     },
   });
   if (error) throw error;

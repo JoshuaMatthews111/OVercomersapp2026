@@ -400,14 +400,18 @@ async function getProfilesByIds(userIds: string[]) {
   const uniqueIds = [...new Set(userIds)].filter(Boolean);
   const profiles = new Map<string, { displayName: string; phone?: string; avatarUrl?: string }>();
   if (!hasSupabase || !uniqueIds.length) return profiles;
-  const { data } = await supabase
-    .from('profiles')
-    .select('id, display_name, phone, avatar_url')
-    .in('id', uniqueIds);
-  (data || []).forEach((row) => {
+  // Names and pictures come from chat_profiles, which every signed-in person
+  // may read. Phones come from profiles, which only staff may read for other
+  // people; for a member that query simply returns fewer rows.
+  const [names, full] = await Promise.all([
+    supabase.from('chat_profiles').select('id, display_name, avatar_url').in('id', uniqueIds),
+    supabase.from('profiles').select('id, phone').in('id', uniqueIds),
+  ]);
+  const phones = new Map((full.data || []).map((row: any) => [row.id, row.phone || undefined]));
+  (names.data || []).forEach((row: any) => {
     profiles.set(row.id, {
       displayName: row.display_name || 'OGN Member',
-      phone: row.phone || undefined,
+      phone: phones.get(row.id),
       avatarUrl: row.avatar_url || undefined
     });
   });

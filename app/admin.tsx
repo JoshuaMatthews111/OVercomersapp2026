@@ -5,7 +5,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StatusBar, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -62,7 +62,9 @@ export default function AdminScreen() {
   const { access } = useAccessProfile();
   const { themePreference } = useThemePreference();
   const dark = themePreference === 'dark';
-  const [page, setPage] = useState<Page>('home');
+  // The Chat tab's "Send" button deep-links straight to the notice form.
+  const params = useLocalSearchParams<{ page?: string }>();
+  const [page, setPage] = useState<Page>(typeof params.page === 'string' && ['review', 'post', 'people', 'notice', 'library'].includes(params.page) ? (params.page as Page) : 'home');
   const [workbench, setWorkbench] = useState<AdminWorkbench | null>(null);
   const [busy, setBusy] = useState(false);
 

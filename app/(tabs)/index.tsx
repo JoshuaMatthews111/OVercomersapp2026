@@ -292,18 +292,21 @@ function StoryCard({ story, dark, now }: { story: Story; dark: boolean; now: num
 }
 
 function StoriesEmpty({ dark }: { dark: boolean }) {
+  // One wide card, not a ring slot: the ring version crammed two lines of
+  // text into an 86-point column and read as a layout bug on Joshua's phone.
   return (
-    <View style={styles.storyCard}>
-      <View style={[styles.storyRing, styles.storyRingEmpty, dark && styles.storyRingEmptyDark]}>
-        <View style={[styles.storyImageWrap, styles.storyEmptyInner, dark && styles.storyEmptyInnerDark]}>
-          <Ionicons name="sparkles-outline" size={22} color={dark ? 'rgba(255,255,255,0.7)' : colors.muted} />
-        </View>
+    <View style={[styles.storiesEmpty, dark && styles.storiesEmptyDark]}>
+      <View style={[styles.storyRing, styles.storyRingEmpty, dark && styles.storyRingEmptyDark, { width: 54, height: 54, borderRadius: 27 }]}>
+        <Ionicons name="sparkles-outline" size={20} color={dark ? 'rgba(255,255,255,0.7)' : colors.muted} />
       </View>
-      <Text numberOfLines={2} style={[styles.storyTitle, dark && styles.storyTitleDark]}>No stories yet</Text>
-      <Text style={[styles.storyTimer, dark && styles.storyTimerDark]}>check back soon</Text>
+      <View style={{ flex: 1 }}>
+        <Text style={[styles.storiesEmptyTitle, dark && styles.storyTitleDark]}>No stories right now</Text>
+        <Text style={[styles.storiesEmptyBody, dark && styles.storyTimerDark]}>Stories last 24 hours. Leaders post them from Admin, and new ones appear here.</Text>
+      </View>
     </View>
   );
 }
+
 
 function isVideoUrl(url: string) {
   const clean = url.split('?')[0].toLowerCase();
@@ -439,6 +442,10 @@ const styles = StyleSheet.create({
   storyCategory: { fontWeight: '800', fontSize: 12, marginTop: 3, textAlign: 'center' },
   storyTimer: { color: colors.muted, fontWeight: '800', fontSize: 10, marginTop: 2, textAlign: 'center' },
   storyTimerDark: { color: 'rgba(255,255,255,0.58)' },
+  storiesEmpty: { flexDirection: 'row', alignItems: 'center', gap: 12, marginHorizontal: 16, padding: 14, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.7)', borderWidth: 1, borderColor: 'rgba(212,175,55,0.35)' },
+  storiesEmptyDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.3)' },
+  storiesEmptyTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 15 },
+  storiesEmptyBody: { color: colors.muted, fontWeight: '600', fontSize: 12, marginTop: 3, lineHeight: 17 },
   storyRingEmpty: { borderWidth: 2, borderStyle: 'dashed', borderColor: 'rgba(15,23,42,0.18)' },
   storyRingEmptyDark: { borderColor: 'rgba(255,255,255,0.28)' },
   storyEmptyInner: { alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(15,23,42,0.05)' },

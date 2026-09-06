@@ -84,7 +84,23 @@ export default function MapsScreen() {
   }
 
   useEffect(() => {
-    loadAll().catch(() => undefined);
+    // Open on the person, not on the country. Joshua opened the map in Mentor,
+    // Ohio and got the whole United States centered on Canada. Now: load the
+    // territories, then quietly ask where the phone is, pick the smallest
+    // territory around it, and zoom there. No alert if location is off.
+    loadAll()
+      .then(async () => {
+        try {
+          const perm = await Location.getForegroundPermissionsAsync();
+          const status = perm.status === 'granted' ? 'granted' : (await Location.requestForegroundPermissionsAsync()).status;
+          if (status !== 'granted') return;
+          const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+          const here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+          setMyLocation(here);
+          setOpenedOnMe(here);
+        } catch { /* stay on the default view */ }
+      })
+      .catch(() => undefined);
     const unsubscribe = subscribeLiveWorkers(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); });
     const poll = setInterval(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); }, 60 * 1000);
     return () => { unsubscribe(); clearInterval(poll); };
@@ -104,6 +120,22 @@ export default function MapsScreen() {
     }, 60 * 1000);
     return () => clearInterval(beat);
   }, [checkinId]);
+
+  const [openedOnMe, setOpenedOnMe] = useState<LatLng | null>(null);
+  useEffect(() => {
+    if (!openedOnMe || !territoryList.length) return;
+    const rank: Record<string, number> = { street: 0, neighborhood: 1, city: 2, region: 3, country: 4, global: 5 };
+    const distance = (t: Territory) => Math.hypot(t.center.latitude - openedOnMe.latitude, t.center.longitude - openedOnMe.longitude);
+    // Smallest level first, then nearest. A city 0.3 degrees away beats a
+    // country whose center is 20 degrees away.
+    const nearest = [...territoryList]
+      .filter((t) => t.level !== 'global')
+      .sort((a, b) => (rank[a.level] ?? 9) - (rank[b.level] ?? 9) || distance(a) - distance(b))
+      .find((t) => distance(t) < (t.level === 'country' ? 30 : t.level === 'region' ? 6 : 1.5));
+    if (nearest) { setSelected(nearest); setSheet('summary'); }
+    mapRef.current?.animateToRegion({ ...openedOnMe, latitudeDelta: 0.03, longitudeDelta: 0.03 }, 700);
+    setOpenedOnMe(null);
+  }, [openedOnMe, territoryList]);
 
   const children = useMemo(() => territoryList.filter((t) => t.parentId === selected?.id), [selected, territoryList]);
   const drawn = useMemo(() => territoryList.filter((t) => t.boundary?.length), [territoryList]);
