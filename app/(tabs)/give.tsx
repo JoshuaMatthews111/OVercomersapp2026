@@ -59,7 +59,7 @@ export default function GiveScreen() {
           </View>
 
           <View style={[styles.heroCard, dark && styles.heroCardDark]}>
-            <Image source={art.hero} resizeMode="cover" style={styles.heroImage} />
+            <View style={styles.heroImageFrame}><Image source={art.hero} resizeMode="cover" style={styles.heroImage} /></View>
             <View style={styles.heroCopy}><Text style={[styles.heroTitle, dark && styles.heroTitleDark]}>Generosity that reaches further</Text><Text style={[styles.heroBody, dark && styles.heroBodyDark]}>Help bring teaching, prayer and practical care to communities around the world.</Text></View>
           </View>
           <View style={styles.securityRow}>
@@ -149,7 +149,8 @@ const styles = StyleSheet.create({
   subtitleDark: { color: colors.gold },
   heroCard: { borderRadius: 18, borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', overflow: 'hidden', backgroundColor: colors.white, ...shadows.lift },
   heroCardDark: { backgroundColor: '#071B45', borderColor: 'rgba(212,175,55,0.62)' },
-  heroImage: { width: '100%', aspectRatio: 1.7 },
+  heroImageFrame: { width: '100%', aspectRatio: 1.7, overflow: 'hidden' },
+  heroImage: { width: '100%', height: '100%' },
   heroCopy: { padding: 20 },
   heroTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 25, marginTop: 0 },
   heroTitleDark: { color: colors.gold },

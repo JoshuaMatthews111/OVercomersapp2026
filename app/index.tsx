@@ -1,8 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -52,7 +52,7 @@ export default function WelcomeScreen() {
     Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true }).start();
   }, [fadeAnim]);
 
-  useEffect(() => {
+  useFocusEffect(useCallback(() => {
     let mounted = true;
     supabase.auth.getSession()
       .then((sessionResult) => {
@@ -65,7 +65,7 @@ export default function WelcomeScreen() {
       })
       .catch(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
-  }, []);
+  }, []));
 
   async function submitAuth() {
     if (!email.trim() || !password.trim()) {
