@@ -1004,3 +1004,95 @@ export default function Post() {
   });
   assert.equal(g.fires('UPLOAD-PROGRESS'), true, 'a screen with no bar must still fail');
 });
+
+test('a one-line re-export is not asked to lay itself out', () => {
+  // expo-router uses these to give one screen a second address. They hold no
+  // layout at all, so "add a bottom inset here" is advice nobody can follow.
+  // app/welcome.tsx, app/evangelism.tsx and app/evangelism.native.tsx were
+  // each reported twice for this before the detector learned to skip them.
+  const g = gate({
+    'app/welcome.tsx': "/**\n * The welcome screen, reachable by name.\n */\nexport { default } from './index';\n",
+    'app/index.tsx': `${SCREEN_HEAD}
+export default function Index() {
+  const insets = useSafeAreaInsets();
+  return <ScrollView contentContainerStyle={{ flexGrow: 1, paddingBottom: insets.bottom + 16 }}><Text>Hi</Text></ScrollView>;
+}
+`,
+  });
+  const hits = g.findings('OGN-IOS-003').map((f) => f.file);
+  assert.ok(!hits.includes('app/welcome.tsx'), 'a re-export has no layout to fix');
+  assert.ok(!g.findings('AND-EDGE-02').map((f) => f.file).includes('app/welcome.tsx'));
+});
+
+test('a real screen that ignores the bottom of the phone is still caught', () => {
+  const g = gate({
+    'app/bare.tsx': `${SCREEN_HEAD}
+export default function Bare() { return <View style={{ flex: 1 }}><Text>Bottom row</Text></View>; }
+`,
+  });
+  assert.ok(g.findings('OGN-IOS-003').map((f) => f.file).includes('app/bare.tsx'), 'a real screen must still fail');
+});
+
+test('a screen built on the theme tokens counts as theme-aware', () => {
+  // useAppTheme() / theme.colors.* is the token API. A screen using it is more
+  // theme-aware than one writing `dark ? a : b` inline, not less. The first
+  // version of this detector could not see the tokens and reported fully
+  // themed screens as theme-blind.
+  const g = gate({
+    'app/tokened.tsx': `${SCREEN_HEAD}
+import { useAppTheme } from '../lib/themePreference';
+export default function Tokened() {
+  const { theme } = useAppTheme();
+  return <View style={{ flex: 1, backgroundColor: theme.colors.page }}><Text style={{ color: theme.colors.textPrimary }}>Hello</Text></View>;
+}
+`,
+  });
+  assert.ok(!g.findings('THEME-EVERY-SCREEN').map((f) => f.file).includes('app/tokened.tsx'));
+  assert.ok(!g.findings('OGN-IOS-018').map((f) => f.file).includes('app/tokened.tsx'));
+});
+
+test('a screen that reads no theme at all is still caught', () => {
+  // Written WITHOUT the shared SCREEN_HEAD on purpose: that header imports
+  // useThemePreference, which is itself evidence the detector accepts, so a
+  // fixture built on it can never be theme-blind.
+  const g = gate({
+    'app/flat.tsx': `import React from 'react';
+import { View, Text } from 'react-native';
+export default function Flat() { return <View style={{ flex: 1, backgroundColor: '#FFFFFF' }}><Text>Same in both themes</Text></View>; }
+`,
+  });
+  assert.ok(g.findings('THEME-EVERY-SCREEN').map((f) => f.file).includes('app/flat.tsx'), 'a theme-blind screen must still fail');
+});
+
+test('one status bar is one status bar, even beside other react-native imports', () => {
+  // The first version of this check was `A || B && C`, which binds as
+  // `A || (B && C)` — so any file that MENTIONED StatusBar and imported
+  // anything at all from react-native was counted as a second implementation.
+  // app/_layout.tsx does both, so the gate saw two where there was one.
+  const g = gate({
+    'app/_layout.tsx': `import React from 'react';
+import { StatusBar } from 'expo-status-bar';
+import { View, Text } from 'react-native';
+import { useThemePreference } from '../lib/themePreference';
+export default function RootLayout() {
+  const { themePreference } = useThemePreference();
+  return <View><StatusBar style={themePreference === 'dark' ? 'light' : 'dark'} /><Text>App</Text></View>;
+}
+`,
+  });
+  const hits = g.findings('AND-THEME-01').map((f) => f.detail ?? '');
+  assert.ok(!hits.some((m) => /two different status-bar/i.test(m)), 'only one implementation is present');
+});
+
+test('two real status-bar implementations are still caught', () => {
+  const g = gate({
+    'app/_layout.tsx': "import { StatusBar } from 'expo-status-bar';\nexport default function R() { return null; }\n",
+    'app/other.tsx': `import React from 'react';
+import { View, StatusBar } from 'react-native';
+import { useThemePreference } from '../lib/themePreference';
+export default function Other() { const { themePreference } = useThemePreference(); return <View><StatusBar barStyle={themePreference === 'dark' ? 'light-content' : 'dark-content'} /></View>; }
+`,
+  });
+  const hits = g.findings('AND-THEME-01').map((f) => f.detail ?? '');
+  assert.ok(hits.some((m) => /two different status-bar/i.test(m)), 'two implementations really do fight');
+});

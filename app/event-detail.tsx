@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Linking, Pressable, Share, StatusBar, StyleSheet, Text, View } from 'react-native';
+import {ActivityIndicator, Alert, Image, Linking, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 import { Card } from '../components/Card';
 import { Screen } from '../components/Screen';
 import { getEvents } from '../lib/contentService';
@@ -105,7 +105,6 @@ export default function EventDetailScreen() {
 
   return (
     <Screen style={styles.page}>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <View style={styles.header}>
         <Pressable accessibilityRole="button" accessibilityLabel="Back to Home" onPress={goBack} style={styles.backButton}>
           <Ionicons name="chevron-back" size={24} color={theme.colors.accent} />

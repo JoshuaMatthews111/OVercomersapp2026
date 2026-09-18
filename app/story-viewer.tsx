@@ -3,21 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Animated,
-  AppState,
-  Easing,
-  Image,
-  Linking,
-  PanResponder,
-  Pressable,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import {ActivityIndicator, Animated, AppState, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ShareToChatSheet } from '../components/ShareToChat';
 import { storyRemainingLabel } from '../lib/storyTime';
@@ -271,7 +257,6 @@ export default function StoryViewerScreen() {
       colors={theme.pageGradient}
       style={[styles.root, { paddingTop: insets.top + 14, paddingBottom: Math.max(insets.bottom, 10) }]}
     >
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
 
       {/* One bar per story, the way people expect — but past about ten they
           become slivers, so a long ring falls back to a single bar and the

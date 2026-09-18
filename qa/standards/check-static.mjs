@@ -997,8 +997,35 @@ const negativeOffsetClipped = (ctx, rule, out) => {
 D['OGN-IOS-005'] = negativeOffsetClipped;
 D['AND-LAYOUT-03'] = negativeOffsetClipped;
 
+/**
+ * True for a file that only points at another file, e.g.
+ *   export { default } from './index';
+ * expo-router uses these to give one screen a second address. They contain no
+ * layout, no styles and no elements, so every layout rule asked of them is
+ * unanswerable — and telling someone to "add a bottom inset" to a one-line
+ * re-export is advice that cannot be followed.
+ *
+ * Found 2026-09-18: app/welcome.tsx, app/evangelism.tsx and
+ * app/evangelism.native.tsx were each reported twice for ignoring the bottom
+ * of the phone. All three are single-line re-exports. The screens they point
+ * at handle insets correctly.
+ */
+function isReExportOnly(f) {
+  const body = (f.masked || '')
+    .replace(/^\s*\/\*[\s\S]*?\*\/\s*/g, '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('//'))
+    .join(' ')
+    .trim();
+  if (!body) return false;
+  if ((f.elements || []).length > 0) return false;
+  return /^export\s*\{[^}]*\}\s*from\s*['"][^'"]*['"]\s*;?$/.test(body);
+}
+
 const missingBottomInset = (ctx, rule, out) => {
   eachScreen(ctx, (f) => {
+    if (isReExportOnly(f)) return;
     const usesHook = /useSafeAreaInsets\s*\(/.test(f.masked) && /\binsets?\s*(\.|\?\.)\s*bottom/.test(f.masked);
     const safeAreaEls = f.elements.filter((el) => el.name === 'SafeAreaView');
     const safeBottom = safeAreaEls.some((el) => {
@@ -1484,7 +1511,12 @@ const themeEveryScreen = (ctx, rule, out) => {
   for (const f of ctx.files) {
     if (!f.isScreen && !f.isComponent) continue;
     if (!f.elements.length) continue;
-    const readsTheme = /useThemePreference|useColorScheme|themePreference|\bdark\b\s*[?&|=)]|isDark/.test(f.masked);
+    // useAppTheme() / getTheme() / theme.colors.* are the token API added on
+    // 2026-09-18. A screen built on it is MORE theme-aware than one writing
+    // `dark ? a : b` inline, not less — but the first version of this pattern
+    // predated the tokens and could not see them, so it reported fully themed
+    // screens (app/event-detail.tsx, app/index.tsx) as theme-blind.
+    const readsTheme = /useThemePreference|useAppTheme|getTheme\s*\(|theme\.colors|useColorScheme|themePreference|\bdark\b\s*[?&|=)]|isDark/.test(f.masked);
     if (readsTheme) continue;
     out(rule, f, 1, 'Nothing here reads which theme the member chose, so this renders the same in dark mode as in light.');
   }
@@ -1515,7 +1547,16 @@ D['AND-THEME-01'] = (ctx, rule, out) => {
   const bars = new Set();
   for (const f of ctx.files) {
     if (/from\s+['"]expo-status-bar['"]/.test(f.src)) bars.add('expo-status-bar');
-    if (/StatusBar[^A-Za-z][^\n]*from\s+['"]react-native['"]/.test(f.src) || /\bStatusBar\b/.test(f.masked) && /from\s+['"]react-native['"]/.test(f.src)) bars.add('react-native StatusBar');
+    // Only counts if StatusBar is genuinely one of the names imported FROM
+    // react-native. The first version was `A || B && C`, which binds as
+    // `A || (B && C)` — so ANY file that mentioned StatusBar and imported
+    // anything at all from react-native was counted. app/_layout.tsx does
+    // both (it imports the expo one and imports View from react-native), so
+    // the gate reported two implementations fighting when only one was left.
+    for (const m of f.src.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*['"]react-native['"]/g)) {
+      const names = m[1].split(',').map((n) => n.trim().split(/\s+as\s+/)[0].trim());
+      if (names.includes('StatusBar')) bars.add('react-native StatusBar');
+    }
   }
   if (bars.size > 1) {
     out(rule, ctx.files[0], 1, `Two different status-bar implementations are in use (${[...bars].join(' and ')}). They fight each other, and which one wins depends on render order.`);

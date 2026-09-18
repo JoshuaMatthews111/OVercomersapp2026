@@ -3,26 +3,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Animated,
-  Easing,
-  Image,
-  ImageSourcePropType,
-  KeyboardAvoidingView,
-  Linking,
-  Modal,
-  Platform,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-  useWindowDimensions,
-} from 'react-native';
+import { ActivityIndicator, Animated, Easing, Image, ImageSourcePropType, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AccessProfile, useAccessProfile } from '../../lib/accessControl';
 import {
@@ -304,7 +285,6 @@ export default function HomeScreen() {
 
   return (
     <LinearGradient colors={theme.pageGradient} style={styles.root}>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       {/* The globe has to reach the very top of the display, so the safe area
           is applied to the content instead of to the page. */}
       <SafeAreaView style={styles.safe} edges={['left', 'right']}>

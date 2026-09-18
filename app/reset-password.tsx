@@ -3,7 +3,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import * as Linking from 'expo-linking';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import {ActivityIndicator, Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { friendlyError } from '../lib/errorMessages';
 import { supabase } from '../lib/supabase';
@@ -119,7 +119,6 @@ export default function ResetPasswordScreen() {
 
   return (
     <LinearGradient colors={theme.pageGradient} style={styles.root}>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={styles.safe}>
         <KeyboardAvoidingView
           style={styles.filler}

@@ -3,23 +3,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Animated,
-  BackHandler,
-  Image,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import {ActivityIndicator, Alert, Animated, BackHandler, Image, KeyboardAvoidingView, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { friendlyError } from '../lib/errorMessages';
 import { supabase } from '../lib/supabase';
@@ -298,7 +282,6 @@ export default function WelcomeScreen() {
   if (checking) {
     return (
       <LinearGradient colors={theme.pageGradient} style={styles.loadingWrap}>
-        <StatusBar barStyle={theme.dark ? 'light-content' : 'dark-content'} />
         <View style={[styles.loadingCard, { paddingTop: insets.top }]}>
           <ActivityIndicator color={t.accent} size="large" />
           <Text style={[styles.loadingText, { color: t.textSecondary }]}>Checking your sign-in...</Text>
@@ -311,7 +294,6 @@ export default function WelcomeScreen() {
   if (screen === 'splash') {
     return (
       <LinearGradient colors={theme.pageGradient} style={styles.splashContainer}>
-        <StatusBar barStyle={theme.dark ? 'light-content' : 'dark-content'} />
         {/* expo-linear-gradient's iOS layer sets masksToBounds unconditionally
             (node_modules/expo-linear-gradient/ios/LinearGradientLayer.swift:20 and :26),
             so a gradient always clips its children no matter what overflow says.
@@ -434,7 +416,6 @@ export default function WelcomeScreen() {
   const busy = Boolean(busyLabel);
   return (
     <LinearGradient colors={theme.pageGradient} style={[styles.authContainer, { paddingTop: insets.top }]}>
-      <StatusBar barStyle={theme.dark ? 'light-content' : 'dark-content'} />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
         <ScrollView
           contentContainerStyle={[styles.authScroll, { paddingBottom: Math.max(insets.bottom, 8) + 32 }]}

@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { useState } from 'react';
-import { Image, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card } from '../components/Card';
 import { Screen } from '../components/Screen';
 import { AppTheme, createThemedStyles } from '../lib/theme';
@@ -40,7 +40,6 @@ export default function StoryDetailScreen() {
     <Screen style={{ backgroundColor: theme.colors.page }}>
       {/* The shared Screen paints a light cream page, so in dark theme the
           status-bar glyphs have to be told to turn white. */}
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <View style={styles.header}>
         <Pressable accessibilityRole="button" accessibilityLabel="Back to Home" onPress={goBack} style={styles.backButton}>
           <Ionicons name="chevron-back" size={24} color={theme.colors.textPrimary} />

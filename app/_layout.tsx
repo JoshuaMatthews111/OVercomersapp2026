@@ -7,6 +7,7 @@ import { Session } from '@supabase/supabase-js';
 import { ActivityIndicator, Pressable, Text, View } from 'react-native';
 import { supabase } from '../lib/supabase';
 import { colors } from '../lib/theme';
+import { useThemePreference } from '../lib/themePreference';
 
 export const unstable_settings = { initialRouteName: 'welcome' };
 
@@ -21,6 +22,7 @@ export const unstable_settings = { initialRouteName: 'welcome' };
 const SIGNED_OUT_EVENTS = new Set<string>(['SIGNED_OUT', 'USER_DELETED']);
 
 export default function RootLayout() {
+  const { themePreference } = useThemePreference();
   const [session, setSession] = useState<Session | null>(null);
   const [ready, setReady] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -141,7 +143,12 @@ export default function RootLayout() {
 
   return (
     <SafeAreaProvider>
-      <StatusBar style="auto" />
+      {/* ONE status bar for the whole app, following the theme the person
+          chose — not the phone's setting. style="auto" used to follow the
+          phone, so choosing the dark theme on a light phone hid the clock
+          and battery. Five screens each carried their own competing
+          <StatusBar>; those are gone. Do not add another one. */}
+      <StatusBar style={themePreference === 'dark' ? 'light' : 'dark'} />
       <NowPlayingProvider key={playerGeneration}>
         <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
           <Stack.Screen name="welcome" />

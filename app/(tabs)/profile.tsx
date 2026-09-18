@@ -4,7 +4,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Linking, Pressable, RefreshControl, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
 import { recordGivingSelection } from '../../lib/contentService';
@@ -601,7 +601,6 @@ export default function ProfileScreen() {
 
   return (
     <LinearGradient colors={theme.pageGradient} style={styles.root}>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <SafeAreaView style={styles.safe} edges={['left', 'right', 'bottom']}>
         <ScrollView
           contentContainerStyle={styles.scroll}

@@ -70,6 +70,7 @@ const fromBundle: Record<string, string | undefined> = {
   EXPO_PUBLIC_BIBLE_ID_NLT: process.env.EXPO_PUBLIC_BIBLE_ID_NLT,
   EXPO_PUBLIC_BIBLE_ID_AMP: process.env.EXPO_PUBLIC_BIBLE_ID_AMP,
   EXPO_PUBLIC_GIVING_URL: process.env.EXPO_PUBLIC_GIVING_URL,
+  EXPO_PUBLIC_GIVING_CARD_URL: process.env.EXPO_PUBLIC_GIVING_CARD_URL,
   EXPO_PUBLIC_LIVE_STREAM_URL: process.env.EXPO_PUBLIC_LIVE_STREAM_URL,
 };
 
@@ -82,3 +83,17 @@ export function publicEnv(name: keyof typeof fromBundle): string | undefined {
 export const SUPABASE_URL = publicEnv('EXPO_PUBLIC_SUPABASE_URL') || '';
 export const SUPABASE_ANON_KEY = publicEnv('EXPO_PUBLIC_SUPABASE_ANON_KEY') || '';
 export const hasSupabase = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+
+/**
+ * Where giving happens. Both addresses live here rather than inside the Give
+ * screen, so there is one place to change them and no address is typed into a
+ * screen. The literals are the ones the app has always shipped with and they
+ * stay as the fallback on purpose: losing them would break the one thing the
+ * owner says already works (DO-NOT-BREAK: Give opens the giving page).
+ */
+export const GIVING_PAGE_URL =
+  publicEnv('EXPO_PUBLIC_GIVING_URL') || 'https://overcomersglobalnetwork.com/give/';
+
+/** The card-payment page. Set EXPO_PUBLIC_GIVING_CARD_URL to change it. */
+export const GIVING_CARD_URL =
+  publicEnv('EXPO_PUBLIC_GIVING_CARD_URL') || 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b';

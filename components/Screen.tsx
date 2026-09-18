@@ -1,5 +1,5 @@
 import React from 'react';
-import { ScrollView, StatusBar, StyleSheet, ViewStyle } from 'react-native';
+import { ScrollView, StyleSheet, ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createThemedStyles } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
@@ -34,7 +34,6 @@ export function Screen({ children, scroll = true, style }: { children: React.Rea
   if (!scroll) {
     return (
       <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={[styles.safe, style]}>
-        <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
         {children}
       </SafeAreaView>
     );
@@ -42,7 +41,6 @@ export function Screen({ children, scroll = true, style }: { children: React.Rea
 
   return (
     <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={[styles.safe, style]}>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <ScrollView
         style={styles.scrollView}
         contentContainerStyle={styles.scroll}

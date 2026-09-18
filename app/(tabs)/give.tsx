@@ -2,24 +2,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Image,
-  Linking,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StatusBar,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { ActivityIndicator, Alert, Image, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { getGivingLinks, recordGivingSelection } from '../../lib/contentService';
 import { friendlyError } from '../../lib/errorMessages';
-import { publicEnv } from '../../lib/publicEnv';
+import { publicEnv, GIVING_PAGE_URL, GIVING_CARD_URL } from '../../lib/publicEnv';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
 import { GivingLink } from '../../types/models';
@@ -33,8 +20,8 @@ const presetAmounts = [25, 50, 100, 500];
  * is confirmed present in every store build — losing it would break the one
  * thing the owner says already works (DO-NOT-BREAK: Give opens the giving page).
  */
-const givingPageUrl = publicEnv('EXPO_PUBLIC_GIVING_URL') || 'https://overcomersglobalnetwork.com/give/';
-const customStripeUrl = 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b';
+const givingPageUrl = GIVING_PAGE_URL;
+const customStripeUrl = GIVING_CARD_URL;
 
 const art = {
   seal: require('../../assets/images/ogn-logo-transparent.png'),
@@ -150,7 +137,6 @@ export default function GiveScreen() {
 
   return (
     <LinearGradient colors={theme.pageGradient} style={styles.root}>
-      <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <SafeAreaView style={styles.safe}>
         <ScrollView
           contentContainerStyle={styles.scroll}

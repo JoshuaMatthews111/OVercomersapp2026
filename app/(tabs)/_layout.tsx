@@ -2,7 +2,9 @@ import { router, Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { ColorValue, Platform, ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useEffect, useState } from 'react';
-import { colors } from '../../lib/theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as NavigationBar from 'expo-navigation-bar';
+import { colors, getTheme } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
 import { supabase } from '../../lib/supabase';
 import { friendlyError } from '../../lib/errorMessages';
@@ -17,6 +19,9 @@ import { ensurePushRegistered } from '../../lib/pushBootstrap';
  * person to sign in always gets their own check.
  */
 let accountStandingChecked = false;
+
+/** Icon + label + top padding. The phone's own bottom inset is added to this. */
+const TAB_BAR_CONTENT_HEIGHT = 58;
 
 function icon(name: keyof typeof Ionicons.glyphMap, activeName?: keyof typeof Ionicons.glyphMap) {
   return ({ color, size, focused }: { color: ColorValue; size: number; focused: boolean }) => (
@@ -43,6 +48,8 @@ function giveHandsIcon({ color, size, focused }: { color: ColorValue; size: numb
 export default function TabLayout() {
   const { themePreference } = useThemePreference();
   const dark = themePreference === 'dark';
+  const theme = getTheme(dark);
+  const insets = useSafeAreaInsets();
   // Only the very first check makes anyone wait. After that we already know.
   const [checkingSession, setCheckingSession] = useState(() => !accountStandingChecked);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -138,18 +145,35 @@ export default function TabLayout() {
       <View style={[styles.loadingRoot, { backgroundColor: dark ? colors.deepBlue : colors.white, paddingHorizontal: 24 }]}>
         <Ionicons name="warning-outline" size={34} color={colors.gold} />
         <Text style={[styles.errorTitle, { color: dark ? colors.white : colors.royalBlue }]}>Account loading needs a retry</Text>
-        <Text style={[styles.errorBody, { color: dark ? 'rgba(255,255,255,0.72)' : colors.slate }]}>{sessionError}</Text>
-        <Pressable onPress={() => { setCheckingSession(true); setSessionError(null); setSessionCheckNonce((value) => value + 1); }} style={styles.retryButton}>
+        <Text style={[styles.errorBody, { color: theme.colors.textSecondary }]}>{sessionError}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Try loading your account again"
+          onPress={() => { setCheckingSession(true); setSessionError(null); setSessionCheckNonce((value) => value + 1); }}
+          style={styles.retryButton}
+        >
           <Text style={styles.retryText}>Try Again</Text>
         </Pressable>
-        <Pressable onPress={async () => { await supabase.auth.signOut({ scope: 'local' }); router.replace('/welcome'); }} style={styles.signOutButton}>
-          <Text style={[styles.signOutText, { color: dark ? colors.white : colors.royalBlue }]}>Back to Sign In</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Go back to the sign in screen"
+          onPress={async () => { await supabase.auth.signOut({ scope: 'local' }); router.replace('/welcome'); }}
+          style={styles.signOutButton}
+        >
+          <Text style={[styles.signOutText, { color: theme.colors.textPrimary }]}>Back to Sign In</Text>
         </Pressable>
       </View>
     );
   }
 
   return (
+    <>
+    {/* Android is edge-to-edge under SDK 57, so the app draws behind the
+        system bars and only their icon colour is ours to set. The package's
+        own two doc blocks disagree on which way round 'light' and 'dark'
+        read, so this follows NavigationBarStyle: 'dark' is a dark bar with
+        light content. Worth a look on a real Android phone. */}
+    {Platform.OS === 'android' ? <NavigationBar.NavigationBar style={dark ? 'dark' : 'light'} /> : null}
     <Tabs screenOptions={{
       headerShown: false,
       // Gold sings on the navy tab bar. On the white one it is the palest
@@ -157,12 +181,16 @@ export default function TabLayout() {
       // unselected ones; navy is the light theme's own emphasis colour.
       tabBarActiveTintColor: dark ? colors.gold : colors.royalBlue,
       tabBarInactiveTintColor: dark ? 'rgba(255,255,255,0.62)' : '#667085',
+      // The bar is sized from the phone's OWN bottom inset, not from a fixed
+      // number per platform. Android is edge-to-edge under SDK 57, so a fixed
+      // 72 put the six tabs underneath the gesture bar on a tall phone. A
+      // minimum of 10 keeps the bar from collapsing on a device with no inset.
       tabBarStyle: {
-        height: Platform.OS === 'ios' ? 88 : 72,
+        height: TAB_BAR_CONTENT_HEIGHT + Math.max(insets.bottom, 10),
         paddingTop: 8,
-        paddingBottom: Platform.OS === 'ios' ? 28 : 10,
-        borderTopColor: dark ? 'rgba(212,175,55,0.18)' : '#E5E7EB',
-        backgroundColor: dark ? '#061334' : colors.white,
+        paddingBottom: Math.max(insets.bottom, 10),
+        borderTopColor: theme.colors.border,
+        backgroundColor: theme.colors.navBar,
       },
       tabBarLabelStyle: { fontSize: 12, fontWeight: '600' },
     }}>
@@ -173,6 +201,7 @@ export default function TabLayout() {
       <Tabs.Screen name="bible" options={{ title: 'Bible', tabBarIcon: icon('book-outline', 'book') }} />
       <Tabs.Screen name="profile" options={{ title: 'More', tabBarIcon: icon('ellipsis-horizontal-circle-outline', 'ellipsis-horizontal-circle') }} />
     </Tabs>
+    </>
   );
 }
 
@@ -201,7 +230,8 @@ const styles = StyleSheet.create({
   },
   retryButton: {
     marginTop: 20,
-    minHeight: 46,
+    minHeight: 48,   // 44 for iOS, 48 for Android; take the larger
+    minWidth: 48,
     borderRadius: 12,
     paddingHorizontal: 22,
     alignItems: 'center',
@@ -215,7 +245,8 @@ const styles = StyleSheet.create({
   },
   signOutButton: {
     marginTop: 12,
-    minHeight: 42,
+    minHeight: 48,   // 44 for iOS, 48 for Android; take the larger
+    minWidth: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
