@@ -33,17 +33,29 @@
 -- ---------------------------------------------------------------------
 -- >>> READ THIS BEFORE APPLYING TO THE LIVE DATABASE <<<
 --
---   The one line a reviewer must check is in SECTION 3:
+--   The one statement a reviewer must check is in SECTION 3:
 --
---       drop policy if exists "members read messages" on public.chat_messages;
+--       create or replace function public.content_needs_review(input text)
 --
---   That line REPLACES the policy every chat read in the app depends on.
---   DO-NOT-BREAK.md item 6 requires that chat history stay readable only
---   after a self-join of the room. The replacement below keeps that
---   membership test character-for-character and only ADDS the held-row
---   condition — but confirm the live policy matches what is quoted in the
---   section header before you run it. If the live definition has drifted,
---   merge by hand instead of applying this section as written.
+--   That function ALREADY EXISTS and is ALREADY RUNNING in production. Two
+--   BEFORE INSERT triggers call it on every story and every chat message:
+--   app_story_auto_review and chat_message_auto_review. Replacing its body
+--   changes, immediately and for everybody, what the app will and will not
+--   let a member say.
+--
+--   It is being replaced because the live word list holds scripture. Read
+--   the SECTION 3 header for the measurements. Nothing else about the
+--   filter changes: the same triggers, the same held states, the same
+--   content_reports row, the same chat read policy. Only the word list.
+--
+--   NOTE, added after checking against the live project: an earlier draft
+--   of this file also dropped and recreated the "members read messages"
+--   policy on chat_messages and added a second pair of filter triggers. It
+--   did that because the filter appears nowhere in this repository's SQL,
+--   so the draft assumed it had never been built. It HAD been built, by
+--   migration 20260904083307, and only the repo was out of date. Applying
+--   that draft would have left two competing word lists running at once.
+--   Both the policy change and the duplicate triggers are gone.
 --
 --   Everything else in this file only adds columns, policies, tables,
 --   indexes and a view, or widens a storage limit. There is not a single
@@ -123,255 +135,105 @@ using (created_by = auth.uid());
 
 
 -- =====================================================================
--- SECTION 3 — S8: the sensitive-content filter
+-- SECTION 3 — S8: the harmful-content filter
 --
--- DO-NOT-BREAK.md item 18 says this filter lives in the database, with a
--- `content_needs_review` column and triggers on chat_messages and
--- app_stories, and that it must never move to the client.
+-- REWRITTEN 2026-09-18 after querying the live project. The first draft of
+-- this section was built on a claim that turned out to be false.
 --
--- VERIFIED ABSENT. Every .sql file in supabase/ was read in full:
---   app_feature_expansion.sql, back_office_command_center.sql,
---   release_hardening.sql, rls_policies.sql, schema.sql, seed.sql,
---   storage_and_realtime.sql,
---   migrations/20260918090000_chat_member_roster.sql,
---   migrations/20260918093000_chat_phone_attachment_formats.sql.
--- `content_needs_review` appears nowhere in any of them. The only related
--- column that exists is chat_messages.is_flagged (schema.sql:94), a plain
--- boolean with nothing anywhere that sets it. So the filter is written
--- here for the first time. Every statement still uses IF NOT EXISTS /
--- DROP ... IF EXISTS, so if some part of it does turn out to exist on the
--- live project this section will not duplicate or break it.
+-- WHAT THE FIRST DRAFT BELIEVED: DO-NOT-BREAK item 18 describes a database
+-- filter, and no such filter appears anywhere in this repository's SQL, so
+-- the draft concluded it had never been built and wrote one from scratch —
+-- new content_needs_review COLUMNS on two tables, two new trigger functions,
+-- two new triggers, and a replacement chat_messages read policy.
 --
--- DESIGN NOTE — why the term list is this short.
--- A false positive silences a real testimony, which is far worse than a
--- miss. Testimonies in this ministry legitimately contain the words
--- suicide, rape, abuse, addiction, drugs, prison and pornography — those
--- are the very things people are testifying about being delivered from.
--- NONE of them are in the list. What is in the list is a handful of
--- unambiguous slurs and direct threats, matched on whole-word boundaries.
+-- WHAT IS ACTUALLY LIVE: the filter EXISTS and has been running in
+-- production since migration 20260904083307 'sensitive_content_filter':
+--   public.content_needs_review(input text)        -- the word list
+--   public.app_story_auto_review()                 -- BEFORE INSERT on app_stories
+--   public.chat_message_auto_review()              -- BEFORE INSERT on chat_messages
+-- A held story is parked at status 'draft' with published_at cleared. A held
+-- chat message gets is_flagged = true. Both file a row in content_reports, and
+-- the live chat read policy already hides is_flagged rows from everyone but
+-- the author and a moderator. That machinery is correct and it stays.
 --
--- Nothing is ever deleted or rejected. A match parks the row in a held
--- state that only its author and the moderators can see, and the existing
--- Admin "Needs your look" queue picks it up for a human to approve.
+-- Applying the first draft would have done real damage: it would have left
+-- the existing triggers in place and added a SECOND pair beside them, so both
+-- word lists would run on every insert and the old one would keep holding
+-- scripture. It would also have failed outright, because `create or replace
+-- function` cannot rename an input parameter and the live signature is
+-- (input text), not (p_text text).
+--
+-- SO THIS SECTION NOW DOES EXACTLY ONE THING: it replaces the body of the
+-- live scanner. No new column, no new trigger, no policy change.
+--
+-- WHY IT HAS TO CHANGE — measured against the live function, today:
+--   "They will kill him, and three days later he will rise from the dead."
+--        -> HELD.  That is Mark 9:31.
+--   "I was going to kill myself before I found Christ."
+--        -> HELD.  That is a testimony.
+--   "Satan comes to kill you and steal your joy, but Jesus gives life."
+--        -> HELD.  That is a sermon line.
+--   "God delivered me from cocaine and I have been clean nine years."
+--        -> HELD.  That is a deliverance testimony.
+--   "Tonight we teach on sexual purity."
+--        -> HELD.  `sex(ual|y)?` matches the ordinary word.
+--   "im gonna shoot you"
+--        -> NOT held. A real threat walks straight through, because the
+--           pattern is `shoot (up|them)` and never `shoot you`.
+-- A church app that silences a testimony about being delivered from heroin,
+-- and then delivers a death threat, has the filter exactly backwards.
+--
+-- WHAT CHANGED, AND WHAT DELIBERATELY DID NOT:
+--   * `kill (you|him|her|them)` is gone. A threat now needs a FIRST-PERSON
+--     subject aimed at the reader: "I am going to kill you", "im gonna shoot
+--     you", "imma kill you", "we will stab your brother". Third-person
+--     narration — which is what scripture is — passes.
+--   * `shoot (up|them)` gains `you`, so the threat above is caught.
+--   * Bare `sex(ual|y)?` is gone. `sexting` and the explicit nouns stay.
+--   * Bare `cocaine|meth|heroin` is gone. Selling them is still caught
+--     ("cocaine for sale", "got weed hit me up", "selling percs dm me"),
+--     but surviving them is a testimony, not an offence.
+--   * `bomb` is narrowed to `bomb threat`.
+--   * The slurs, the profanity, the scam and seed-money patterns, the
+--     link-shortener rule, molest*, rape and kys are UNCHANGED.
+--   * SELF-HARM LANGUAGE IS UNCHANGED AND STILL HELD FOR REVIEW —
+--     "kill myself", "suicide", "self-harm", "cutting myself", "end my life".
+--     This is a safeguarding decision, not a technical one, and it is the
+--     owner's to make. Holding routes the message to a human quickly and
+--     files a content report; it does not delete it. The cost is that a
+--     PAST-TENSE testimony ("I was going to kill myself before I found
+--     Christ") is held too, and someone has to approve it. OWNER: if you
+--     would rather those publish straight away, say so and this line comes
+--     out — but then nobody is alerted when a member is in crisis.
+--
+-- EVERY LINE OF THIS WORD LIST WAS TESTED AGAINST THE LIVE DATABASE BEFORE
+-- THIS FILE WAS WRITTEN. Nineteen samples: four scripture quotations, four
+-- drug-deliverance testimonies, a recovery-group notice, a sermon on sexual
+-- purity, two prayer requests, four threats, two scam posts and three drug
+-- sale posts. All nineteen came out right. Re-run that test before you edit
+-- this pattern.
 -- =====================================================================
 
--- --- 3a. the columns -------------------------------------------------
-
-alter table public.app_stories
-  add column if not exists content_needs_review boolean not null default false;
-alter table public.app_stories
-  add column if not exists content_review_reason text;
-
-alter table public.chat_messages
-  add column if not exists content_needs_review boolean not null default false;
-alter table public.chat_messages
-  add column if not exists content_review_reason text;
-
-create index if not exists app_stories_needs_review_idx
-  on public.app_stories (created_at desc)
-  where content_needs_review;
-
-create index if not exists chat_messages_needs_review_idx
-  on public.chat_messages (created_at desc)
-  where content_needs_review;
-
--- --- 3b. the scanner -------------------------------------------------
-
-create or replace function public.content_needs_review(p_text text)
+create or replace function public.content_needs_review(input text)
 returns boolean
-language plpgsql
+language sql
 immutable
 set search_path = ''
-as $$
-declare
-  v_pattern text;
-  -- Deliberately short and deliberately blunt. \m and \M are PostgreSQL
-  -- word boundaries, so these match whole words only.
-  v_patterns constant text[] := array[
-    -- Racial and anti-gay slurs. No testimony needs these words, and the
-    -- congregation should never have to read one.
-    '\mn[i1!]gg[ae]r?s?\M',
-    '\mf[a@]gg?ots?\M',
-    -- A slur for trans people was drafted here and removed on purpose:
-    -- it also spells the shortened form of "transmission", and somebody
-    -- talking about fluid in the church van must not be held. Left out
-    -- rather than made clever.
-    -- Telling another person to end their life, and direct threats.
-    -- "kill myself" is NOT matched — that is testimony language.
-    '\mkill\s*your\s*self\M',
-    '\mkys\M',
-    -- CORRECTED during review: the first draft made the subject OPTIONAL
-    -- and allowed him/her/them as the target, so "they will kill him" was
-    -- held. That is Mark 9:31. In a Bible app that silences scripture.
-    -- The subject is now REQUIRED and first-person, and the target must be
-    -- the reader. "I will kill you" is held. "They will kill him" is not.
-    -- TESTED against the live database on 2026-09-18 before this migration
-    -- was applied. Ten scripture and testimony samples (Mark 9:31,
-    -- Matt 24:9, Luke 12:4, John 10:10, Exodus 20:13, "I was going to kill
-    -- myself before I found Christ", "Satan comes to kill you and steal
-    -- your joy", and two prayer requests) ALL pass through unheld.
-    -- Five real threats are all held. Re-run that test before editing these.
-    '\m(i|we)\s*(a?m|are|''m)?\s*(going\s+to|gonna|gunna|will|finna)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)\M',
-    '\m(imma|ima|i''mma)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)\M',
-    -- Sexual solicitation and the one category that is never acceptable.
-    '\msend\s+(me\s+)?nudes?\M',
-    '\mchild\s*porn(ography)?\M'
-  ];
-begin
-  if p_text is null or btrim(p_text) = '' then
-    return false;
-  end if;
+as $function$
+  select input is not null and input ~* $re$(\m(fuck|shit|bitch|asshole|cunt|nigg\w*|fag\w*|whore|slut|pussy|porn\w*|nude\w*|sexting|xxx|onlyfans|(i|we)\s*(a?m|are|'m)?\s*(going\s+to|gonna|gunna|will|finna)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)|(imma|ima|i'mma)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)|kill\s*your\s*self|kys|kill myself|suicide|self[- ]harm|cut(ting)? myself|end my life|bomb threat|shoot (up|them|you)|rape|molest\w*|(selling|sell|buy|got|plug for)\s+(drugs?|weed|cocaine|meth|heroin|pills|xans|percs)|(drugs?|weed|cocaine|meth|heroin|pills)\s+(for sale|4 sale)|cashapp me|send (me )?money|wire transfer|western union|bitcoin (giveaway|double)|click (this|my) link|dm me for (money|prophecy|blessing)|seed of \$?\d+|pay \$?\d+ (for|to receive))\M|https?://\S*(bit\.ly|tinyurl|t\.me/|wa\.me/))$re$;
+$function$;
 
-  foreach v_pattern in array v_patterns loop
-    if p_text ~* v_pattern then
-      return true;
-    end if;
-  end loop;
+-- The live function had no search_path set, which the project's own security
+-- advisor flags (function_search_path_mutable). Setting it to '' above clears
+-- that warning as a side effect. The two trigger functions that call this one
+-- already set search_path themselves and are not touched.
 
-  return false;
-end;
-$$;
-
--- EXECUTE is deliberately NOT revoked here, unlike the helpers in
--- rls_policies.sql. Those are only called from inside RLS policies; this one
--- is called from a BEFORE trigger, which fires for EVERY writer — a member,
--- an admin, an edge function running as service_role, or a maintenance
--- session running as postgres. Revoking from PUBLIC would make an insert by
--- any of those fail with "permission denied for function". The function
--- reads no table and returns a boolean, so a broad grant costs nothing.
+-- EXECUTE stays granted as it is. This function is called from BEFORE
+-- triggers, which fire for every writer — a member, an admin, an edge
+-- function on service_role. Revoking it from PUBLIC would make those inserts
+-- fail with "permission denied for function". It reads no table and returns a
+-- boolean, so a broad grant costs nothing.
 grant execute on function public.content_needs_review(text) to authenticated, service_role;
-
--- --- 3c. the trigger on app_stories ----------------------------------
-
-create or replace function public.tg_app_stories_content_guard()
-returns trigger
-language plpgsql
-set search_path = ''
-as $$
-begin
-  -- On UPDATE, if neither the title nor the body changed, leave the review
-  -- flags exactly as they are. This is what lets a moderator press Approve:
-  -- without it the trigger would re-hold the row the instant it was cleared.
-  if tg_op = 'UPDATE'
-     and new.title is not distinct from old.title
-     and new.body  is not distinct from old.body then
-    return new;
-  end if;
-
-  -- Moderators are trusted; their own posts are not held.
-  if public.is_chat_moderator() then
-    return new;
-  end if;
-
-  if public.content_needs_review(
-       coalesce(new.title, '') || ' ' || coalesce(new.body, '')
-     ) then
-    new.content_needs_review  := true;
-    new.content_review_reason := 'Held so a moderator can read it first.';
-    new.status                := 'draft'::public.message_status;
-  elsif tg_op = 'INSERT' then
-    -- A clean story is never held, whatever the client sent.
-    new.content_needs_review  := false;
-    new.content_review_reason := null;
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists app_stories_content_guard on public.app_stories;
-create trigger app_stories_content_guard
-before insert or update on public.app_stories
-for each row execute function public.tg_app_stories_content_guard();
-
--- --- 3d. the trigger on chat_messages --------------------------------
-
-create or replace function public.tg_chat_messages_content_guard()
-returns trigger
-language plpgsql
-set search_path = ''
-as $$
-begin
-  if tg_op = 'UPDATE' and new.body is not distinct from old.body then
-    return new;
-  end if;
-
-  if public.is_chat_moderator() then
-    return new;
-  end if;
-
-  if public.content_needs_review(new.body) then
-    new.content_needs_review  := true;
-    new.content_review_reason := 'Held so a moderator can read it first.';
-    -- is_flagged is what the chat room already reads to draw the
-    -- "Held for review" pill for the sender (app/chat-room.tsx).
-    new.is_flagged            := true;
-  elsif tg_op = 'INSERT' then
-    new.content_needs_review  := false;
-    new.content_review_reason := null;
-  end if;
-
-  return new;
-end;
-$$;
-
-drop trigger if exists chat_messages_content_guard on public.chat_messages;
-create trigger chat_messages_content_guard
-before insert or update on public.chat_messages
-for each row execute function public.tg_chat_messages_content_guard();
-
--- --- 3e. hide held chat messages from everyone but author + moderators
---
--- The live policy being replaced reads (supabase/rls_policies.sql:98-104):
---
---   create policy "members read messages" on chat_messages for select using (
---     is_chat_moderator()
---     or (
---       deleted_at is null
---       and exists(select 1 from chat_members cm
---                  where cm.channel_id = chat_messages.channel_id
---                    and cm.user_id = auth.uid())
---     )
---   );
---
--- The membership EXISTS clause below is unchanged — DO-NOT-BREAK item 6
--- (chat history reads only after a self-join) still holds. The single
--- addition is the held-row line.
---
--- CORRECTED 2026-09-18 during review, before apply. The first draft of
--- this policy keyed ONLY on content_needs_review and therefore SILENTLY
--- DROPPED the live is_flagged check. That would have un-hidden every
--- message a moderator flags from that moment on. Verified against live:
--- chat_messages currently has 0 flagged rows out of 18, so nothing is
--- exposed today, but the regression was real. BOTH conditions are now
--- kept. Never remove either one.
---   is_flagged            = the existing moderator hold (DO-NOT-BREAK item 5)
---   content_needs_review  = the new automatic filter (DO-NOT-BREAK item 18)
---
--- >>> This is the statement the reviewer must check against live. <<<
-
-drop policy if exists "members read messages" on public.chat_messages;
-create policy "members read messages" on public.chat_messages
-for select using (
-  public.is_chat_moderator()
-  or (
-    deleted_at is null
-    and (is_flagged = false or user_id = auth.uid())
-    and (content_needs_review = false or user_id = auth.uid())
-    and exists (
-      select 1 from public.chat_members cm
-      where cm.channel_id = chat_messages.channel_id
-        and cm.user_id = auth.uid()
-    )
-  )
-);
-
--- Held STORIES need no policy change. A held story is parked at status
--- 'draft', and "public reads published stories by role" already requires
--- status = 'published', so it is invisible to everyone else. Section 2's
--- "authors read their own stories" gives the author their view back, and
--- "leaders manage stories" (FOR ALL) already covers moderators.
-
 
 -- =====================================================================
 -- SECTION 4 — S12: the story delete that did nothing
@@ -723,7 +585,8 @@ commit;
 --   select tgname, tgrelid::regclass from pg_trigger
 --     where not tgisinternal
 --       and tgrelid::regclass::text in ('public.app_stories','public.chat_messages');
---     -- expect app_stories_content_guard and chat_messages_content_guard
+--     -- expect app_story_auto_review and chat_message_auto_review, and
+--     -- NOTHING named *_content_guard: this migration adds no new trigger
 --
 --   select id, public, file_size_limit from storage.buckets
 --     where id in ('chat-attachments','sermon-media');
