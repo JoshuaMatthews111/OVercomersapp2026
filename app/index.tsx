@@ -19,7 +19,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { friendlyError } from '../lib/errorMessages';
 import { supabase } from '../lib/supabase';
 import { colors } from '../lib/theme';
@@ -35,6 +35,11 @@ const tabsRoute = '/(tabs)' as const;
 
 export default function WelcomeScreen() {
   const insets = useSafeAreaInsets();
+  const frame = useSafeAreaFrame();
+  // Short phones (iPhone SE / 8 at 667pt, iPhone 13 mini at 812pt) get a
+  // tightened version of the same welcome so all of it fits without scrolling.
+  // Taller phones keep the roomier spacing they already have.
+  const compactSplash = frame.height < 820;
   const { themePreference, setThemePreference } = useThemePreference();
   const isDarkTheme = themePreference === 'dark';
   const [screen, setScreen] = useState<Screen>('splash');
@@ -182,42 +187,80 @@ export default function WelcomeScreen() {
     return (
       <LinearGradient colors={isDarkTheme ? ['#0D2255', '#071231', '#040B1F'] : ['#FFFFFF', '#FFF8E6', '#F7F3E6']} style={styles.splashContainer}>
         <StatusBar barStyle={isDarkTheme ? 'light-content' : 'dark-content'} />
-        <Animated.View style={[styles.splashInner, { opacity: fadeAnim, paddingTop: insets.top + 40, paddingBottom: insets.bottom + 24 }]}>
-          {/* OGN Logo / Seal */}
-          <View style={styles.sealWrap}>
-            <Image source={require('../assets/images/ogn-logo-transparent.png')} resizeMode="cover" style={styles.sealImage} />
-          </View>
+        {/* expo-linear-gradient's iOS layer sets masksToBounds unconditionally
+            (node_modules/expo-linear-gradient/ios/LinearGradientLayer.swift:20 and :26),
+            so a gradient always clips its children no matter what overflow says.
+            Everything therefore stays inside the gradient and scrolls within it,
+            which is also what keeps the theme picker and Get Started reachable on
+            a short phone. Nothing here needs to sit outside the gradient. */}
+        <ScrollView
+          style={styles.splashScroll}
+          contentContainerStyle={[
+            styles.splashScrollContent,
+            {
+              paddingTop: insets.top + (compactSplash ? 14 : 20),
+              paddingBottom: Math.max(insets.bottom, 8) + (compactSplash ? 12 : 16),
+            },
+          ]}
+          showsVerticalScrollIndicator={false}
+          bounces={false}
+          alwaysBounceVertical={false}
+        >
+          <Animated.View style={[styles.splashInner, { opacity: fadeAnim }]}>
+            {/* OGN Logo / Seal.
+                The crest PNG is 614x614 and its artwork sits on rows 216-528, so
+                the canvas carries a lot of empty space above the seal and a little
+                below it. "contain" keeps the whole seal — the EDUCATE. EQUIP.
+                EVOLVE. ribbon and the base of the book included — and the small
+                upward nudge centres the artwork inside the plate instead of
+                centring the empty canvas. "cover" used to slice the ribbon off. */}
+            <View style={[styles.sealWrap, compactSplash && styles.sealWrapCompact]}>
+              <Image
+                source={require('../assets/images/ogn-logo-transparent.png')}
+                resizeMode="contain"
+                accessible
+                accessibilityLabel="Overcomers Global Network crest"
+                style={[styles.sealImage, compactSplash && styles.sealImageCompact]}
+              />
+            </View>
 
-          <View style={styles.splashWordmarkTextWrap}>
-            <Text style={[styles.splashWordmarkText, !isDarkTheme && styles.splashWordmarkTextLight]}>OVERCOMERS{'\n'}GLOBAL NETWORK</Text>
-            <Text style={[styles.splashWordmarkMotto, !isDarkTheme && styles.splashWordmarkMottoLight]}>EDUCATE. EQUIP. EVOLVE.</Text>
-          </View>
+            <View style={styles.splashWordmarkTextWrap}>
+              <Text
+                numberOfLines={2}
+                adjustsFontSizeToFit
+                minimumFontScale={0.75}
+                style={[styles.splashWordmarkText, compactSplash && styles.splashWordmarkTextCompact, !isDarkTheme && styles.splashWordmarkTextLight]}
+              >
+                OVERCOMERS{'\n'}GLOBAL NETWORK
+              </Text>
+              <Text style={[styles.splashWordmarkMotto, compactSplash && styles.splashWordmarkMottoCompact, !isDarkTheme && styles.splashWordmarkMottoLight]}>EDUCATE. EQUIP. EVOLVE.</Text>
+            </View>
 
-          {/* Divider accent */}
-          <View style={styles.splashDivider} />
+            {/* Divider accent */}
+            <View style={[styles.splashDivider, compactSplash && styles.splashDividerCompact]} />
 
-          {/* Taglines */}
-          <Text style={[styles.splashTagline, !isDarkTheme && styles.splashTaglineLight]}>Live Teaching.{'\n'}Global Impact.</Text>
-          <Text style={[styles.splashMotto, !isDarkTheme && styles.splashMottoLight]}>One Vision. Every Nation.{'\n'}Eternal Impact.</Text>
+            {/* Taglines */}
+            <Text style={[styles.splashTagline, compactSplash && styles.splashTaglineCompact, !isDarkTheme && styles.splashTaglineLight]}>Live Teaching.{'\n'}Global Impact.</Text>
+            <Text style={[styles.splashMotto, compactSplash && styles.splashMottoCompact, !isDarkTheme && styles.splashMottoLight]}>One Vision. Every Nation.{'\n'}Eternal Impact.</Text>
 
-          <ThemeSelector selected={themePreference} onSelect={setThemePreference} compact />
+            <ThemeSelector selected={themePreference} onSelect={setThemePreference} compact tight={compactSplash} />
 
-          {/* Spacer */}
-          <View style={{ flex: 1 }} />
+            {/* Spacer — holds Get Started low on a tall phone, collapses on a short one */}
+            <View style={styles.splashSpacer} />
 
-          {/* Dot indicators (onboarding feel) */}
-          <View style={styles.dotsRow}>
-            <View style={[styles.dot, styles.dotActive]} />
-            <View style={[styles.dot, !isDarkTheme && styles.dotLight]} />
-            <View style={[styles.dot, !isDarkTheme && styles.dotLight]} />
-          </View>
+            {/* Dot indicators (onboarding feel) */}
+            <View style={[styles.dotsRow, compactSplash && styles.dotsRowCompact]}>
+              <View style={[styles.dot, styles.dotActive]} />
+              <View style={[styles.dot, !isDarkTheme && styles.dotLight]} />
+              <View style={[styles.dot, !isDarkTheme && styles.dotLight]} />
+            </View>
 
-          {/* Get Started button */}
-          <Pressable accessibilityRole="button" accessibilityLabel="Get started" onPress={() => setScreen('auth')} style={[styles.getStartedBtn, !isDarkTheme && styles.getStartedBtnLight]}>
-            <Text style={[styles.getStartedText, !isDarkTheme && styles.getStartedTextLight]}>Get Started</Text>
-          </Pressable>
-
-        </Animated.View>
+            {/* Get Started button */}
+            <Pressable accessibilityRole="button" accessibilityLabel="Get started" onPress={() => setScreen('auth')} style={[styles.getStartedBtn, compactSplash && styles.getStartedBtnCompact, !isDarkTheme && styles.getStartedBtnLight]}>
+              <Text style={[styles.getStartedText, !isDarkTheme && styles.getStartedTextLight]}>Get Started</Text>
+            </Pressable>
+          </Animated.View>
+        </ScrollView>
       </LinearGradient>
     );
   }
@@ -227,7 +270,7 @@ export default function WelcomeScreen() {
     <View style={[styles.authContainer, isDarkTheme && styles.authContainerDark, { paddingTop: insets.top }]}>
       <StatusBar barStyle={isDarkTheme ? 'light-content' : 'dark-content'} />
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1 }}>
-        <ScrollView contentContainerStyle={styles.authScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <ScrollView contentContainerStyle={[styles.authScroll, { paddingBottom: Math.max(insets.bottom, 8) + 32 }]} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           {/* Header row */}
           <View style={styles.authHeader}>
             <View style={styles.authBrandRow}>
@@ -358,10 +401,10 @@ export default function WelcomeScreen() {
   );
 }
 
-function ThemeSelector({ selected, onSelect, compact = false }: { selected: ThemePreference; onSelect: (theme: ThemePreference) => void; compact?: boolean }) {
+function ThemeSelector({ selected, onSelect, compact = false, tight = false }: { selected: ThemePreference; onSelect: (theme: ThemePreference) => void; compact?: boolean; tight?: boolean }) {
   const light = selected === 'light';
   return (
-    <View style={[styles.themeWrap, light && styles.themeWrapLight, compact && styles.themeWrapCompact]}>
+    <View style={[styles.themeWrap, light && styles.themeWrapLight, compact && styles.themeWrapCompact, tight && styles.themeWrapTight]}>
       <Text style={[styles.themeTitle, light && styles.themeTitleLight, compact && styles.themeTitleCompact]}>Theme</Text>
       <View style={styles.themeOptions}>
         {(['dark', 'light'] as const).map((theme) => {
@@ -370,7 +413,7 @@ function ThemeSelector({ selected, onSelect, compact = false }: { selected: Them
             <Pressable key={theme} accessibilityRole="button" accessibilityLabel={`Use ${theme} theme`} onPress={() => onSelect(theme)} style={[styles.themeOption, active && styles.themeOptionActive]}>
               <LinearGradient
                 colors={theme === 'dark' ? ['#08173D', '#0B2A66'] : ['#FFFFFF', '#FFF2CB']}
-                style={styles.themePreview}
+                style={[styles.themePreview, tight && styles.themePreviewTight]}
               >
                 <View style={styles.themePreviewGlobe}>
                   <Ionicons name="globe-outline" size={18} color={theme === 'dark' ? colors.gold : colors.royalBlue} />
@@ -395,20 +438,30 @@ const styles = StyleSheet.create({
 
   // ─── Splash ───
   splashContainer: { flex: 1, backgroundColor: colors.deepBlue },
-  splashInner: { flex: 1, alignItems: 'center', paddingHorizontal: 32 },
+  splashScroll: { flex: 1 },
+  splashScrollContent: { flexGrow: 1, paddingHorizontal: 32 },
+  splashInner: { flexGrow: 1, width: '100%', alignItems: 'center' },
+  splashSpacer: { flex: 1, minHeight: 8 },
   sealWrap: {
-    width: 236,
-    height: 150,
+    width: 272,
+    maxWidth: '100%',
+    height: 180,
     borderRadius: 28,
     backgroundColor: 'rgba(255,255,255,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 22,
+    marginBottom: 14,
     borderWidth: 2,
     borderColor: 'rgba(212,175,55,0.35)',
     overflow: 'hidden',
   },
-  sealImage: { width: 224, height: 124 },
+  sealWrapCompact: { width: 204, height: 136, borderRadius: 22, marginBottom: 12 },
+  // Square box + resizeMode "contain" draws the whole 614x614 canvas, so the
+  // entire seal survives. translateY lifts it by the canvas's own off-centre
+  // amount (65.5px of 614, measured from the artwork's alpha bounding box
+  // rows 216-528) so the seal — not the empty canvas — sits centred in the plate.
+  sealImage: { width: 272, height: 272, transform: [{ translateY: -29 }] },
+  sealImageCompact: { width: 204, height: 204, transform: [{ translateY: -22 }] },
   splashWordmarkWrap: {
     width: '100%',
     maxWidth: 330,
@@ -433,15 +486,18 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     letterSpacing: 0,
   },
+  splashWordmarkTextCompact: { fontSize: 25, lineHeight: 29 },
   splashWordmarkTextLight: { color: colors.royalBlue },
   splashWordmarkMotto: {
     color: colors.softGold,
     fontSize: 12,
+    lineHeight: 16,
     fontWeight: '900',
     letterSpacing: 0,
     marginTop: 8,
     textAlign: 'center',
   },
+  splashWordmarkMottoCompact: { fontSize: 11, lineHeight: 14, marginTop: 6 },
   splashWordmarkMottoLight: { color: colors.deepGold },
   splashBrand: {
     color: colors.white,
@@ -464,16 +520,18 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     fontWeight: '600',
     textAlign: 'center',
-    marginTop: 28,
-    lineHeight: 32,
+    marginTop: 18,
+    lineHeight: 30,
   },
+  splashTaglineCompact: { fontSize: 19, lineHeight: 26, marginTop: 12 },
   splashMotto: {
     color: 'rgba(255,255,255,0.7)',
     fontSize: 14,
     textAlign: 'center',
-    marginTop: 12,
-    lineHeight: 22,
+    marginTop: 10,
+    lineHeight: 21,
   },
+  splashMottoCompact: { fontSize: 13, lineHeight: 19, marginTop: 8 },
   splashTaglineLight: { color: colors.deepGold },
   splashMottoLight: { color: colors.royalBlue },
   splashDivider: {
@@ -484,11 +542,13 @@ const styles = StyleSheet.create({
     marginTop: 20,
     opacity: 0.8,
   },
+  splashDividerCompact: { marginTop: 12 },
   dotsRow: {
     flexDirection: 'row',
     gap: 8,
-    marginBottom: 24,
+    marginBottom: 14,
   },
+  dotsRowCompact: { marginBottom: 12 },
   dot: {
     width: 8,
     height: 8,
@@ -508,8 +568,9 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     paddingVertical: 16,
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: 8,
   },
+  getStartedBtnCompact: { paddingVertical: 14, marginBottom: 4 },
   getStartedText: {
     color: colors.royalBlue,
     fontWeight: '800',
@@ -560,9 +621,10 @@ const styles = StyleSheet.create({
   },
   themeWrapCompact: {
     width: '100%',
-    marginTop: 20,
-    marginBottom: 18,
+    marginTop: 12,
+    marginBottom: 12,
   },
+  themeWrapTight: { marginTop: 10, marginBottom: 10 },
   themeTitle: { color: colors.gold, fontWeight: '900', marginBottom: 10, letterSpacing: 0.4 },
   themeTitleLight: { color: colors.royalBlue },
   themeTitleCompact: { textAlign: 'center' },
@@ -577,6 +639,7 @@ const styles = StyleSheet.create({
   },
   themeOptionActive: { borderColor: colors.gold, backgroundColor: colors.paleGold },
   themePreview: { height: 58, borderRadius: 12, overflow: 'hidden', padding: 10, justifyContent: 'flex-end' },
+  themePreviewTight: { height: 44 },
   themePreviewGlobe: {
     position: 'absolute',
     right: 8,

@@ -3,7 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { AppState, Platform } from 'react-native';
 
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './publicEnv';
-import { fetchWithTimeout } from './requestTimeout';
+import { fetchWithTimeout, supabaseFetchTimeoutMs } from './requestTimeout';
 
 // A blank address would crash the whole app at launch inside supabase-js.
 // Fall back to a harmless placeholder so the app opens and shows its
@@ -11,8 +11,12 @@ import { fetchWithTimeout } from './requestTimeout';
 const url = SUPABASE_URL || 'https://not-configured.supabase.co';
 const anon = SUPABASE_ANON_KEY || 'not-configured';
 
+// Everyday queries keep a short 15 s leash so a dead connection fails fast.
+// Only a real file write gets a longer budget, and that budget is sized to the
+// bytes being written — see supabaseFetchTimeoutMs. A flat 120 s was wrong in
+// both directions: far too long for a thumbnail, far too short for a video.
 export const supabase = createClient(url, anon, {
-  global: { fetch: (input, init) => fetchWithTimeout(input, init, String(input).includes('/storage/v1/object/') && init?.body ? 120000 : 15000) },
+  global: { fetch: (input, init) => fetchWithTimeout(input, init, supabaseFetchTimeoutMs(input, init)) },
   auth: {
     storage: AsyncStorage,
     autoRefreshToken: true,

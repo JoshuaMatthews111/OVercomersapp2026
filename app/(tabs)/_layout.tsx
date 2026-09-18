@@ -5,9 +5,18 @@ import { useEffect, useState } from 'react';
 import { colors } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
 import { supabase } from '../../lib/supabase';
-import { getAccessProfile } from '../../lib/accessControl';
 import { friendlyError } from '../../lib/errorMessages';
 import { ensurePushRegistered } from '../../lib/pushBootstrap';
+
+/**
+ * Whether this account is allowed in is a fact about the person, not about the
+ * screen, so we remember the answer for as long as they stay signed in. The
+ * first entry into the tabs pays for the check; coming back to the tabs later
+ * paints immediately and re-checks quietly in the background. Cleared when the
+ * tab group unmounts, which is exactly when the session ends, so the next
+ * person to sign in always gets their own check.
+ */
+let accountStandingChecked = false;
 
 function icon(name: keyof typeof Ionicons.glyphMap, activeName?: keyof typeof Ionicons.glyphMap) {
   return ({ color, size, focused }: { color: ColorValue; size: number; focused: boolean }) => (
@@ -34,51 +43,86 @@ function giveHandsIcon({ color, size, focused }: { color: ColorValue; size: numb
 export default function TabLayout() {
   const { themePreference } = useThemePreference();
   const dark = themePreference === 'dark';
-  const [checkingSession, setCheckingSession] = useState(true);
+  // Only the very first check makes anyone wait. After that we already know.
+  const [checkingSession, setCheckingSession] = useState(() => !accountStandingChecked);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [sessionCheckNonce, setSessionCheckNonce] = useState(0);
 
+  /**
+   * There is deliberately NO auth listener here.
+   *
+   * This file used to run its own `onAuthStateChange` that sent the phone to
+   * /welcome on any event carrying no session, while app/_layout.tsx was
+   * unmounting the same screens through Stack.Protected. Two mechanisms racing
+   * over the same question is what turned a token refresh into "the whole app
+   * reloaded". app/_layout.tsx is now the single owner of that decision: it
+   * watches the auth event by name, drops these screens on a confirmed
+   * sign-out, and puts the phone on /welcome itself.
+   *
+   * What is left here is a different question — whether an administrator has
+   * paused or removed this account — and it ends by signing out, which routes
+   * back through that one mechanism.
+   */
   useEffect(() => {
     let mounted = true;
-    const checkSession = async () => {
+    const hadAnswerAlready = accountStandingChecked;
+
+    const checkAccountStanding = async () => {
       try {
         setSessionError(null);
-        const { data } = await supabase.auth.getSession();
+        // Reads the stored session; no /auth/v1/user round trip. app/_layout.tsx
+        // has already proved there is a session before mounting this group, so
+        // this only supplies the id for the one query below.
+        const { data: sessionResult } = await supabase.auth.getSession();
         if (!mounted) return;
-        if (!data.session) {
+        const user = sessionResult.session?.user;
+        if (!user) {
+          // The root layout owns this case and is already moving the phone.
           setCheckingSession(false);
-          router.replace('/welcome');
           return;
         }
-        const access = await getAccessProfile();
+
+        // The only thing this gate needs. getAccessProfile() would have cost a
+        // getUser() network call plus a user_roles read that nothing here uses.
+        const { data: statusRow, error } = await supabase
+          .from('user_admin_status')
+          .select('status, reason')
+          .eq('user_id', user.id)
+          .maybeSingle();
         if (!mounted) return;
-        if (access.accountStatus === 'paused' || access.accountStatus === 'removed') {
+        if (error) throw error;
+
+        const standing = (statusRow?.status as string | undefined) || 'active';
+        if (standing === 'paused' || standing === 'removed') {
+          accountStandingChecked = false;
+          Alert.alert('Account unavailable', statusRow?.reason || 'This account has been paused by an administrator.');
           await supabase.auth.signOut({ scope: 'local' });
-          Alert.alert('Account unavailable', access.accountStatusReason || 'This account has been paused by an administrator.');
-          router.replace('/welcome');
           return;
         }
+
+        accountStandingChecked = true;
         setCheckingSession(false);
         // Signed in and allowed: make sure this phone can receive notices.
         ensurePushRegistered().catch(() => undefined);
       } catch (error) {
         if (!mounted) return;
+        if (hadAnswerAlready) {
+          // Already checked this person once this session. A flaky moment must
+          // not throw them out of an app they are allowed to be in.
+          setCheckingSession(false);
+          return;
+        }
         setSessionError(friendlyError(error, 'We could not finish loading your account. Please try again.'));
         setCheckingSession(false);
       }
     };
-    checkSession();
+    checkAccountStanding();
 
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      // The welcome screen, not "/", which is also this Home tab.
-      if (!session) router.replace('/welcome');
-    });
-
-    return () => {
-      mounted = false;
-      listener.subscription.unsubscribe();
-    };
+    return () => { mounted = false; };
   }, [sessionCheckNonce]);
+
+  // Leaving the tabs means the session ended. Forget this person's answer.
+  useEffect(() => () => { accountStandingChecked = false; }, []);
 
   if (checkingSession) {
     return (
@@ -108,7 +152,10 @@ export default function TabLayout() {
   return (
     <Tabs screenOptions={{
       headerShown: false,
-      tabBarActiveTintColor: colors.gold,
+      // Gold sings on the navy tab bar. On the white one it is the palest
+      // thing in the row, so the selected tab read as less important than the
+      // unselected ones; navy is the light theme's own emphasis colour.
+      tabBarActiveTintColor: dark ? colors.gold : colors.royalBlue,
       tabBarInactiveTintColor: dark ? 'rgba(255,255,255,0.62)' : '#667085',
       tabBarStyle: {
         height: Platform.OS === 'ios' ? 88 : 72,

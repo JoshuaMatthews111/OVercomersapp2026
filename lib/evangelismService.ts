@@ -5,6 +5,20 @@ import { hasSupabase } from './publicEnv';
 
 export type LatLng = { latitude: number; longitude: number };
 
+/**
+ * A territory plus the one extra field the map needs and types/models.ts does
+ * not carry. `lastActivityAt` comes from the `territories.last_activity_at`
+ * column when it exists; when it does not, it is simply undefined and the map
+ * falls back to the activity it can see for itself (records and check-ins).
+ */
+export type TerritoryWithActivity = Territory & { lastActivityAt?: string };
+
+/**
+ * An outreach record plus its timestamp. The timestamp is what lets the map
+ * say whether a region is actually active instead of trusting a stored label.
+ */
+export type OutreachRecord = OutreachContact & { createdAt?: string };
+
 // GeoJSON Polygon / MultiPolygon -> rings of map points.
 function ringsFromGeoJson(geo: any): LatLng[][] | undefined {
   if (!geo || !geo.type) return undefined;
@@ -14,7 +28,7 @@ function ringsFromGeoJson(geo: any): LatLng[][] | undefined {
   return undefined;
 }
 
-function mapTerritoryRow(row: any): Territory {
+function mapTerritoryRow(row: any): TerritoryWithActivity {
   return {
     id: row.id,
     parentId: row.parent_id || undefined,
@@ -23,6 +37,7 @@ function mapTerritoryRow(row: any): Territory {
     status: row.status,
     center: typeof row.center_lat === 'number' ? { latitude: row.center_lat, longitude: row.center_lng } : (extractPoint(row.center) || { latitude: 20, longitude: 0 }),
     boundary: ringsFromGeoJson(row.boundary),
+    lastActivityAt: row.last_activity_at || undefined,
     reached: row.reached_count || 0,
     followUps: row.follow_up_count || 0,
     soulsSaved: row.souls_saved_count || 0,
@@ -43,7 +58,7 @@ function mapTerritoryRow(row: any): Territory {
   };
 }
 
-export async function getTerritories(): Promise<Territory[]> {
+export async function getTerritories(): Promise<TerritoryWithActivity[]> {
   if (!hasSupabase) return [];
   // territories_geo returns boundary and center as plain numbers / GeoJSON.
   const { data, error } = await supabase.rpc('territories_geo');
@@ -94,9 +109,7 @@ export async function getLiveWorkers(): Promise<LiveWorker[]> {
     .gt('last_seen_at', since)
     .order('started_at', { ascending: false });
   if (error || !data) return [];
-  const ids = Array.from(new Set(data.map((row: any) => row.user_id)));
-  const { data: profiles } = ids.length ? await supabase.from('profiles').select('id, display_name').in('id', ids) : { data: [] as any[] };
-  const names = new Map((profiles || []).map((p: any) => [p.id, p.display_name]));
+  const names = await lookupDisplayNames(data.map((row: any) => row.user_id));
   return data.map((row: any) => ({
     id: row.id,
     userId: row.user_id,
@@ -142,9 +155,9 @@ export function subscribeLiveWorkers(onChange: () => void) {
   return () => { supabase.removeChannel(channel); };
 }
 
-export async function getOutreachContacts(): Promise<OutreachContact[]> {
+export async function getOutreachContacts(): Promise<OutreachRecord[]> {
   if (!hasSupabase) return [];
-  const { data, error } = await supabase.from('outreach_contacts').select('*').order('created_at', { ascending: false }).limit(100);
+  const { data, error } = await supabase.from('outreach_contacts').select('*').order('created_at', { ascending: false }).limit(500);
   if (error) throw error;
   if (!data) return [];
   return data.map((row) => ({
@@ -167,6 +180,7 @@ export async function getOutreachContacts(): Promise<OutreachContact[]> {
     nextFollowUpAt: row.next_follow_up_at || undefined,
     notes: row.notes || undefined,
     createdBy: row.created_by || undefined,
+    createdAt: row.created_at || undefined,
     statusHistory: row.status_history || []
   }));
 }
@@ -270,12 +284,326 @@ export async function updateTerritoryMetrics(
   return data;
 }
 
+// ----- Visit markers: "I visited this place" -----
+//
+// A visit is its own record, separate from an outreach contact, because it is
+// about a PLACE, not a person: a door, an apartment, a shop. Anyone on the
+// outreach team sees everyone else's visits on the map.
+//
+// TABLE AND COLUMNS THIS CODE EXPECTS (see handoff notes):
+//   public.evangelism_visits (
+//     id uuid pk, territory_id uuid null, created_by uuid,
+//     place_label text, unit_number text null, notes text null,
+//     lat double precision null, lng double precision null,
+//     visited_at timestamptz, created_at timestamptz )
+//
+// lat/lng are plain numbers on purpose, matching evangelism_checkins. A
+// PostGIS geography column comes back through PostgREST as hex EWKB, which is
+// what made the outreach-contact pins disappear. Plain numbers cannot do that.
+
+export const VISITS_TABLE = 'evangelism_visits';
+const VISIT_COLUMNS = 'id, territory_id, created_by, place_label, unit_number, notes, lat, lng, visited_at';
+
+export type VisitPin = {
+  id: string;
+  territoryId?: string;
+  placeLabel: string;
+  unitNumber?: string;
+  notes?: string;
+  location?: LatLng;
+  visitedAt: string;
+  createdBy?: string;
+  authorName: string;
+};
+
+/** Visits either load, or the table is not switched on yet, or it errored. */
+export type VisitsResult =
+  | { ready: true; visits: VisitPin[] }
+  | { ready: false; reason: 'not-switched-on' | 'unavailable' };
+
+/** True when the backend is telling us the table simply is not there yet. */
+function isMissingRelation(error: any): boolean {
+  if (!error) return false;
+  const code = String(error.code || '');
+  if (code === '42P01' || code === 'PGRST205' || code === 'PGRST202') return true;
+  const text = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
+  return text.includes('does not exist') || text.includes('schema cache');
+}
+
+async function lookupDisplayNames(userIds: (string | null | undefined)[]): Promise<Map<string, string>> {
+  const ids = Array.from(new Set(userIds.filter((id): id is string => !!id)));
+  if (!ids.length) return new Map();
+  const { data } = await supabase.from('profiles').select('id, display_name').in('id', ids);
+  return new Map((data || []).map((row: any) => [row.id, row.display_name]));
+}
+
+function mapVisitRow(row: any, names: Map<string, string>): VisitPin {
+  return {
+    id: row.id,
+    territoryId: row.territory_id || undefined,
+    placeLabel: row.place_label || 'A place we visited',
+    unitNumber: row.unit_number || undefined,
+    notes: row.notes || undefined,
+    location: typeof row.lat === 'number' && typeof row.lng === 'number' ? { latitude: row.lat, longitude: row.lng } : undefined,
+    visitedAt: row.visited_at || row.created_at || new Date().toISOString(),
+    createdBy: row.created_by || undefined,
+    authorName: (row.created_by && names.get(row.created_by)) || 'A team member',
+  };
+}
+
+export async function getVisits(): Promise<VisitsResult> {
+  if (!hasSupabase) return { ready: false, reason: 'unavailable' };
+  const { data, error } = await supabase
+    .from(VISITS_TABLE)
+    .select(VISIT_COLUMNS)
+    .order('visited_at', { ascending: false })
+    .limit(500);
+  if (error) return { ready: false, reason: isMissingRelation(error) ? 'not-switched-on' : 'unavailable' };
+  if (!data) return { ready: true, visits: [] };
+  const names = await lookupDisplayNames(data.map((row: any) => row.created_by));
+  return { ready: true, visits: data.map((row: any) => mapVisitRow(row, names)) };
+}
+
+export type SaveVisitInput = {
+  territoryId?: string;
+  placeLabel: string;
+  unitNumber?: string;
+  notes?: string;
+  location?: LatLng;
+};
+
+export type SaveVisitResult =
+  | { ok: true; visit: VisitPin }
+  | { ok: false; reason: 'not-switched-on' };
+
+export async function saveVisit(input: SaveVisitInput): Promise<SaveVisitResult> {
+  if (!hasSupabase) throw new Error('This app is not connected to its backend yet.');
+  const { data: userResult } = await supabase.auth.getUser();
+  if (!userResult.user) throw new Error('Sign in before saving a visit.');
+  const visitedAt = new Date().toISOString();
+  const { data, error } = await supabase
+    .from(VISITS_TABLE)
+    .insert({
+      territory_id: input.territoryId || null,
+      created_by: userResult.user.id,
+      place_label: input.placeLabel,
+      unit_number: input.unitNumber || null,
+      notes: input.notes || null,
+      lat: input.location?.latitude ?? null,
+      lng: input.location?.longitude ?? null,
+      visited_at: visitedAt,
+    })
+    .select(VISIT_COLUMNS)
+    .single();
+  if (error) {
+    if (isMissingRelation(error)) return { ok: false, reason: 'not-switched-on' };
+    throw error;
+  }
+  const names = await lookupDisplayNames([userResult.user.id]);
+  return { ok: true, visit: mapVisitRow(data, names) };
+}
+
+// ----- Honest region status -----
+//
+// The owner's words: "just because I'm in Ohio doesn't mean everything's in
+// progress — it needs triggers that initiate progress." So the stored status
+// column stops being the source of truth. A region is "in progress" only when
+// something actually happened there: someone checked in, someone filed a
+// record, someone logged a visit. A region a leader has personally marked
+// Covered, Discipled or New believers keeps that label — those are judgements
+// only a person can make, and real activity never overwrites them.
+
+export const ACTIVITY_WINDOW_DAYS = 30;
+const LEADER_SET_STATUSES: Territory['status'][] = ['covered', 'discipled', 'new_believer'];
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+export type StatusBasis = 'activity' | 'set-by-leader' | 'dormant' | 'no-data';
+
+export type TerritoryActivity = {
+  /** Newest real thing that happened here or in a region inside it. */
+  lastActivityAt?: string;
+  /** Something happened in this exact region, not only in a child. */
+  ownActivity?: boolean;
+  /** Someone is checked in here right now. */
+  liveNow?: boolean;
+  /** Someone still owes a follow-up here. */
+  followUpDue?: boolean;
+  /** How many regions inside this one are active. */
+  activeChildCount?: number;
+};
+
+export type DerivedStatus = {
+  status: Territory['status'];
+  basis: StatusBasis;
+  label: string;
+  lastActivityAt?: string;
+};
+
+const BASE_LABEL: Record<Territory['status'], string> = {
+  untapped: 'Untapped',
+  in_progress: 'In progress',
+  covered: 'Covered',
+  follow_up_due: 'Follow-up due',
+  new_believer: 'New believers',
+  discipled: 'Discipled',
+};
+
+function monthYear(iso: string): string {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return 'earlier';
+  return `${MONTHS[when.getMonth()]} ${when.getFullYear()}`;
+}
+
+function withinDays(iso: string | undefined, days: number): boolean {
+  if (!iso) return false;
+  const when = new Date(iso).getTime();
+  if (Number.isNaN(when)) return false;
+  return Date.now() - when <= days * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * Work out what a region's status really is, from what really happened.
+ * Never throws and always returns a status, so the map can always paint.
+ */
+export function deriveTerritoryStatus(territory: TerritoryWithActivity, activity?: TerritoryActivity): DerivedStatus {
+  const signals = activity || {};
+  const stored = territory.status;
+  const lastActivityAt = newerOf(territory.lastActivityAt, signals.lastActivityAt);
+
+  if (LEADER_SET_STATUSES.indexOf(stored) !== -1) {
+    return { status: stored, basis: 'set-by-leader', label: BASE_LABEL[stored], lastActivityAt };
+  }
+  if (signals.liveNow) {
+    return { status: 'in_progress', basis: 'activity', label: 'Someone is out here now', lastActivityAt };
+  }
+  if (signals.followUpDue) {
+    return { status: 'follow_up_due', basis: 'activity', label: BASE_LABEL.follow_up_due, lastActivityAt };
+  }
+  if (withinDays(lastActivityAt, ACTIVITY_WINDOW_DAYS)) {
+    const fromChildrenOnly = !signals.ownActivity && (signals.activeChildCount || 0) > 0;
+    const label = fromChildrenOnly
+      ? `Active in ${signals.activeChildCount} ${signals.activeChildCount === 1 ? 'area' : 'areas'}`
+      : BASE_LABEL.in_progress;
+    return { status: 'in_progress', basis: 'activity', label, lastActivityAt };
+  }
+  if (lastActivityAt) {
+    return { status: stored, basis: 'dormant', label: `Quiet since ${monthYear(lastActivityAt)}`, lastActivityAt };
+  }
+  return { status: stored, basis: 'no-data', label: 'No activity yet', lastActivityAt: undefined };
+}
+
+function newerOf(a?: string, b?: string): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
+}
+
+/**
+ * Roll every real record up into one activity entry per region, then up the
+ * parent chain, so a city counts the streets inside it.
+ */
+export function buildActivityIndex(
+  territories: TerritoryWithActivity[],
+  records: OutreachRecord[],
+  workers: LiveWorker[],
+  visits: VisitPin[]
+): Record<string, TerritoryActivity> {
+  const index: Record<string, TerritoryActivity> = {};
+  const touch = (id: string | undefined): TerritoryActivity | null => {
+    if (!id) return null;
+    if (!index[id]) index[id] = { activeChildCount: 0 };
+    return index[id];
+  };
+
+  for (const territory of territories) {
+    const entry = touch(territory.id);
+    if (entry && territory.lastActivityAt) {
+      entry.lastActivityAt = newerOf(entry.lastActivityAt, territory.lastActivityAt);
+      entry.ownActivity = true;
+    }
+  }
+  for (const record of records) {
+    const entry = touch(record.territoryId);
+    if (!entry) continue;
+    entry.ownActivity = true;
+    entry.lastActivityAt = newerOf(entry.lastActivityAt, record.createdAt);
+    if (record.followUpNeeded) entry.followUpDue = true;
+  }
+  for (const visit of visits) {
+    const entry = touch(visit.territoryId);
+    if (!entry) continue;
+    entry.ownActivity = true;
+    entry.lastActivityAt = newerOf(entry.lastActivityAt, visit.visitedAt);
+  }
+  for (const worker of workers) {
+    const entry = touch(worker.territoryId);
+    if (!entry) continue;
+    entry.ownActivity = true;
+    entry.liveNow = true;
+    entry.lastActivityAt = newerOf(entry.lastActivityAt, worker.lastSeenAt);
+  }
+
+  // Roll child activity up to parents. Deepest regions first so a street
+  // reaches its city and the city reaches its state in one pass.
+  const byId = new Map(territories.map((t) => [t.id, t]));
+  const depth = (t: TerritoryWithActivity): number => {
+    let steps = 0;
+    let parent = t.parentId ? byId.get(t.parentId) : undefined;
+    while (parent && steps < 12) { steps += 1; parent = parent.parentId ? byId.get(parent.parentId) : undefined; }
+    return steps;
+  };
+  const deepestFirst = [...territories].sort((a, b) => depth(b) - depth(a));
+  for (const territory of deepestFirst) {
+    const child = index[territory.id];
+    if (!child || !territory.parentId) continue;
+    const parent = touch(territory.parentId);
+    if (!parent) continue;
+    const childIsActive = !!child.liveNow || withinDays(child.lastActivityAt, ACTIVITY_WINDOW_DAYS);
+    if (childIsActive) parent.activeChildCount = (parent.activeChildCount || 0) + 1;
+    if (child.liveNow) parent.liveNow = true;
+    if (child.followUpDue) parent.followUpDue = true;
+    parent.lastActivityAt = newerOf(parent.lastActivityAt, child.lastActivityAt);
+  }
+  return index;
+}
+
+/**
+ * PostgREST hands a PostGIS geography column back as hex EWKB, not as
+ * "POINT(x y)". That is why saved pins vanished on reload. Accept every shape
+ * we can actually get: a plain object, GeoJSON, WKT text, or the hex.
+ */
 function extractPoint(value: any): { latitude: number; longitude: number } | null {
   if (!value) return null;
-  if (typeof value === 'object' && typeof value.latitude === 'number') return value;
-  if (typeof value === 'string') {
-    const match = value.match(/POINT\((-?\d+\.?\d*) (-?\d+\.?\d*)\)/);
-    if (match) return { longitude: Number(match[1]), latitude: Number(match[2]) };
+  if (typeof value === 'object') {
+    if (typeof value.latitude === 'number' && typeof value.longitude === 'number') return { latitude: value.latitude, longitude: value.longitude };
+    if (value.type === 'Point' && Array.isArray(value.coordinates) && value.coordinates.length >= 2) {
+      const [longitude, latitude] = value.coordinates;
+      if (typeof latitude === 'number' && typeof longitude === 'number') return { latitude, longitude };
+    }
+    return null;
   }
-  return null;
+  if (typeof value !== 'string') return null;
+  const match = value.match(/POINT\s*\((-?\d+\.?\d*) (-?\d+\.?\d*)\)/i);
+  if (match) return { longitude: Number(match[1]), latitude: Number(match[2]) };
+  return pointFromEwkbHex(value);
+}
+
+/** Decode a PostGIS hex EWKB point, e.g. "0101000020E6100000…". */
+export function pointFromEwkbHex(hex: string): { latitude: number; longitude: number } | null {
+  const clean = hex.trim();
+  // 1 byte order + 4 type + optional 4 srid + 16 coordinate bytes.
+  if (clean.length < 42 || clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) return null;
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  const view = new DataView(bytes.buffer);
+  const little = bytes[0] === 1;
+  const typeWord = view.getUint32(1, little);
+  if ((typeWord & 0x0fffffff) !== 1) return null; // points only
+  const offset = 5 + ((typeWord & 0x20000000) !== 0 ? 4 : 0); // skip the SRID when present
+  if (bytes.length < offset + 16) return null;
+  const longitude = view.getFloat64(offset, little);
+  const latitude = view.getFloat64(offset + 8, little);
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
+  if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
+  return { latitude, longitude };
 }

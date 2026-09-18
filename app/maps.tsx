@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -7,7 +7,19 @@ import { Card } from '../components/Card';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { Screen } from '../components/Screen';
 import { useAccessProfile } from '../lib/accessControl';
-import { getOutreachContacts, getTerritories, saveOutreachContact, updateTerritoryMetrics } from '../lib/evangelismService';
+import {
+  buildActivityIndex,
+  deriveTerritoryStatus,
+  type DerivedStatus,
+  getOutreachContacts,
+  getTerritories,
+  getVisits,
+  type OutreachRecord,
+  saveOutreachContact,
+  type TerritoryWithActivity,
+  updateTerritoryMetrics,
+  type VisitPin,
+} from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
 import { colors } from '../lib/theme';
 import { OutreachContact, Territory } from '../types/models';
@@ -20,14 +32,21 @@ const statusColor: Record<Territory['status'], string> = {
   new_believer: colors.brightBlue,
   discipled: colors.gold
 };
+/** A region nothing has happened in is grey, not amber. Honest beats busy. */
+const NO_ACTIVITY_COLOR = colors.muted;
+/** The colour a region is painted, given what really happened there. */
+function shadeFor(derived: DerivedStatus): string {
+  return derived.basis === 'no-data' || derived.basis === 'dormant' ? NO_ACTIVITY_COLOR : statusColor[derived.status];
+}
 
 export default function MapsWebScreen() {
   const { access, loadingAccess } = useAccessProfile();
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMap, setLoadingMap] = useState(true);
-  const [territoryList, setTerritoryList] = useState<Territory[]>([]);
-  const [contactList, setContactList] = useState<OutreachContact[]>([]);
-  const [selected, setSelected] = useState<Territory | null>(null);
+  const [territoryList, setTerritoryList] = useState<TerritoryWithActivity[]>([]);
+  const [contactList, setContactList] = useState<OutreachRecord[]>([]);
+  const [visits, setVisits] = useState<VisitPin[]>([]);
+  const [selected, setSelected] = useState<TerritoryWithActivity | null>(null);
   const [query, setQuery] = useState('');
   const [record, setRecord] = useState({ name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', assignedTo: '', nextFollowUpAt: '', notes: '', gospelShared: true, invitedToChurch: true, bibleStudyStarted: false, savedAcceptedChrist: false, followUpNeeded: true });
   const [metricEdits, setMetricEdits] = useState({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
@@ -39,13 +58,30 @@ export default function MapsWebScreen() {
 
   useEffect(() => {
     if (loadingAccess || !access.canUseEvangelism) return;
-    Promise.all([getTerritories(), getOutreachContacts()]).then(([territories, contacts]) => {
+    Promise.all([
+      getTerritories(),
+      getOutreachContacts(),
+      getVisits().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
+    ]).then(([territories, contacts, visitResult]) => {
       setTerritoryList(territories);
       setContactList(contacts);
+      setVisits(visitResult.ready ? visitResult.visits : []);
       setSelected(territories[0] || null);
     }).catch((err) => setLoadError(friendlyError(err, 'Outreach regions could not load. Please reopen this screen to try again.'))).finally(() => setLoadingMap(false));
   }, [loadingAccess, access.canUseEvangelism]);
 
+  // What actually happened in each region, so a stored label can never claim
+  // progress nobody made. Recomputed only when the underlying records change.
+  const statusIndex = useMemo(() => {
+    const activity = buildActivityIndex(territoryList, contactList, [], visits);
+    const map: Record<string, DerivedStatus> = {};
+    for (const territory of territoryList) map[territory.id] = deriveTerritoryStatus(territory, activity[territory.id]);
+    return map;
+  }, [territoryList, contactList, visits]);
+  const statusOf = useCallback(
+    (territory: TerritoryWithActivity): DerivedStatus => statusIndex[territory.id] || deriveTerritoryStatus(territory),
+    [statusIndex]
+  );
   const children = useMemo(() => territoryList.filter((territory) => territory.parentId === selected?.id), [selected, territoryList]);
   const relatedContacts = useMemo(() => {
     if (!selected) return [];
@@ -54,7 +90,7 @@ export default function MapsWebScreen() {
   const dueToday = contactList.filter((contact) => contact.nextFollowUpAt && isTodayOrOverdue(contact.nextFollowUpAt));
   const overdue = contactList.filter((contact) => contact.nextFollowUpAt && new Date(contact.nextFollowUpAt) < startOfToday());
 
-  function focusTerritory(territory: Territory) {
+  function focusTerritory(territory: TerritoryWithActivity) {
     setSelected(territory);
   }
 
@@ -180,7 +216,7 @@ export default function MapsWebScreen() {
         <Card style={styles.mapCard}>
           <Text style={styles.kicker}>TERRITORY VIEW</Text>
           <Text style={styles.mapTitle}>{selected.name}</Text>
-          <Text style={styles.mapSub}>{selected.level} • {selected.status.replace('_', ' ')}</Text>
+          <Text style={styles.mapSub}>{selected.level} • {statusOf(selected).label}</Text>
           <View style={styles.mapCanvas}>
             {[selected, ...children].slice(0, 8).map((territory, index) => (
               <Pressable
@@ -189,13 +225,13 @@ export default function MapsWebScreen() {
                 style={[
                   styles.mapMarker,
                   {
-                    borderColor: statusColor[territory.status],
+                    borderColor: shadeFor(statusOf(territory)),
                     left: `${12 + ((index * 29) % 70)}%`,
                     top: `${18 + ((index * 23) % 58)}%`
                   }
                 ]}
               >
-                <View style={[styles.markerDot, { backgroundColor: statusColor[territory.status] }]} />
+                <View style={[styles.markerDot, { backgroundColor: shadeFor(statusOf(territory)) }]} />
                 <Text style={styles.markerText}>{territory.name}</Text>
               </Pressable>
             ))}
@@ -224,9 +260,9 @@ export default function MapsWebScreen() {
           <Text style={styles.section}>{children.length ? 'Drill Down' : 'Street-Level Territory'}</Text>
           <View style={styles.chips}>
             {children.map((territory) => (
-              <Pressable key={territory.id} onPress={() => focusTerritory(territory)} style={[styles.chip, { borderColor: statusColor[territory.status] }]}>
+              <Pressable key={territory.id} onPress={() => focusTerritory(territory)} style={[styles.chip, { borderColor: shadeFor(statusOf(territory)) }]}>
                 <Text style={styles.chipText}>{territory.name}</Text>
-                <Text style={styles.chipSub}>{territory.level} • {territory.status.replace('_', ' ')}</Text>
+                <Text style={styles.chipSub}>{territory.level} • {statusOf(territory).label}</Text>
               </Pressable>
             ))}
           </View>

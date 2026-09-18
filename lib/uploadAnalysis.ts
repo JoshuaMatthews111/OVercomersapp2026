@@ -19,6 +19,11 @@ export type UploadedFileInput = {
   purpose: UploadPurpose;
   relatedTable?: string;
   relatedId?: string;
+  /**
+   * Who uploaded it. Pass the id the caller already holds — looking it up here
+   * used to cost a network round trip on every single upload.
+   */
+  ownerId?: string;
 };
 
 export function analyzeUploadedFile(input: UploadedFileInput) {
@@ -48,11 +53,14 @@ export function analyzeUploadedFile(input: UploadedFileInput) {
 
 export async function recordUploadedFile(input: UploadedFileInput) {
   const analysis = analyzeUploadedFile(input);
-  const { data: userResult } = await supabase.auth.getUser();
+  // getSession() reads the session already stored on the device. The old
+  // getUser() call here was a second network round trip per upload, purely to
+  // learn an id the caller already had.
+  const ownerId = input.ownerId || (await supabase.auth.getSession()).data.session?.user?.id || null;
   const { data, error } = await supabase
     .from('uploaded_files')
     .insert({
-      owner_id: userResult.user?.id || null,
+      owner_id: ownerId,
       bucket_id: input.bucketId,
       object_path: input.objectPath,
       file_name: input.fileName || analysis.fileName,

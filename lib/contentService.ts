@@ -1,21 +1,131 @@
 import { events, givingLinks, prayerRequests, series, sermons } from '../data/mockData';
 import { AppStory, Event, GivingLink, MediaItem, MediaKind, PrayerRequest, Series, Sermon } from '../types/models';
 import { supabase } from './supabase';
+import { youtubeThumbnailUrl } from './embed';
+import { FriendlyError } from './errorMessages';
+import { STORY_LIFETIME_MS } from './storyTime';
 
 import { hasSupabase } from './publicEnv';
 export { hasSupabase };
+
+/**
+ * ---------------------------------------------------------------------------
+ * How this file behaves, so every screen can rely on it
+ * ---------------------------------------------------------------------------
+ * - When the app is not connected to Supabase at all, the sample content in
+ *   data/mockData is returned. That is the only time sample content is served.
+ * - When the app IS connected and a read fails, the function THROWS. It never
+ *   quietly hands back sample people as though they were real members of the
+ *   congregation, and it never turns a failure into an empty list. Screens
+ *   must catch and show the message from friendlyError().
+ * - Every read asks for only the columns the screens draw, and carries a
+ *   limit, so re-running one on focus or pull-to-refresh is cheap.
+ * ---------------------------------------------------------------------------
+ */
+
+/** The signed-in person's id, read from the local session — no network hop. */
+async function currentUserId(): Promise<string | null> {
+  const { data } = await supabase.auth.getSession();
+  return data.session?.user?.id ?? null;
+}
+
+async function requireUserId(action: string): Promise<string> {
+  const id = await currentUserId();
+  if (!id) throw new FriendlyError(`Please sign in to ${action}.`);
+  return id;
+}
+
+/** A story row, plus the two fields the screens need that AppStory lacks. */
+export type AppStoryRow = AppStory & {
+  createdBy?: string;
+  visibilityRole?: string;
+};
+
+function mapStory(row: any): AppStoryRow {
+  return {
+    id: row.id,
+    title: row.title || '',
+    category: row.category || undefined,
+    body: row.body || undefined,
+    region: row.region || undefined,
+    imageUrl: row.image_url || undefined,
+    actionUrl: row.action_url || undefined,
+    publishedAt: row.published_at || undefined,
+    expiresAt: row.expires_at || undefined,
+    createdAt: row.created_at || undefined,
+    createdBy: row.created_by || undefined,
+    visibilityRole: row.visibility_role || undefined,
+  };
+}
+
+const STORY_COLUMNS =
+  'id, title, category, body, region, image_url, action_url, published_at, expires_at, created_at, created_by, visibility_role';
+
+const MEDIA_COLUMNS =
+  'id, media_type, title, description, speaker, scripture_reference, thumbnail_url, file_url, external_url, duration_seconds, is_downloadable, is_featured, published_at';
+
+function mapMedia(row: any): MediaItem {
+  const externalUrl = row.external_url || undefined;
+  return {
+    id: row.id,
+    mediaType: row.media_type,
+    title: row.title,
+    description: row.description || undefined,
+    speaker: row.speaker || undefined,
+    scriptureReference: row.scripture_reference || undefined,
+    // A YouTube sermon posted without a cover still gets one: the picture is
+    // worked out from the video id, with no API key and no extra request.
+    thumbnailUrl: row.thumbnail_url || (externalUrl ? youtubeThumbnailUrl(externalUrl) || undefined : undefined),
+    fileUrl: row.file_url || undefined,
+    externalUrl,
+    durationSeconds: row.duration_seconds || undefined,
+    isDownloadable: Boolean(row.is_downloadable),
+    isFeatured: Boolean(row.is_featured),
+    publishedAt: row.published_at || undefined,
+  };
+}
+
+function mapPrayer(row: any): PrayerRequest {
+  return {
+    id: row.id,
+    name: row.name || 'Anonymous',
+    category: row.category || 'General',
+    request: row.request,
+    isPrivate: row.is_private,
+    consentReceived: row.consent_received,
+    status: row.status,
+    createdAt: row.created_at,
+  };
+}
+
+const PRAYER_COLUMNS = 'id, name, category, request, is_private, consent_received, status, created_at';
+
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
 
 export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: Sermon[] }> {
   if (!hasSupabase) return { series, sermons };
 
   const [{ data: seriesRows, error: seriesError }, { data: sermonRows, error: sermonError }] = await Promise.all([
-    supabase.from('sermon_series').select('*').eq('status', 'published').order('sort_order'),
-    supabase.from('sermons').select('*').eq('status', 'published').order('published_at', { ascending: false })
+    supabase
+      .from('sermon_series')
+      .select('id, title, description, speaker, cover_image_url, sort_order')
+      .eq('status', 'published')
+      .order('sort_order')
+      .limit(40),
+    supabase
+      .from('sermons')
+      .select('id, series_id, title, speaker, scripture_reference, description, video_url, audio_url, duration_seconds, published_at, is_featured')
+      .eq('status', 'published')
+      .order('published_at', { ascending: false })
+      .limit(80)
   ]);
 
-  if (seriesError || sermonError || !seriesRows || !sermonRows) return { series, sermons };
+  if (seriesError) throw seriesError;
+  if (sermonError) throw sermonError;
 
-  const mappedSermons: Sermon[] = sermonRows.map((row) => ({
+  const mappedSermons: Sermon[] = (sermonRows || []).map((row) => ({
     id: row.id,
     seriesId: row.series_id,
     title: row.title,
@@ -29,7 +139,7 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
     isFeatured: row.is_featured
   }));
 
-  const mappedSeries: Series[] = seriesRows.map((row) => ({
+  const mappedSeries: Series[] = (seriesRows || []).map((row) => ({
     id: row.id,
     title: row.title,
     subtitle: row.description || row.speaker || 'Sermon series',
@@ -43,9 +153,13 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
 
 export async function getEvents(): Promise<Event[]> {
   if (!hasSupabase) return events;
-  const { data, error } = await supabase.from('events').select('*').order('starts_at');
-  if (error || !data) return events;
-  return data.map((row) => ({
+  const { data, error } = await supabase
+    .from('events')
+    .select('id, title, description, location, starts_at, image_url, registration_url')
+    .order('starts_at')
+    .limit(50);
+  if (error) throw error;
+  return (data || []).map((row) => ({
     id: row.id,
     title: row.title,
     description: row.description || '',
@@ -56,62 +170,65 @@ export async function getEvents(): Promise<Event[]> {
   }));
 }
 
-export async function getAppStories(): Promise<AppStory[]> {
+/**
+ * Every story that is live right now, newest first.
+ *
+ * Cheap enough to call on every screen focus and on pull-to-refresh: one
+ * select, a handful of columns, a hard limit, and no auth round trip.
+ */
+export async function getAppStories(options: { limit?: number } = {}): Promise<AppStoryRow[]> {
   if (!hasSupabase) return [];
   const { data, error } = await supabase
     .from('app_stories')
-    .select('id, title, category, body, region, image_url, action_url, published_at, expires_at, created_at')
+    .select(STORY_COLUMNS)
     .eq('status', 'published')
     .gt('expires_at', new Date().toISOString())
     .order('sort_order')
     .order('published_at', { ascending: false })
-    .limit(10);
-  if (error || !data) return [];
-  return data.map((row) => ({
-    id: row.id,
-    title: row.title,
-    category: row.category || undefined,
-    body: row.body || undefined,
-    region: row.region || undefined,
-    imageUrl: row.image_url || undefined,
-    actionUrl: row.action_url || undefined,
-    publishedAt: row.published_at || undefined,
-    expiresAt: row.expires_at || undefined,
-    createdAt: row.created_at || undefined
-  }));
+    .limit(options.limit ?? 30);
+  if (error) throw error;
+  return (data || []).map(mapStory);
 }
 
-export async function getMediaItems(): Promise<MediaItem[]> {
+/** Just the signed-in person's own live stories — for "your story" on Home. */
+export async function getMyStories(): Promise<AppStoryRow[]> {
+  if (!hasSupabase) return [];
+  const userId = await currentUserId();
+  if (!userId) return [];
+  const { data, error } = await supabase
+    .from('app_stories')
+    .select(STORY_COLUMNS)
+    .eq('created_by', userId)
+    .eq('status', 'published')
+    .gt('expires_at', new Date().toISOString())
+    .order('published_at', { ascending: false })
+    .limit(10);
+  if (error) throw error;
+  return (data || []).map(mapStory);
+}
+
+export async function getMediaItems(options: { limit?: number } = {}): Promise<MediaItem[]> {
   if (!hasSupabase) return [];
   const { data, error } = await supabase
     .from('media_items')
-    .select('id, media_type, title, description, speaker, scripture_reference, thumbnail_url, file_url, external_url, duration_seconds, is_downloadable, is_featured, published_at')
+    .select(MEDIA_COLUMNS)
     .eq('status', 'published')
     .order('published_at', { ascending: false })
-    .limit(60);
-  if (error || !data) return [];
-  return data.map((row) => ({
-    id: row.id,
-    mediaType: row.media_type,
-    title: row.title,
-    description: row.description || undefined,
-    speaker: row.speaker || undefined,
-    scriptureReference: row.scripture_reference || undefined,
-    thumbnailUrl: row.thumbnail_url || undefined,
-    fileUrl: row.file_url || undefined,
-    externalUrl: row.external_url || undefined,
-    durationSeconds: row.duration_seconds || undefined,
-    isDownloadable: Boolean(row.is_downloadable),
-    isFeatured: Boolean(row.is_featured),
-    publishedAt: row.published_at || undefined
-  }));
+    .limit(options.limit ?? 60);
+  if (error) throw error;
+  return (data || []).map(mapMedia);
 }
 
 export async function getGivingLinks(): Promise<GivingLink[]> {
   if (!hasSupabase) return givingLinks;
-  const { data, error } = await supabase.from('giving_links').select('*').eq('is_active', true).order('sort_order');
-  if (error || !data) return givingLinks;
-  return data.map((row) => ({
+  const { data, error } = await supabase
+    .from('giving_links')
+    .select('id, label, url, instructions, sort_order')
+    .eq('is_active', true)
+    .order('sort_order')
+    .limit(20);
+  if (error) throw error;
+  return (data || []).map((row) => ({
     id: row.id,
     label: row.label,
     url: row.url || undefined,
@@ -119,13 +236,60 @@ export async function getGivingLinks(): Promise<GivingLink[]> {
   }));
 }
 
+// ---------------------------------------------------------------------------
+// Live updates
+//
+// app_stories and media_items are both in the supabase_realtime publication,
+// so a screen can be told the moment something is posted or deleted instead of
+// polling. Each helper returns ONE function: call it in the effect cleanup and
+// the socket is gone. Nothing in here reads, writes or refreshes the session,
+// so a subscription can never sign anybody out.
+// ---------------------------------------------------------------------------
+
+type Unsubscribe = () => void;
+
+function subscribeToTable(channelName: string, table: string, onChange: () => void): Unsubscribe {
+  if (!hasSupabase) return () => undefined;
+  let stopped = false;
+  const channel = supabase
+    .channel(channelName)
+    .on('postgres_changes', { event: '*', schema: 'public', table }, () => {
+      if (!stopped) onChange();
+    })
+    .subscribe();
+  return () => {
+    stopped = true;
+    // Fire and forget: removeChannel resolves after the socket closes, and a
+    // cleanup function must not return a promise.
+    void supabase.removeChannel(channel);
+  };
+}
+
+/**
+ * Tell me whenever a story is posted, changed or deleted.
+ * The callback takes no arguments on purpose — re-run getAppStories(), which
+ * is one cheap select, rather than trying to patch a row in place.
+ */
+export function subscribeToStories(onChange: () => void): Unsubscribe {
+  return subscribeToTable('app-stories-feed', 'app_stories', onChange);
+}
+
+/** Tell me whenever a sermon, video or article is posted, changed or deleted. */
+export function subscribeToMediaItems(onChange: () => void): Unsubscribe {
+  return subscribeToTable('media-items-feed', 'media_items', onChange);
+}
+
+// ---------------------------------------------------------------------------
+// Giving, favourites, downloads
+// ---------------------------------------------------------------------------
+
 export async function recordGivingSelection(input: { amountCents?: number; checkoutUrl?: string }) {
   if (!hasSupabase) return { id: `local-${Date.now()}` };
-  const { data: userResult } = await supabase.auth.getUser();
+  const userId = await currentUserId();
   const { data, error } = await supabase
     .from('giving_selections')
     .insert({
-      user_id: userResult.user?.id || null,
+      user_id: userId,
       amount_cents: input.amountCents || null,
       stripe_checkout_url: input.checkoutUrl || null,
       status: 'started'
@@ -138,11 +302,10 @@ export async function recordGivingSelection(input: { amountCents?: number; check
 
 export async function saveFavorite(targetType: string, targetId: string, metadata: Record<string, unknown> = {}) {
   if (!hasSupabase) return { targetType, targetId };
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) throw new Error('Sign in before saving favorites.');
+  const userId = await requireUserId('save this');
   const { data, error } = await supabase
     .from('user_favorites')
-    .upsert({ user_id: userResult.user.id, target_type: targetType, target_id: targetId, metadata })
+    .upsert({ user_id: userId, target_type: targetType, target_id: targetId, metadata })
     .select('target_id')
     .single();
   if (error) throw error;
@@ -187,11 +350,10 @@ function unsignedHex(value: number) {
 
 export async function recordDownloadIntent(input: { mediaItemId: string; fileUrl?: string }) {
   if (!hasSupabase) return { id: `local-${Date.now()}` };
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) throw new Error('Sign in before saving downloads.');
+  const userId = await requireUserId('save downloads');
   const { data, error } = await supabase
     .from('user_downloads')
-    .insert({ user_id: userResult.user.id, media_item_id: input.mediaItemId, file_url: input.fileUrl || null, status: 'queued' })
+    .insert({ user_id: userId, media_item_id: input.mediaItemId, file_url: input.fileUrl || null, status: 'queued' })
     .select('id')
     .single();
   if (error) throw error;
@@ -200,16 +362,16 @@ export async function recordDownloadIntent(input: { mediaItemId: string; fileUrl
 
 export async function getUserDownloads(): Promise<{ id: string; title: string; mediaType?: string; fileUrl?: string; status: string; createdAt?: string }[]> {
   if (!hasSupabase) return [];
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) return [];
+  const userId = await currentUserId();
+  if (!userId) return [];
   const { data, error } = await supabase
     .from('user_downloads')
     .select('id, file_url, status, created_at, media_items(title, media_type, file_url, external_url)')
-    .eq('user_id', userResult.user.id)
+    .eq('user_id', userId)
     .order('created_at', { ascending: false })
     .limit(40);
-  if (error || !data) return [];
-  return data.map((row: any) => ({
+  if (error) throw error;
+  return (data || []).map((row: any) => ({
     id: row.id,
     title: row.media_items?.title || 'Downloaded media',
     mediaType: row.media_items?.media_type || undefined,
@@ -219,105 +381,219 @@ export async function getUserDownloads(): Promise<{ id: string; title: string; m
   }));
 }
 
-export async function getPrayerRequests(): Promise<PrayerRequest[]> {
+// ---------------------------------------------------------------------------
+// Prayer
+// ---------------------------------------------------------------------------
+
+/**
+ * The prayer wall.
+ *
+ * By default this is only the requests people chose to share publicly — a
+ * private request must never appear on a wall other members can read.
+ *
+ * Pass `includeMine: true` and it also returns the signed-in person's own
+ * requests, private ones included. That is what makes a request someone just
+ * submitted show up straight away: the form is private by default, so a
+ * public-only list could never contain it. Still one round trip; the database
+ * already restricts other people's private rows.
+ */
+export async function getPrayerRequests(options: { limit?: number; includeMine?: boolean } = {}): Promise<PrayerRequest[]> {
   if (!hasSupabase) return prayerRequests;
-  const { data, error } = await supabase
-    .from('prayer_requests')
-    .select('*')
-    .eq('is_private', false)
-    .order('created_at', { ascending: false })
-    .limit(20);
-  if (error || !data) return prayerRequests;
-  return data.map((row) => ({
-    id: row.id,
-    name: row.name || 'Anonymous',
-    category: row.category || 'General',
-    request: row.request,
-    isPrivate: row.is_private,
-    consentReceived: row.consent_received,
-    status: row.status,
-    createdAt: row.created_at
-  }));
+  const limit = options.limit ?? 30;
+
+  let query = supabase.from('prayer_requests').select(PRAYER_COLUMNS);
+  if (options.includeMine) {
+    const userId = await currentUserId();
+    query = userId ? query.or(`is_private.eq.false,created_by.eq.${userId}`) : query.eq('is_private', false);
+  } else {
+    query = query.eq('is_private', false);
+  }
+
+  const { data, error } = await query.order('created_at', { ascending: false }).limit(limit);
+  if (error) throw error;
+  return (data || []).map(mapPrayer);
 }
 
-export async function getMyPrayerRequests(): Promise<PrayerRequest[]> {
+export async function getMyPrayerRequests(options: { limit?: number } = {}): Promise<PrayerRequest[]> {
   if (!hasSupabase) return prayerRequests;
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) return [];
+  const userId = await currentUserId();
+  if (!userId) return [];
   const { data, error } = await supabase
     .from('prayer_requests')
-    .select('*')
-    .eq('created_by', userResult.user.id)
+    .select(PRAYER_COLUMNS)
+    .eq('created_by', userId)
     .order('created_at', { ascending: false })
-    .limit(50);
-  if (error || !data) return [];
-  return data.map((row) => ({
-    id: row.id,
-    name: row.name || 'Anonymous',
-    category: row.category || 'General',
-    request: row.request,
-    isPrivate: row.is_private,
-    consentReceived: row.consent_received,
-    status: row.status,
-    createdAt: row.created_at
-  }));
+    .limit(options.limit ?? 50);
+  if (error) throw error;
+  return (data || []).map(mapPrayer);
 }
 
+/**
+ * Save a prayer request and hand the saved row straight back, so the screen
+ * can show it immediately instead of waiting for another read.
+ * `isPrivate` comes back too: a private request belongs in "My requests", not
+ * on the public wall, and the screen needs to know which list to show.
+ */
 export async function submitPrayerRequest(input: {
   name: string;
   category: string;
   request: string;
   isPrivate: boolean;
   consentReceived: boolean;
-}) {
-  if (!input.consentReceived) throw new Error('Consent is required before submitting a prayer request.');
-  if (!hasSupabase) return { id: `local-${Date.now()}` };
-  const { data: session } = await supabase.auth.getUser();
+  region?: string;
+}): Promise<PrayerRequest> {
+  if (!input.consentReceived) {
+    throw new FriendlyError('Please tick the consent box so we know it is alright to pray over this.');
+  }
+  if (!input.request.trim()) {
+    throw new FriendlyError('Please write what you would like us to pray for.');
+  }
+  if (!hasSupabase) {
+    return {
+      id: `local-${Date.now()}`,
+      name: input.name || 'Anonymous',
+      category: input.category || 'General',
+      request: input.request,
+      isPrivate: input.isPrivate,
+      consentReceived: input.consentReceived,
+      status: 'new',
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  const userId = await currentUserId();
   const { data, error } = await supabase
     .from('prayer_requests')
     .insert({
       name: input.name,
       category: input.category,
       request: input.request,
+      region: input.region || null,
       is_private: input.isPrivate,
       consent_received: input.consentReceived,
-      created_by: session.user?.id || null
+      created_by: userId
     })
-    .select('id')
-    .single();
+    .select(PRAYER_COLUMNS)
+    .maybeSingle();
   if (error) throw error;
-  return data;
+  // The request IS saved at this point. If the security rules would not read
+  // the row back to us (an anonymous, private request), build the row here
+  // rather than telling somebody their prayer failed when it did not.
+  if (!data) {
+    return {
+      id: `pending-${Date.now()}`,
+      name: input.name || 'Anonymous',
+      category: input.category || 'General',
+      request: input.request,
+      isPrivate: input.isPrivate,
+      consentReceived: input.consentReceived,
+      status: 'new',
+      createdAt: new Date().toISOString(),
+    };
+  }
+  return mapPrayer(data);
 }
 
-export async function createAdminStory(input: {
-  title: string;
+// ---------------------------------------------------------------------------
+// Posting stories
+// ---------------------------------------------------------------------------
+
+type StoryInput = {
+  title?: string;
   category?: string;
   body?: string;
   region?: string;
   imageUrl?: string;
   actionUrl?: string;
-}) {
-  if (!hasSupabase) return { id: `local-story-${Date.now()}` };
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) throw new Error('Sign in before publishing stories.');
+};
+
+function storyRow(input: StoryInput, userId: string) {
+  const now = new Date();
+  return {
+    // The title is optional for the person posting. A migration is dropping
+    // the NOT NULL on this column; until it lands we send an empty string,
+    // which satisfies the old constraint and the new one equally.
+    title: (input.title || '').trim(),
+    category: input.category || null,
+    body: input.body || null,
+    region: input.region || null,
+    image_url: input.imageUrl || null,
+    action_url: input.actionUrl || null,
+    status: 'published',
+    // 'member' is the only value the read policy shows to everybody. The
+    // column is the app_role enum — there is no 'public' value, and anything
+    // above 'member' would hide the story from ordinary members.
+    visibility_role: 'member',
+    created_by: userId,
+    published_at: now.toISOString(),
+    // Written here as well as defaulted in the database, so a story is right
+    // even if the live default is ever changed.
+    expires_at: new Date(now.getTime() + STORY_LIFETIME_MS).toISOString(),
+  };
+}
+
+async function insertStory(input: StoryInput, action: string): Promise<AppStoryRow> {
+  if (!hasSupabase) {
+    return {
+      id: `local-story-${Date.now()}`,
+      title: (input.title || '').trim(),
+      body: input.body,
+      region: input.region,
+      imageUrl: input.imageUrl,
+      publishedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + STORY_LIFETIME_MS).toISOString(),
+    };
+  }
+  const userId = await requireUserId(action);
   const { data, error } = await supabase
     .from('app_stories')
-    .insert({
-      title: input.title,
-      category: input.category || null,
-      body: input.body || null,
-      region: input.region || null,
-      image_url: input.imageUrl || null,
-      action_url: input.actionUrl || null,
-      status: 'published',
-      created_by: userResult.user.id,
-      published_at: new Date().toISOString(),
-    })
-    .select('id')
+    .insert(storyRow(input, userId))
+    .select(STORY_COLUMNS)
     .single();
   if (error) throw error;
-  return data;
+  return mapStory(data);
 }
+
+/**
+ * Post a story as a leader. Returns the saved story so the screen can drop it
+ * into the ring at once — no second read, no waiting.
+ */
+export async function createAdminStory(input: StoryInput): Promise<AppStoryRow> {
+  return insertStory(input, 'post a story');
+}
+
+/**
+ * Post a story as an ordinary member — their city, their testimony.
+ * Same row as the leader path; the author is always the person posting it,
+ * and the database decides whether they are allowed.
+ */
+export async function createMemberStory(input: StoryInput): Promise<AppStoryRow> {
+  return insertStory(input, 'share your story');
+}
+
+/**
+ * Remove a story you posted yourself. Proves the row actually went: if the
+ * database refused, the person is told plainly instead of watching a spinner.
+ */
+export async function deleteMyStory(id: string): Promise<{ id: string }> {
+  if (!hasSupabase) return { id };
+  const userId = await requireUserId('remove your story');
+  const { data, error } = await supabase
+    .from('app_stories')
+    .delete()
+    .eq('id', id)
+    .eq('created_by', userId)
+    .select('id');
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    throw new FriendlyError('We could not remove that story. It may already be gone, or it may have been posted by someone else.');
+  }
+  return { id };
+}
+
+// ---------------------------------------------------------------------------
+// Posting media and events
+// ---------------------------------------------------------------------------
 
 export async function createAdminMediaItem(input: {
   mediaType: MediaKind;
@@ -330,10 +606,30 @@ export async function createAdminMediaItem(input: {
   externalUrl?: string;
   isDownloadable?: boolean;
   isFeatured?: boolean;
-}) {
-  if (!hasSupabase) return { id: `local-media-${Date.now()}` };
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) throw new Error('Sign in before publishing media.');
+}): Promise<MediaItem> {
+  const externalUrl = input.externalUrl || undefined;
+  // A YouTube link always has a cover picture. If the leader did not choose
+  // one, use the video's own.
+  const thumbnailUrl = input.thumbnailUrl || (externalUrl ? youtubeThumbnailUrl(externalUrl) || undefined : undefined);
+
+  if (!hasSupabase) {
+    return {
+      id: `local-media-${Date.now()}`,
+      mediaType: input.mediaType,
+      title: input.title,
+      description: input.description,
+      speaker: input.speaker,
+      scriptureReference: input.scriptureReference,
+      thumbnailUrl,
+      fileUrl: input.fileUrl,
+      externalUrl,
+      isDownloadable: Boolean(input.isDownloadable),
+      isFeatured: Boolean(input.isFeatured),
+      publishedAt: new Date().toISOString(),
+    };
+  }
+
+  const userId = await requireUserId('post media');
   const { data, error } = await supabase
     .from('media_items')
     .insert({
@@ -342,19 +638,19 @@ export async function createAdminMediaItem(input: {
       description: input.description || null,
       speaker: input.speaker || null,
       scripture_reference: input.scriptureReference || null,
-      thumbnail_url: input.thumbnailUrl || null,
+      thumbnail_url: thumbnailUrl || null,
       file_url: input.fileUrl || null,
-      external_url: input.externalUrl || null,
+      external_url: externalUrl || null,
       is_downloadable: Boolean(input.isDownloadable),
       is_featured: Boolean(input.isFeatured),
       status: 'published',
-      created_by: userResult.user.id,
+      created_by: userId,
       published_at: new Date().toISOString(),
     })
-    .select('id')
+    .select(MEDIA_COLUMNS)
     .single();
   if (error) throw error;
-  return data;
+  return mapMedia(data);
 }
 
 export async function createAdminEvent(input: {
@@ -366,8 +662,6 @@ export async function createAdminEvent(input: {
   registrationUrl?: string;
 }) {
   if (!hasSupabase) return { id: `local-event-${Date.now()}` };
-  const { data: userResult } = await supabase.auth.getUser();
-  if (!userResult.user) throw new Error('Sign in before publishing events.');
   const { data, error } = await supabase
     .from('events')
     .insert({
