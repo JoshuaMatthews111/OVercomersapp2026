@@ -1,6 +1,6 @@
 {
   "name": "overcomers-global-network-app",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
@@ -11,6 +11,11 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "doctor": "npx expo-doctor",
+    "test": "node --test qa/control-policy.test.mjs qa/request-timeout.test.mjs qa/upload-body.test.mjs qa/standards/check-static.test.mjs",
+    "test:gate": "node --test qa/standards/check-static.test.mjs",
+    "gate": "node qa/standards/check-static.mjs",
+    "gate:ios": "node qa/standards/check-static.mjs --platform ios",
+    "gate:android": "node qa/standards/check-static.mjs --platform android",
     "export:ios": "expo export --platform ios --output-dir dist-ios",
     "export:android": "expo export --platform android --output-dir dist-android",
     "eas:ios": "eas build --platform ios --profile preview --non-interactive",

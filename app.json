@@ -3,18 +3,18 @@
     "name": "Overcomers Global Network",
     "slug": "overcomers-global-network-app",
     "scheme": "ognapp",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/ogn-app-icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.overcomers.globalnetwork.app",
+      "buildNumber": "31",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "OGN uses your location to help record outreach territories, follow-up locations, and untapped neighborhoods for evangelism teams.",
-        "NSPhotoLibraryUsageDescription": "OGN lets you choose photos and videos for your profile, ministry stories, media thumbnails, and admin uploads.",
-        "NSCameraUsageDescription": "OGN lets you take photos for your profile, ministry stories, and ministry uploads.",
-        "NSMicrophoneUsageDescription": "OGN uses microphone access only when you choose to upload or record media.",
+        "NSLocationWhenInUseUsageDescription": "Overcomers uses your location on the Evangelism map to show where you are, so you can save an outreach area, a visit or a follow-up in the right place.",
+        "NSCameraUsageDescription": "Overcomers opens the camera when you tap Camera in a chat, so you can take a photo or a short video and send it to the conversation.",
+        "NSMicrophoneUsageDescription": "Overcomers uses the microphone only while you are recording a video with the chat camera, so the video you send has its sound.",
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": [
           "audio"
@@ -24,6 +24,8 @@
     },
     "android": {
       "package": "com.overcomers.globalnetwork.app",
+      "versionCode": 15,
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
@@ -41,23 +43,35 @@
     "plugins": [
       "./plugins/with-short-app-name",
       "expo-router",
-      "expo-location",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Overcomers uses your location on the Evangelism map to show where you are, so you can save an outreach area, a visit or a follow-up in the right place.",
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false,
+          "motionUsagePermission": false
+        }
+      ],
       "expo-notifications",
       [
         "expo-splash-screen",
         {
           "image": "./assets/images/ogn-logo-transparent.png",
           "resizeMode": "contain",
-          "backgroundColor": "#071B45"
+          "backgroundColor": "#071B45",
+          "dark": {
+            "image": "./assets/images/ogn-logo-transparent.png",
+            "backgroundColor": "#071B45"
+          }
         }
       ],
       "expo-font",
       [
         "expo-image-picker",
         {
-          "photosPermission": "OGN lets you choose photos and videos for your profile, ministry stories, media thumbnails, and admin uploads.",
-          "cameraPermission": "OGN lets you take photos for your profile, ministry stories, and ministry uploads.",
-          "microphonePermission": "OGN uses microphone access only when you choose to upload or record media."
+          "photosPermission": false,
+          "cameraPermission": "Overcomers opens the camera when you tap Camera in a chat, so you can take a photo or a short video and send it to the conversation.",
+          "microphonePermission": "Overcomers uses the microphone only while you are recording a video with the chat camera, so the video you send has its sound."
         }
       ],
       [

@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import { colors } from '../lib/theme';
+import { AppTheme, createThemedStyles, getTheme } from '../lib/theme';
 import { ChatRoom } from '../types/models';
 
 /**
@@ -80,39 +80,44 @@ export function formatDayLabel(value: string) {
 }
 
 export function MessageBody({ message, dark, own, onOpenUrl }: { message: string; dark: boolean; own?: boolean; onOpenUrl: (url?: string) => void }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
   const url = getFirstUrl(message);
   const cleanMessage = url ? message.replace(url, '').trim() : message;
   const kind = attachmentKind(url);
   return (
     <View>
-      {cleanMessage ? <Text style={[styles.messageBody, dark && styles.messageBodyDark, own && !dark && styles.messageBodyOwn]}>{cleanMessage}</Text> : null}
+      {cleanMessage ? <Text style={[styles.messageBody, own && !dark && styles.messageBodyOwn]}>{cleanMessage}</Text> : null}
       {url ? (
-        <Pressable onPress={() => onOpenUrl(url)} style={[styles.linkPreview, dark && styles.linkPreviewDark]}>
-          <View style={[styles.linkIcon, dark && styles.linkIconDark]}>
-            <Ionicons name={attachmentIcon(kind)} size={18} color={dark ? colors.gold : colors.royalBlue} />
+        <Pressable
+          accessibilityRole="link"
+          accessibilityLabel={kind === 'link' ? 'Open the link in this message' : `Open the ${kind} in this message`}
+          onPress={() => onOpenUrl(url)}
+          style={styles.linkPreview}
+        >
+          <View style={styles.linkIcon}>
+            <Ionicons name={attachmentIcon(kind)} size={18} color={theme.colors.accent} />
           </View>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.linkTitle, dark && styles.linkTitleDark]}>{kind === 'link' ? 'Open link' : `Open ${kind}`}</Text>
-            <Text numberOfLines={1} style={[styles.linkUrl, dark && styles.linkUrlDark]}>{url}</Text>
+            <Text style={styles.linkTitle}>{kind === 'link' ? 'Open link' : `Open ${kind}`}</Text>
+            <Text numberOfLines={1} style={styles.linkUrl}>{url}</Text>
           </View>
-          <Ionicons name="open-outline" size={16} color={dark ? colors.gold : colors.deepGold} />
+          <Ionicons name="open-outline" size={16} color={theme.colors.accent} />
         </Pressable>
       ) : null}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  messageBody: { color: colors.textBody, lineHeight: 21, fontSize: 15 },
-  messageBodyDark: { color: 'rgba(255,255,255,0.9)' },
-  // Own bubbles are royal blue in light mode; the words must be white on them.
-  messageBodyOwn: { color: colors.white },
-  linkPreview: { marginTop: 8, flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, borderRadius: 12, backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.3)' },
-  linkPreviewDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.22)' },
-  linkIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
-  linkIconDark: { backgroundColor: 'rgba(212,175,55,0.14)' },
-  linkTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 13 },
-  linkTitleDark: { color: colors.white },
-  linkUrl: { color: colors.muted, fontSize: 11, marginTop: 2 },
-  linkUrlDark: { color: 'rgba(255,255,255,0.55)' },
-});
+const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
+  messageBody: { color: t.colors.textPrimary, lineHeight: 21, fontSize: t.type.body },
+  // Own bubbles are navy in light mode; the words must be white on them.
+  messageBodyOwn: { color: t.colors.textOnBrand },
+  linkPreview: {
+    marginTop: 8, alignSelf: 'stretch', minWidth: 200, minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10,
+    borderRadius: t.radius.md, backgroundColor: t.colors.surfaceRaised, borderWidth: 1, borderColor: t.colors.accentBorder,
+  },
+  linkIcon: { width: 40, height: 40, borderRadius: t.radius.md, backgroundColor: t.colors.accentMuted, alignItems: 'center', justifyContent: 'center' },
+  linkTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+  linkUrl: { color: t.colors.textMuted, fontSize: t.type.overline, marginTop: 2 },
+}));

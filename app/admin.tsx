@@ -1,16 +1,39 @@
 // Admin, the WhatsApp way. One home with five big rows. Each row opens one
 // simple page that does one job. No wall of forms.
+//
+// Two rules this screen now keeps, because the owner said submissions were
+// "extremely slow ... and no way for me to check to see if it's like loading":
+//   1. Nothing happens in silence. Every upload draws a real bar with a real
+//      percentage and the name of the file going out.
+//   2. Nothing waits on a full reload. A delete, a publish or a post updates
+//      what is on screen at once and refreshes the rest in the background.
 import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router, useLocalSearchParams } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StatusBar, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Animated,
+  BackHandler,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Switch,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   AdminWorkbench,
+  ManagedMedia,
+  deleteMediaItem,
   deleteStory,
   getAdminWorkbench,
   grantUserRole,
@@ -26,22 +49,31 @@ import {
 import { useAccessProfile } from '../lib/accessControl';
 import { ChatProfileSearchResult, searchChatProfiles } from '../lib/chatService';
 import { createAdminEvent, createAdminMediaItem, createAdminStory } from '../lib/contentService';
-import { embedUrl } from '../lib/embed';
+import { embedUrl, fetchEmbedMetadata, thumbnailFromUrl } from '../lib/embed';
 import { friendlyError } from '../lib/errorMessages';
-import { colors, shadows } from '../lib/theme';
-import { useThemePreference } from '../lib/themePreference';
-import { uploadDocumentAsset, uploadPickedAsset } from '../lib/uploadService';
+import { AppTheme, createThemedStyles } from '../lib/theme';
+import { useAppTheme } from '../lib/themePreference';
+import { friendlyUploadError, uploadDocumentAsset, uploadPickedAsset } from '../lib/uploadService';
 import { AppRole, MediaKind } from '../types/models';
 
 type Page = 'home' | 'review' | 'post' | 'people' | 'notice' | 'library';
 type PostKind = 'story' | 'media' | 'event' | null;
+
+/** What to say when something worked. Never an empty string — see S12. */
+type Done = { title: string; body?: string };
+
+/** Change the workbench that is already on screen, without a round trip. */
+type Patch = (workbench: AdminWorkbench) => AdminWorkbench;
+type RunAction = (done: Done, action: () => Promise<unknown>, patch?: Patch) => Promise<void>;
 
 // The four switches a person can have. Everything else stays under the hood.
 const PEOPLE_SWITCHES: { role: AppRole; label: string; hint: string }[] = [
   { role: 'admin', label: 'Admin', hint: 'Can do everything here' },
   { role: 'moderator', label: 'Moderator', hint: 'Can remove chat messages' },
   { role: 'media_admin', label: 'Can post media', hint: 'Sermons, videos, music' },
-  { role: 'prayer_team', label: 'Prayer team', hint: 'Sees prayer requests' },
+  // Deliberately does not promise "sees prayer requests": the database still
+  // reads prayer with is_staff_or_above, so this role alone grants nothing yet.
+  { role: 'prayer_team', label: 'Prayer team', hint: 'Joins the prayer team' },
 ];
 
 const AUDIENCES: { key: PushAudience; label: string }[] = [
@@ -58,51 +90,121 @@ const MEDIA_KINDS: { key: MediaKind; label: string; icon: keyof typeof Ionicons.
   { key: 'article', label: 'Article', icon: 'document-text' },
 ];
 
+/** The cover a media row can actually show today, derived or stored. */
+function coverFor(item: ManagedMedia): string | null {
+  return item.thumbnailUrl || thumbnailFromUrl(item.externalUrl || '') || null;
+}
+
 export default function AdminScreen() {
   const { access, loadingAccess } = useAccessProfile();
-  const { themePreference } = useThemePreference();
-  const dark = themePreference === 'dark';
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   // The Chat tab's "Send" button deep-links straight to the notice form.
   const params = useLocalSearchParams<{ page?: string }>();
   const [page, setPage] = useState<Page>(typeof params.page === 'string' && ['review', 'post', 'people', 'notice', 'library'].includes(params.page) ? (params.page as Page) : 'home');
   const [workbench, setWorkbench] = useState<AdminWorkbench | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState('');
 
-  async function refresh() {
-    if (loadingAccess || (!access.canManageContent && !access.canModerateChat)) return;
-    try { setWorkbench(await getAdminWorkbench()); } catch { /* keep what we have */ }
-  }
-  useEffect(() => {
-    if (!loadingAccess && (access.canManageContent || access.canModerateChat)) refresh();
-    else setWorkbench(null);
-  }, [loadingAccess, access.userId, access.canManageContent, access.canModerateChat]);
+  const canOpen = !loadingAccess && access.canOpenAdmin;
 
-  async function run(done: string, action: () => Promise<unknown>) {
-    setBusy(true);
+  const refresh = useCallback(async () => {
+    if (!canOpen) return;
     try {
-      await action();
-      await refresh();
-      if (done) Alert.alert(done);
+      setWorkbench(await getAdminWorkbench());
+      setLoadError('');
     } catch (err) {
-      Alert.alert('That did not work', friendlyError(err, 'Check your permissions and try again.'));
+      // Never leave "All clear" sitting over a failed read (A4, NO-SILENT-FAILURE).
+      setLoadError(friendlyError(err, 'We could not load this page just now. Pull down to try again.'));
+    }
+  }, [canOpen]);
+
+  // Come back to Admin and it reloads. Post something, come back, it is there.
+  useFocusEffect(
+    useCallback(() => {
+      if (!canOpen) {
+        setWorkbench(null);
+        return;
+      }
+      refresh();
+    }, [canOpen, refresh])
+  );
+
+  // Android's back gesture must do what the on-screen back arrow does.
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (page !== 'home') {
+        setPage('home');
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [page]);
+
+  async function pullToRefresh() {
+    setRefreshing(true);
+    try {
+      await refresh();
     } finally {
-      setBusy(false);
+      setRefreshing(false);
     }
   }
+
+  const applyLocally = useCallback((patch: Patch) => {
+    setWorkbench((current) => (current ? patch(current) : current));
+  }, []);
+
+  /**
+   * Do one thing, say so, and show the result immediately.
+   *
+   * The old version waited for a seven-query reload of the whole workbench
+   * before it let go of the busy flag, and it was called with an empty success
+   * message — so a delete looked like nothing at all had happened. Now the list
+   * on screen changes at once and the reload happens quietly behind it.
+   */
+  const run = useCallback<RunAction>(
+    async (done, action, patch) => {
+      setBusy(true);
+      try {
+        await action();
+        if (patch) applyLocally(patch);
+        Alert.alert(done.title, done.body);
+        refresh().catch((err) =>
+          setLoadError(friendlyError(err, 'We could not refresh this page. Pull down to try again.'))
+        );
+      } catch (err) {
+        Alert.alert('That did not work', friendlyError(err, 'Please check your connection and try again.'));
+      } finally {
+        setBusy(false);
+      }
+    },
+    [applyLocally, refresh]
+  );
 
   const heldMessages = (workbench?.messages || []).filter((m) => m.isFlagged);
   const waitingStories = (workbench?.stories || []).filter((s) => s.status !== 'published');
   const newPrayers = (workbench?.prayers || []).filter((p) => p.status === 'new');
   const reviewCount = heldMessages.length + waitingStories.length + newPrayers.length;
+  const somethingMissing = Boolean(loadError) || Boolean(workbench?.unavailable.length);
+  const stillLoading = workbench === null && !loadError;
 
   if (loadingAccess) {
-    return <Shell dark={dark} title="Admin" onBack={() => router.back()}><ActivityIndicator color={colors.gold} /></Shell>;
+    return (
+      <Shell title="Admin" onBack={() => router.back()}>
+        <View style={styles.empty}>
+          <ActivityIndicator color={theme.colors.accent} />
+          <Text style={styles.cardMeta}>Checking what you can do here...</Text>
+        </View>
+      </Shell>
+    );
   }
 
-  if (!access.canManageContent && !access.canModerateChat) {
+  if (!access.canOpenAdmin) {
     return (
-      <Shell dark={dark} title="Admin" onBack={() => router.back()}>
-        <Empty dark={dark} icon="lock-closed-outline" title="Admins only" body="Ask an OGN admin to switch on Admin for your account." />
+      <Shell title="Admin" onBack={() => router.back()}>
+        <Empty icon="lock-closed-outline" title="Admins only" body="Ask an OGN admin to switch on Admin for your account." />
       </Shell>
     );
   }
@@ -110,143 +212,307 @@ export default function AdminScreen() {
   const titles: Record<Page, string> = { home: 'Admin', review: 'Needs your look', post: 'Post something', people: 'People', notice: 'Send a notice', library: 'Library' };
 
   return (
-    <Shell dark={dark} title={titles[page]} onBack={() => (page === 'home' ? router.back() : setPage('home'))} busy={busy}>
+    <Shell
+      title={titles[page]}
+      onBack={() => (page === 'home' ? router.back() : setPage('home'))}
+      busy={busy}
+      refreshing={refreshing}
+      onRefresh={pullToRefresh}
+    >
+      {loadError ? <Notice tone="warn" text={loadError} /> : null}
+      {workbench?.unavailable.length ? (
+        <Notice tone="warn" text={`We could not load ${workbench.unavailable.join(' or ')}. Pull down to try again.`} />
+      ) : null}
+
       {page === 'home' ? (
         <View style={styles.rows}>
-          <Row dark={dark} icon="eye-outline" tint="#E0457B" title="Needs your look" sub={reviewCount ? `${reviewCount} waiting` : 'All clear'} badge={reviewCount} onPress={() => setPage('review')} />
-          <Row dark={dark} icon="add-circle-outline" tint={colors.gold} title="Post something" sub="Story, sermon, video, music, event" onPress={() => setPage('post')} />
-          <Row dark={dark} icon="people-outline" tint="#3C7DFF" title="People" sub="Make someone an admin or moderator" onPress={() => setPage('people')} />
-          <Row dark={dark} icon="megaphone-outline" tint="#FF7A00" title="Send a notice" sub="Push a message to phones" onPress={() => setPage('notice')} />
-          <Row dark={dark} icon="albums-outline" tint="#7C4DFF" title="Library" sub="Feature, hide, or delete what is live" onPress={() => setPage('library')} />
+          {/* Five rows. That is the whole screen — DO-NOT-BREAK item 21. */}
+          {access.canModerateChat || access.canManageContent || access.canManagePrayer ? (
+            <Row
+              icon="eye-outline"
+              tone="danger"
+              title="Needs your look"
+              sub={stillLoading ? 'Having a look...' : somethingMissing ? 'Some of this could not be loaded' : reviewCount ? `${reviewCount} waiting` : 'All clear'}
+              badge={reviewCount}
+              onPress={() => setPage('review')}
+            />
+          ) : null}
+          {access.canManageContent || access.canManageMedia ? (
+            <Row icon="add-circle-outline" tone="accent" title="Post something" sub="Story, sermon, video, music, event" onPress={() => setPage('post')} />
+          ) : null}
+          {access.canOverrideLeaderData ? (
+            <Row icon="people-outline" tone="brand" title="People" sub="Make someone an admin or moderator" onPress={() => setPage('people')} />
+          ) : null}
+          <Row icon="megaphone-outline" tone="warning" title="Send a notice" sub="Push a message to phones" onPress={() => setPage('notice')} />
+          {access.canManageContent || access.canManageMedia ? (
+            <Row icon="albums-outline" tone="success" title="Library" sub="Feature, hide, or delete what is live" onPress={() => setPage('library')} />
+          ) : null}
         </View>
       ) : null}
 
       {page === 'review' ? (
         <View style={styles.rows}>
-          {!reviewCount ? <Empty dark={dark} icon="checkmark-circle-outline" title="All clear" body="Nothing is waiting for you." /> : null}
-          {heldMessages.length ? <Label dark={dark} text="Held chat messages" /> : null}
+          {stillLoading ? (
+            <View style={styles.empty}>
+              <ActivityIndicator color={theme.colors.accent} />
+              <Text style={styles.cardMeta}>Looking for anything that needs you...</Text>
+            </View>
+          ) : null}
+          {!stillLoading && !reviewCount && !somethingMissing ? (
+            <Empty icon="checkmark-circle-outline" title="All clear" body="Nothing is waiting for you." />
+          ) : null}
+          {heldMessages.length ? <Label text="Held chat messages" /> : null}
           {heldMessages.map((m) => (
-            <Card key={m.id} dark={dark}>
-              <Text style={[styles.cardTitle, dark && styles.textDark]}>{m.channelName || 'Chat'}</Text>
-              <Text style={[styles.cardBody, dark && styles.textDimDark]}>{m.body || '(attachment only)'}</Text>
+            <Card key={m.id}>
+              <Text style={styles.cardTitle}>{m.channelName || 'Chat'}</Text>
+              <Text style={styles.cardBody}>{m.body || '(attachment only)'}</Text>
               <View style={styles.actions}>
-                <Btn label="Approve" onPress={() => run('', () => moderateMessage(m.id, 'approve'))} />
-                <Btn label="Remove" danger onPress={() => run('', () => moderateMessage(m.id, 'remove'))} />
+                <Btn
+                  label="Approve"
+                  disabled={busy}
+                  onPress={() =>
+                    run(
+                      { title: 'Message approved', body: 'It is back in the room for everyone.' },
+                      () => moderateMessage(m.id, 'approve'),
+                      (w) => ({ ...w, messages: w.messages.filter((x) => x.id !== m.id) })
+                    )
+                  }
+                />
+                <Btn
+                  label="Remove"
+                  danger
+                  disabled={busy}
+                  onPress={() =>
+                    confirmAction('Remove this message?', 'Nobody in the room will see it again.', 'Remove', () =>
+                      run(
+                        { title: 'Message removed', body: 'It is gone from the room.' },
+                        () => moderateMessage(m.id, 'remove'),
+                        (w) => ({ ...w, messages: w.messages.filter((x) => x.id !== m.id) })
+                      )
+                    )
+                  }
+                />
               </View>
             </Card>
           ))}
-          {waitingStories.length ? <Label dark={dark} text="Stories waiting" /> : null}
+          {waitingStories.length ? <Label text="Stories waiting" /> : null}
           {waitingStories.map((s) => (
-            <Card key={s.id} dark={dark}>
-              <Text style={[styles.cardTitle, dark && styles.textDark]}>{s.title}</Text>
-              <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{s.category || 'Story'} • {s.status || 'draft'}</Text>
+            <Card key={s.id}>
+              <Text style={styles.cardTitle}>{s.title}</Text>
+              <Text style={styles.cardMeta}>{s.category || 'Story'} • {s.status || 'draft'}</Text>
               <View style={styles.actions}>
-                <Btn label="Publish" onPress={() => run('', () => setStoryStatus(s.id, 'published'))} />
-                <Btn label="Delete" danger onPress={() => confirmDelete(`"${s.title}"`, () => run('', () => deleteStory(s.id)))} />
+                <Btn
+                  label="Publish"
+                  disabled={busy}
+                  onPress={() =>
+                    run(
+                      { title: 'Story published', body: 'It is on Home now, for the next 24 hours.' },
+                      () => setStoryStatus(s.id, 'published'),
+                      (w) => ({ ...w, stories: w.stories.map((x) => (x.id === s.id ? { ...x, status: 'published' } : x)) })
+                    )
+                  }
+                />
+                <Btn
+                  label="Delete"
+                  danger
+                  disabled={busy}
+                  onPress={() =>
+                    confirmAction('Delete this story?', `"${s.title}" will be removed for everyone.`, 'Delete', () =>
+                      run(
+                        { title: 'Story deleted', body: 'It is gone from Home for everyone.' },
+                        () => deleteStory(s.id),
+                        (w) => ({ ...w, stories: w.stories.filter((x) => x.id !== s.id) })
+                      )
+                    )
+                  }
+                />
               </View>
             </Card>
           ))}
-          {newPrayers.length ? <Label dark={dark} text="New prayer requests" /> : null}
+          {newPrayers.length ? <Label text="New prayer requests" /> : null}
           {newPrayers.map((p) => (
-            <Card key={p.id} dark={dark}>
-              <Text style={[styles.cardTitle, dark && styles.textDark]}>{p.name || 'Someone'}{p.category ? ` • ${p.category}` : ''}</Text>
-              <Text style={[styles.cardBody, dark && styles.textDimDark]}>{p.request}</Text>
+            <Card key={p.id}>
+              <Text style={styles.cardTitle}>{p.name || 'Someone'}{p.category ? ` • ${p.category}` : ''}</Text>
+              <Text style={styles.cardBody}>{p.request}</Text>
               <View style={styles.actions}>
-                <Btn label="We are praying" onPress={() => run('', () => updatePrayerWorkflow({ id: p.id, status: 'praying' }))} />
-                <Btn label="Answered" onPress={() => run('', () => updatePrayerWorkflow({ id: p.id, status: 'answered' }))} />
+                <Btn
+                  label="We are praying"
+                  disabled={busy}
+                  onPress={() =>
+                    run(
+                      { title: 'Marked as praying', body: 'The person will see that the team has it.' },
+                      () => updatePrayerWorkflow({ id: p.id, status: 'praying' }),
+                      (w) => ({ ...w, prayers: w.prayers.map((x) => (x.id === p.id ? { ...x, status: 'praying' } : x)) })
+                    )
+                  }
+                />
+                <Btn
+                  label="Answered"
+                  disabled={busy}
+                  onPress={() =>
+                    run(
+                      { title: 'Marked as answered', body: 'Praise God. It has moved out of the waiting list.' },
+                      () => updatePrayerWorkflow({ id: p.id, status: 'answered' }),
+                      (w) => ({ ...w, prayers: w.prayers.map((x) => (x.id === p.id ? { ...x, status: 'answered' } : x)) })
+                    )
+                  }
+                />
               </View>
             </Card>
           ))}
         </View>
       ) : null}
 
-      {page === 'post' ? <PostPage dark={dark} onDone={refresh} /> : null}
-      {page === 'people' ? <PeoplePage dark={dark} workbench={workbench} run={run} /> : null}
-      {page === 'notice' ? <NoticePage dark={dark} /> : null}
-      {page === 'library' ? <LibraryPage dark={dark} workbench={workbench} run={run} /> : null}
+      {page === 'post' ? <PostPage canManageContent={access.canManageContent} canManageMedia={access.canManageMedia} onPosted={refresh} /> : null}
+      {page === 'people' ? <PeoplePage workbench={workbench} run={run} busy={busy} /> : null}
+      {page === 'notice' ? <NoticePage /> : null}
+      {page === 'library' ? <LibraryPage workbench={workbench} run={run} busy={busy} applyLocally={applyLocally} /> : null}
     </Shell>
   );
 }
 
-function confirmDelete(what: string, onYes: () => void) {
-  Alert.alert('Delete?', `${what} will be removed for everyone.`, [
+function confirmAction(title: string, body: string, confirmLabel: string, onYes: () => void) {
+  Alert.alert(title, body, [
     { text: 'Keep', style: 'cancel' },
-    { text: 'Delete', style: 'destructive', onPress: onYes },
+    { text: confirmLabel, style: 'destructive', onPress: onYes },
   ]);
 }
 
 // ---------- Post something ----------
 
-function PostPage({ dark, onDone }: { dark: boolean; onDone: () => Promise<void> }) {
+function PostPage({ canManageContent, canManageMedia, onPosted }: { canManageContent: boolean; canManageMedia: boolean; onPosted: () => Promise<void> }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const [kind, setKind] = useState<PostKind>(null);
+
   if (!kind) {
     return (
       <View style={styles.tiles}>
-        <Tile dark={dark} icon="images" tint="#E0457B" label="Story" hint="Photo or video, gone in 24h" onPress={() => setKind('story')} />
-        <Tile dark={dark} icon="play-circle" tint={colors.gold} label="Sermon or media" hint="Paste a link or upload" onPress={() => setKind('media')} />
-        <Tile dark={dark} icon="calendar" tint="#3C7DFF" label="Event" hint="Date, place, flyer" onPress={() => setKind('event')} />
+        {canManageContent ? <Tile icon="images" tone="danger" label="Story" hint="Photo or video, gone in 24h" onPress={() => setKind('story')} /> : null}
+        {canManageMedia || canManageContent ? <Tile icon="play-circle" tone="accent" label="Sermon or media" hint="Paste a link or upload" onPress={() => setKind('media')} /> : null}
+        {canManageContent ? <Tile icon="calendar" tone="brand" label="Event" hint="Date, place, flyer" onPress={() => setKind('event')} /> : null}
       </View>
     );
   }
-  if (kind === 'story') return <StoryForm dark={dark} onDone={async () => { await onDone(); setKind(null); }} />;
-  if (kind === 'media') return <MediaForm dark={dark} onDone={async () => { await onDone(); setKind(null); }} />;
-  return <EventForm dark={dark} onDone={async () => { await onDone(); setKind(null); }} />;
+  if (kind === 'story') return <StoryForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
+  if (kind === 'media') return <MediaForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
+  return <EventForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
 }
 
-function StoryForm({ dark, onDone }: { dark: boolean; onDone: () => Promise<void> }) {
+function StoryForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; onStartOver: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const [title, setTitle] = useState('');
   const [caption, setCaption] = useState('');
-  const [media, setMedia] = useState<{ url: string; isVideo: boolean } | null>(null);
+  const [media, setMedia] = useState<{ url: string; isVideo: boolean; name: string }[]>([]);
+  const [transfer, setTransfer] = useState<{ label: string; fraction: number } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [posted, setPosted] = useState(0);
+  const working = saving || Boolean(transfer);
 
   async function pickMedia() {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images', 'videos'], quality: 0.86 });
-    const asset = result.canceled ? null : result.assets[0];
-    if (!asset) return;
-    setSaving(true);
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images', 'videos'],
+      // S5: two photos in one go. Each one becomes its own story card.
+      allowsMultipleSelection: true,
+      selectionLimit: 6,
+      quality: 0.86,
+      videoMaxDuration: 90,
+    });
+    const assets = result.canceled ? [] : result.assets;
+    if (!assets.length) return;
+    const picked: { url: string; isVideo: boolean; name: string }[] = [];
     try {
-      const upload = await uploadPickedAsset({ asset, bucketId: 'story-media', purpose: 'story', pathPrefix: 'stories', relatedTable: 'app_stories' });
-      setMedia({ url: upload.publicUrl, isVideo: asset.type === 'video' });
+      for (let index = 0; index < assets.length; index += 1) {
+        const asset = assets[index];
+        const name = asset.fileName || (asset.type === 'video' ? 'Video' : 'Photo');
+        const step = assets.length > 1 ? `${name} (${index + 1} of ${assets.length})` : name;
+        setTransfer({ label: step, fraction: 0 });
+        const upload = await uploadPickedAsset({
+          asset,
+          bucketId: 'story-media',
+          purpose: 'story',
+          pathPrefix: 'stories',
+          relatedTable: 'app_stories',
+          onProgress: (fraction) => setTransfer({ label: step, fraction }),
+        });
+        picked.push({ url: upload.publicUrl, isVideo: asset.type === 'video', name });
+      }
+      setMedia((current) => [...current, ...picked]);
     } catch (err) {
-      Alert.alert('Upload failed', friendlyError(err, 'Try another photo or video.'));
+      const kept = picked.length ? ` ${picked.length} of ${assets.length} did make it — those are ready to post.` : '';
+      if (picked.length) setMedia((current) => [...current, ...picked]);
+      Alert.alert('Upload stopped', `${friendlyUploadError(err, 'Try another photo or video.')}${kept}`);
     } finally {
-      setSaving(false);
+      setTransfer(null);
     }
   }
 
   async function post() {
-    if (!media) return Alert.alert('Pick a photo or video first');
-    if (!title.trim()) return Alert.alert('Give the story a short title');
+    if (!media.length) return Alert.alert('Pick a photo or video first', 'A story is a picture or a clip, with a few words if you want them.');
     setSaving(true);
+    let done = 0;
     try {
-      await createAdminStory({ title: title.trim(), body: caption.trim() || undefined, imageUrl: media.url });
-      Alert.alert('Story posted', 'It is live on Home for 24 hours.');
-      await onDone();
+      for (const item of media) {
+        // The title is optional now (S9). A story with none shows the caption.
+        await createAdminStory({ title: title.trim() || undefined, body: caption.trim() || undefined, imageUrl: item.url });
+        done += 1;
+        setPosted(done);
+      }
+      setTitle('');
+      setCaption('');
+      setMedia([]);
+      await onPosted();
     } catch (err) {
-      Alert.alert('Not posted', friendlyError(err, 'Check your permissions and try again.'));
+      const partly = done ? `${done} of ${media.length} went up. ` : '';
+      Alert.alert('Not all of it posted', `${partly}${friendlyError(err, 'Please check your connection and try again.')}`);
     } finally {
       setSaving(false);
     }
   }
 
+  if (posted && !media.length) {
+    return (
+      <Success
+        title={posted > 1 ? `${posted} stories are live` : 'Your story is live'}
+        body="It is on Home right now and stays there for 24 hours."
+        actionLabel="Post another"
+        onAction={() => { setPosted(0); onStartOver(); }}
+      />
+    );
+  }
+
   return (
     <View style={styles.form}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Pick a photo or video" onPress={pickMedia} style={[styles.dropzone, dark && styles.dropzoneDark]}>
-        {media && !media.isVideo ? <Image source={{ uri: media.url }} contentFit="cover" style={styles.dropzoneImage} /> : (
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Pick photos or a video for this story. ${media.length ? `${media.length} chosen so far.` : 'Nothing chosen yet.'}`}
+        disabled={working}
+        onPress={pickMedia}
+        style={styles.dropzone}
+      >
+        {media.length && !media[0].isVideo ? (
+          <Image source={{ uri: media[0].url }} accessibilityLabel="The picture you chose" contentFit="cover" style={styles.dropzoneImage} />
+        ) : (
           <>
-            <Ionicons name={media?.isVideo ? 'videocam' : 'camera-outline'} size={34} color={colors.gold} />
-            <Text style={[styles.dropzoneText, dark && styles.textDark]}>{media?.isVideo ? 'Video ready' : 'Tap to pick a photo or video'}</Text>
+            <Ionicons name={media.length ? 'checkmark-circle' : 'camera-outline'} size={34} color={theme.colors.accent} />
+            <Text style={styles.dropzoneText}>{media.length ? `${media.length} ready` : 'Tap to pick photos or a video'}</Text>
           </>
         )}
       </Pressable>
-      <Field dark={dark} value={title} onChange={setTitle} placeholder="Title (short)" />
-      <Field dark={dark} value={caption} onChange={setCaption} placeholder="Caption (optional)" multiline />
-      <Big label={saving ? 'Working...' : 'Post story'} disabled={saving} onPress={post} />
+      {media.length > 1 ? <Text style={styles.cardMeta}>{media.length} pictures. Each one posts as its own story.</Text> : null}
+      {transfer ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
+      <Field label="Title (optional)" value={title} onChange={setTitle} placeholder="Leave it blank if you like" />
+      <Field label="Caption (optional)" value={caption} onChange={setCaption} placeholder="A sentence about this" multiline />
+      <Big label={saving ? `Posting ${posted + 1} of ${media.length}...` : 'Post story'} disabled={working} onPress={post} />
+      <Text style={styles.footnote}>Stories stay on Home for 24 hours, then they go.</Text>
     </View>
   );
 }
 
-function MediaForm({ dark, onDone }: { dark: boolean; onDone: () => Promise<void> }) {
+function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; onStartOver: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const [kind, setKind] = useState<MediaKind>('sermon');
   const [title, setTitle] = useState('');
   const [speaker, setSpeaker] = useState('');
@@ -256,156 +522,338 @@ function MediaForm({ dark, onDone }: { dark: boolean; onDone: () => Promise<void
   const [cover, setCover] = useState('');
   const [featured, setFeatured] = useState(false);
   const [saving, setSaving] = useState(false);
-  const linkOk = useMemo(() => !link.trim() || Boolean(embedUrl(link.trim())) || /\.(mp3|mp4|m4a|m3u8|mov|pdf)(\?|$)/i.test(link.trim()), [link]);
+  const [transfer, setTransfer] = useState<{ label: string; fraction: number } | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [lookupNote, setLookupNote] = useState('');
+  const [autoCover, setAutoCover] = useState('');
+  const [savedTitle, setSavedTitle] = useState('');
+  const working = saving || Boolean(transfer);
+  const trimmedLink = link.trim();
+  const linkOk = useMemo(
+    () => !trimmedLink || Boolean(embedUrl(trimmedLink)) || /\.(mp3|mp4|m4a|m3u8|mov|pdf)(\?|$)/i.test(trimmedLink),
+    [trimmedLink]
+  );
+  const readyToPost = title.trim().length > 0 && (trimmedLink.length > 0 || fileUrl.length > 0) && linkOk;
+
+  // V1: paste a YouTube link and the real title fills itself in. Short budget,
+  // off the Post handler, so a slow network never holds up the form.
+  useEffect(() => {
+    if (!trimmedLink || !embedUrl(trimmedLink)) {
+      setAutoCover('');
+      setLookupNote('');
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(async () => {
+      setLookingUp(true);
+      try {
+        const meta = await fetchEmbedMetadata(trimmedLink, { timeoutMs: 5000 });
+        if (!alive) return;
+        if (meta.thumbnailUrl) setAutoCover(meta.thumbnailUrl);
+        if (meta.title) {
+          setTitle((current) => (current.trim() ? current : meta.title || current));
+          setLookupNote('');
+        } else {
+          setLookupNote('We could not read the title from that link. Type one in and it will post fine.');
+        }
+      } catch (err) {
+        if (alive) setLookupNote(friendlyError(err, 'We could not read the title from that link. Type one in and it will post fine.'));
+      } finally {
+        if (alive) setLookingUp(false);
+      }
+    }, 450);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [trimmedLink]);
 
   async function pickFile() {
     const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true, multiple: false });
     const asset = result.canceled ? null : result.assets?.[0];
     if (!asset) return;
-    setSaving(true);
+    const name = asset.name || 'File';
+    setTransfer({ label: name, fraction: 0 });
     try {
-      const upload = await uploadDocumentAsset({ asset, bucketId: 'app-assets', purpose: 'media_file', pathPrefix: 'media-files', relatedTable: 'media_items' });
+      const upload = await uploadDocumentAsset({
+        asset,
+        bucketId: 'app-assets',
+        purpose: 'media_file',
+        pathPrefix: 'media-files',
+        relatedTable: 'media_items',
+        onProgress: (fraction) => setTransfer({ label: name, fraction }),
+      });
       setFileUrl(upload.publicUrl);
       setFileName(upload.fileName);
     } catch (err) {
-      Alert.alert('Upload failed', friendlyError(err, 'Try another file.'));
+      Alert.alert('Upload stopped', friendlyUploadError(err, 'Try another file.'));
     } finally {
-      setSaving(false);
+      setTransfer(null);
     }
   }
 
   async function pickCover() {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.86 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.9 });
     const asset = result.canceled ? null : result.assets[0];
     if (!asset) return;
-    setSaving(true);
+    const name = asset.fileName || 'Cover picture';
+    setTransfer({ label: name, fraction: 0 });
     try {
-      const upload = await uploadPickedAsset({ asset, bucketId: 'app-assets', purpose: 'media_thumbnail', pathPrefix: 'media-thumbnails', relatedTable: 'media_items' });
+      const upload = await uploadPickedAsset({
+        asset,
+        bucketId: 'app-assets',
+        purpose: 'media_thumbnail',
+        pathPrefix: 'media-thumbnails',
+        relatedTable: 'media_items',
+        onProgress: (fraction) => setTransfer({ label: name, fraction }),
+      });
       setCover(upload.publicUrl);
     } catch (err) {
-      Alert.alert('Upload failed', friendlyError(err, 'Try another image.'));
+      Alert.alert('Upload stopped', friendlyUploadError(err, 'Try another picture.'));
+    } finally {
+      setTransfer(null);
+    }
+  }
+
+  async function post() {
+    if (!readyToPost) return;
+    setSaving(true);
+    try {
+      // The cover: whatever was uploaded, else the video's own picture (V4).
+      const saved = await createAdminMediaItem({
+        mediaType: kind,
+        title: title.trim(),
+        speaker: speaker.trim() || undefined,
+        thumbnailUrl: cover || autoCover || undefined,
+        fileUrl: fileUrl || undefined,
+        externalUrl: trimmedLink || undefined,
+        isDownloadable: Boolean(fileUrl),
+        isFeatured: featured,
+      });
+      setSavedTitle(saved.title || title.trim());
+      setTitle('');
+      setSpeaker('');
+      setLink('');
+      setFileUrl('');
+      setFileName('');
+      setCover('');
+      setAutoCover('');
+      await onPosted();
+    } catch (err) {
+      Alert.alert('Not posted', friendlyError(err, 'Please check your connection and try again.'));
     } finally {
       setSaving(false);
     }
   }
 
-  async function post() {
-    if (!title.trim()) return Alert.alert('Give it a title');
-    if (!link.trim() && !fileUrl) return Alert.alert('Paste a link or upload a file');
-    if (!linkOk) return Alert.alert('Link not recognized', 'Use a YouTube, Vimeo, or Facebook video link, or a direct mp3 / mp4 file.');
-    setSaving(true);
-    try {
-      await createAdminMediaItem({ mediaType: kind, title: title.trim(), speaker: speaker.trim() || undefined, thumbnailUrl: cover || undefined, fileUrl: fileUrl || undefined, externalUrl: link.trim() || undefined, isDownloadable: Boolean(fileUrl), isFeatured: featured });
-      Alert.alert('Posted', 'It is live in the Media tab.');
-      await onDone();
-    } catch (err) {
-      Alert.alert('Not posted', friendlyError(err, 'Check your permissions and try again.'));
-    } finally {
-      setSaving(false);
-    }
+  if (savedTitle) {
+    return (
+      <Success
+        title="It is live"
+        body={`"${savedTitle}" is in the Media tab now, with its cover picture.`}
+        actionLabel="Post another"
+        onAction={() => { setSavedTitle(''); onStartOver(); }}
+      />
+    );
   }
+
+  const showCover = cover || autoCover;
 
   return (
     <View style={styles.form}>
       <View style={styles.chips}>
         {MEDIA_KINDS.map((k) => (
-          <Pressable key={k.key} accessibilityRole="button" accessibilityState={{ selected: kind === k.key }} onPress={() => setKind(k.key)} style={[styles.chip, dark && styles.chipDark, kind === k.key && styles.chipOn]}>
-            <Ionicons name={k.icon} size={16} color={kind === k.key ? '#071231' : dark ? colors.gold : colors.royalBlue} />
-            <Text style={[styles.chipText, dark && styles.textDark, kind === k.key && styles.chipTextOn]}>{k.label}</Text>
+          <Pressable
+            key={k.key}
+            accessibilityRole="button"
+            accessibilityState={{ selected: kind === k.key }}
+            accessibilityLabel={`${k.label}`}
+            onPress={() => setKind(k.key)}
+            style={[styles.chip, kind === k.key && styles.chipOn]}
+          >
+            <Ionicons name={k.icon} size={16} color={kind === k.key ? theme.colors.textOnAccent : theme.colors.accent} />
+            <Text style={[styles.chipText, kind === k.key && styles.chipTextOn]}>{k.label}</Text>
           </Pressable>
         ))}
       </View>
-      <Field dark={dark} value={title} onChange={setTitle} placeholder="Title" />
-      <Field dark={dark} value={speaker} onChange={setSpeaker} placeholder="Speaker or artist (optional)" />
-      <Field dark={dark} value={link} onChange={setLink} placeholder="Paste a YouTube, Vimeo, or Facebook link" autoCapitalize="none" />
-      {!linkOk ? <Text style={styles.warn}>That link will not play. Use YouTube, Vimeo, Facebook, or a direct mp3 / mp4.</Text> : null}
-      <Text style={[styles.or, dark && styles.textDimDark]}>or</Text>
-      <Pressable accessibilityRole="button" onPress={pickFile} style={[styles.dropzoneSmall, dark && styles.dropzoneDark]}>
-        <Ionicons name="cloud-upload-outline" size={22} color={colors.gold} />
-        <Text style={[styles.dropzoneText, dark && styles.textDark]}>{fileName ? `File ready: ${fileName}` : 'Upload an mp3, mp4, or PDF'}</Text>
+      <Field
+        label="Link"
+        value={link}
+        onChange={setLink}
+        placeholder="Paste a YouTube, Vimeo, or Facebook link"
+        autoCapitalize="none"
+        keyboardType="url"
+        autoCorrect={false}
+      />
+      {lookingUp ? (
+        <View style={styles.inlineRow}>
+          <ActivityIndicator color={theme.colors.accent} />
+          <Text style={styles.cardMeta}>Getting the title...</Text>
+        </View>
+      ) : null}
+      {lookupNote ? <Text style={styles.cardMeta}>{lookupNote}</Text> : null}
+      {!linkOk ? <Text style={styles.warn}>That link will not play. Paste one YouTube, Vimeo or Facebook address, or a direct mp3 / mp4.</Text> : null}
+      <Field label="Title" value={title} onChange={setTitle} placeholder="What is this called?" />
+      <Field label="Speaker or artist (optional)" value={speaker} onChange={setSpeaker} placeholder="Who is on it?" />
+      <Text style={styles.or}>or</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Upload a file. ${fileName ? `${fileName} is ready.` : 'Nothing chosen yet.'}`} disabled={working} onPress={pickFile} style={styles.dropzoneSmall}>
+        <Ionicons name="cloud-upload-outline" size={22} color={theme.colors.accent} />
+        <Text style={styles.dropzoneText}>{fileName ? `File ready: ${fileName}` : 'Upload an mp3, mp4, or PDF'}</Text>
       </Pressable>
-      <Pressable accessibilityRole="button" onPress={pickCover} style={[styles.dropzoneSmall, dark && styles.dropzoneDark]}>
-        {cover ? <Image source={{ uri: cover }} contentFit="cover" style={styles.coverThumb} /> : <Ionicons name="image-outline" size={22} color={colors.gold} />}
-        <Text style={[styles.dropzoneText, dark && styles.textDark]}>{cover ? 'Cover ready' : 'Cover image (optional)'}</Text>
+      <Pressable accessibilityRole="button" accessibilityLabel={`Choose a cover picture. ${showCover ? 'One is ready.' : 'None chosen yet.'}`} disabled={working} onPress={pickCover} style={styles.dropzoneSmall}>
+        {showCover ? (
+          <Image source={{ uri: showCover }} accessibilityLabel="The cover picture" contentFit="cover" style={styles.coverThumb} />
+        ) : (
+          <Ionicons name="image-outline" size={22} color={theme.colors.accent} />
+        )}
+        <Text style={styles.dropzoneText}>
+          {cover ? 'Cover ready' : autoCover ? 'Cover taken from the video. Tap to use your own.' : 'Cover image (optional)'}
+        </Text>
       </Pressable>
+      {transfer ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
       <View style={styles.switchRow}>
-        <Text style={[styles.switchLabel, dark && styles.textDark]}>Feature on the Media tab</Text>
-        <Switch value={featured} onValueChange={setFeatured} trackColor={{ true: colors.gold }} />
+        <Text style={styles.switchLabel}>Feature on the Media tab</Text>
+        <Switch value={featured} onValueChange={setFeatured} disabled={working} trackColor={{ true: theme.colors.accentSolid }} />
       </View>
-      <Big label={saving ? 'Working...' : 'Post'} disabled={saving} onPress={post} />
+      <Big label={saving ? 'Posting...' : 'Post'} disabled={working || !readyToPost} onPress={post} />
+      {!readyToPost && !working ? (
+        <Text style={styles.footnote}>
+          {title.trim() ? 'Paste a link or upload a file, then this button turns on.' : 'Give it a title, then this button turns on.'}
+        </Text>
+      ) : null}
     </View>
   );
 }
 
-function EventForm({ dark, onDone }: { dark: boolean; onDone: () => Promise<void> }) {
+function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; onStartOver: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const [title, setTitle] = useState('');
   const [when, setWhen] = useState('');
   const [where, setWhere] = useState('');
   const [link, setLink] = useState('');
   const [flyer, setFlyer] = useState('');
   const [saving, setSaving] = useState(false);
+  const [transfer, setTransfer] = useState<{ label: string; fraction: number } | null>(null);
+  const [savedTitle, setSavedTitle] = useState('');
+  const working = saving || Boolean(transfer);
+  const parsedDate = useMemo(() => {
+    const value = new Date(when.trim());
+    return when.trim() && !Number.isNaN(value.getTime()) ? value : null;
+  }, [when]);
+  const readyToPost = title.trim().length > 0 && Boolean(parsedDate);
 
   async function pickFlyer() {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.86 });
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9 });
     const asset = result.canceled ? null : result.assets[0];
     if (!asset) return;
-    setSaving(true);
+    const name = asset.fileName || 'Flyer';
+    setTransfer({ label: name, fraction: 0 });
     try {
-      const upload = await uploadPickedAsset({ asset, bucketId: 'app-assets', purpose: 'media_thumbnail', pathPrefix: 'event-flyers', relatedTable: 'events' });
+      const upload = await uploadPickedAsset({
+        asset,
+        bucketId: 'app-assets',
+        purpose: 'media_thumbnail',
+        pathPrefix: 'event-flyers',
+        relatedTable: 'events',
+        onProgress: (fraction) => setTransfer({ label: name, fraction }),
+      });
       setFlyer(upload.publicUrl);
     } catch (err) {
-      Alert.alert('Upload failed', friendlyError(err, 'Try another image.'));
+      Alert.alert('Upload stopped', friendlyUploadError(err, 'Try another picture.'));
     } finally {
-      setSaving(false);
+      setTransfer(null);
     }
   }
 
   async function post() {
-    if (!title.trim()) return Alert.alert('Give the event a title');
-    const parsed = new Date(when.trim());
-    if (!when.trim() || Number.isNaN(parsed.getTime())) return Alert.alert('When?', 'Type a date and time like 2026-10-05 7:00 PM.');
+    if (!parsedDate) return;
     setSaving(true);
     try {
-      await createAdminEvent({ title: title.trim(), startsAt: parsed.toISOString(), location: where.trim() || undefined, imageUrl: flyer || undefined, registrationUrl: link.trim() || undefined });
-      Alert.alert('Event posted', 'It is live on Home.');
-      await onDone();
+      await createAdminEvent({
+        title: title.trim(),
+        startsAt: parsedDate.toISOString(),
+        location: where.trim() || undefined,
+        imageUrl: flyer || undefined,
+        registrationUrl: link.trim() || undefined,
+      });
+      setSavedTitle(title.trim());
+      setTitle('');
+      setWhen('');
+      setWhere('');
+      setLink('');
+      setFlyer('');
+      await onPosted();
     } catch (err) {
-      Alert.alert('Not posted', friendlyError(err, 'Check your permissions and try again.'));
+      Alert.alert('Not posted', friendlyError(err, 'Please check your connection and try again.'));
     } finally {
       setSaving(false);
     }
   }
 
+  if (savedTitle) {
+    return (
+      <Success
+        title="The event is up"
+        body={`"${savedTitle}" is on Home for everyone to see.`}
+        actionLabel="Post another"
+        onAction={() => { setSavedTitle(''); onStartOver(); }}
+      />
+    );
+  }
+
   return (
     <View style={styles.form}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Pick a flyer" onPress={pickFlyer} style={[styles.dropzone, dark && styles.dropzoneDark]}>
-        {flyer ? <Image source={{ uri: flyer }} contentFit="cover" style={styles.dropzoneImage} /> : (
+      <Pressable accessibilityRole="button" accessibilityLabel={`Pick a flyer. ${flyer ? 'One is ready.' : 'None chosen yet.'}`} disabled={working} onPress={pickFlyer} style={styles.dropzone}>
+        {flyer ? (
+          <Image source={{ uri: flyer }} accessibilityLabel="The flyer you chose" contentFit="cover" style={styles.dropzoneImage} />
+        ) : (
           <>
-            <Ionicons name="image-outline" size={34} color={colors.gold} />
-            <Text style={[styles.dropzoneText, dark && styles.textDark]}>Tap to add a flyer (optional)</Text>
+            <Ionicons name="image-outline" size={34} color={theme.colors.accent} />
+            <Text style={styles.dropzoneText}>Tap to add a flyer (optional)</Text>
           </>
         )}
       </Pressable>
-      <Field dark={dark} value={title} onChange={setTitle} placeholder="Event title" />
-      <Field dark={dark} value={when} onChange={setWhen} placeholder="When, like 2026-10-05 7:00 PM" />
-      <Field dark={dark} value={where} onChange={setWhere} placeholder="Where (optional)" />
-      <Field dark={dark} value={link} onChange={setLink} placeholder="Watch or register link (optional)" autoCapitalize="none" />
-      <Big label={saving ? 'Working...' : 'Post event'} disabled={saving} onPress={post} />
+      {transfer ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
+      <Field label="Event title" value={title} onChange={setTitle} placeholder="What is happening?" />
+      <Field label="When" value={when} onChange={setWhen} placeholder="Like 2026-10-05 7:00 PM" />
+      <Field label="Where (optional)" value={where} onChange={setWhere} placeholder="The place" />
+      <Field label="Watch or register link (optional)" value={link} onChange={setLink} placeholder="A web address" autoCapitalize="none" keyboardType="url" autoCorrect={false} />
+      <Big label={saving ? 'Posting...' : 'Post event'} disabled={working || !readyToPost} onPress={post} />
+      {!readyToPost && !working ? (
+        <Text style={styles.footnote}>
+          {title.trim() ? 'Type a date and time like 2026-10-05 7:00 PM, then this button turns on.' : 'Give the event a title, then this button turns on.'}
+        </Text>
+      ) : null}
     </View>
   );
 }
 
 // ---------- People ----------
 
-function PeoplePage({ dark, workbench, run }: { dark: boolean; workbench: AdminWorkbench | null; run: (done: string, action: () => Promise<unknown>) => Promise<void> }) {
+function PeoplePage({ workbench, run, busy }: { workbench: AdminWorkbench | null; run: RunAction; busy: boolean }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<ChatProfileSearchResult[]>([]);
+  const [searchError, setSearchError] = useState('');
   const [picked, setPicked] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
-    searchChatProfiles(query).then((rows) => { if (alive) setResults(rows); }).catch(() => undefined);
-    return () => { alive = false; };
+    searchChatProfiles(query)
+      .then((rows) => {
+        if (!alive) return;
+        setResults(rows);
+        setSearchError('');
+      })
+      // A search that failed must not look like a person who does not exist.
+      .catch((err) => {
+        if (alive) setSearchError(friendlyError(err, 'We could not search just now. Check your connection and try again.'));
+      });
+    return () => {
+      alive = false;
+    };
   }, [query]);
 
   const rolesOf = (userId: string) => new Set((workbench?.roles || []).filter((r) => r.userId === userId).map((r) => r.role));
@@ -423,43 +871,63 @@ function PeoplePage({ dark, workbench, run }: { dark: boolean; workbench: AdminW
   const target = picked;
   return (
     <View style={styles.rows}>
-      <Field dark={dark} value={query} onChange={(v) => { setQuery(v); setPicked(null); }} placeholder="Search a name or phone" />
+      <Field label="Find someone" value={query} onChange={(v) => { setQuery(v); setPicked(null); }} placeholder="A name or a phone number" />
+      {searchError ? <Notice tone="warn" text={searchError} /> : null}
       {!target && results.slice(0, 6).map((r) => (
-        <Pressable key={r.id} accessibilityRole="button" onPress={() => setPicked({ id: r.id, name: r.displayName })} style={[styles.person, dark && styles.cardDark]}>
+        <Pressable key={r.id} accessibilityRole="button" accessibilityLabel={`${r.displayName}. Open their roles.`} onPress={() => setPicked({ id: r.id, name: r.displayName })} style={styles.person}>
           <View style={styles.avatar}><Text style={styles.avatarText}>{(r.displayName || '?').slice(0, 1).toUpperCase()}</Text></View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.cardTitle, dark && styles.textDark]}>{r.displayName}</Text>
-            {r.phone ? <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{r.phone}</Text> : null}
+          <View style={styles.grow}>
+            <Text style={styles.cardTitle}>{r.displayName}</Text>
+            {r.phone ? <Text style={styles.cardMeta}>{r.phone}</Text> : null}
           </View>
-          <Ionicons name="chevron-forward" size={18} color={dark ? colors.gold : colors.slate} />
+          <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
         </Pressable>
       ))}
       {target ? (
-        <Card dark={dark}>
-          <Text style={[styles.cardTitle, dark && styles.textDark]}>{target.name}</Text>
+        <Card>
+          <Text style={styles.cardTitle}>{target.name}</Text>
           {PEOPLE_SWITCHES.map((sw) => {
             const on = rolesOf(target.id).has(sw.role);
             return (
               <View key={sw.role} style={styles.switchRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.switchLabel, dark && styles.textDark]}>{sw.label}</Text>
-                  <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{sw.hint}</Text>
+                <View style={styles.grow}>
+                  <Text style={styles.switchLabel}>{sw.label}</Text>
+                  <Text style={styles.cardMeta}>{sw.hint}</Text>
                 </View>
-                <Switch value={on} onValueChange={(next) => run('', () => (next ? grantUserRole(target.id, sw.role) : revokeUserRole(target.id, sw.role)))} trackColor={{ true: colors.gold }} />
+                <Switch
+                  value={on}
+                  disabled={busy}
+                  accessibilityLabel={`${sw.label} for ${target.name}`}
+                  onValueChange={(next) =>
+                    run(
+                      next
+                        ? { title: `${target.name} is now ${sw.label}`, body: sw.hint }
+                        : { title: `${sw.label} switched off`, body: `${target.name} no longer has it.` },
+                      () => (next ? grantUserRole(target.id, sw.role) : revokeUserRole(target.id, sw.role)),
+                      (w) => ({
+                        ...w,
+                        roles: next
+                          ? [...w.roles, { userId: target.id, role: sw.role, displayName: target.name }]
+                          : w.roles.filter((r) => !(r.userId === target.id && r.role === sw.role)),
+                      })
+                    )
+                  }
+                  trackColor={{ true: theme.colors.accentSolid }}
+                />
               </View>
             );
           })}
         </Card>
       ) : null}
-      {!target && !query ? <Label dark={dark} text="People with a role" /> : null}
+      {!target && !query ? <Label text="People with a role" /> : null}
       {!target && !query && staff.map(([userId, entry]) => (
-        <Pressable key={userId} accessibilityRole="button" onPress={() => setPicked({ id: userId, name: entry.name || 'Member' })} style={[styles.person, dark && styles.cardDark]}>
+        <Pressable key={userId} accessibilityRole="button" accessibilityLabel={`${entry.name || 'Member'}. Open their roles.`} onPress={() => setPicked({ id: userId, name: entry.name || 'Member' })} style={styles.person}>
           <View style={styles.avatar}><Text style={styles.avatarText}>{(entry.name || '?').slice(0, 1).toUpperCase()}</Text></View>
-          <View style={{ flex: 1 }}>
-            <Text style={[styles.cardTitle, dark && styles.textDark]}>{entry.name || 'Member'}</Text>
-            <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{entry.roles.map((r) => PEOPLE_SWITCHES.find((s) => s.role === r)?.label || r).join(' • ')}</Text>
+          <View style={styles.grow}>
+            <Text style={styles.cardTitle}>{entry.name || 'Member'}</Text>
+            <Text style={styles.cardMeta}>{entry.roles.map((r) => PEOPLE_SWITCHES.find((s) => s.role === r)?.label || r).join(' • ')}</Text>
           </View>
-          <Ionicons name="chevron-forward" size={18} color={dark ? colors.gold : colors.slate} />
+          <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
         </Pressable>
       ))}
     </View>
@@ -468,29 +936,39 @@ function PeoplePage({ dark, workbench, run }: { dark: boolean; workbench: AdminW
 
 // ---------- Send a notice ----------
 
-function NoticePage({ dark }: { dark: boolean }) {
+function NoticePage() {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [audience, setAudience] = useState<PushAudience>('all');
   const [sending, setSending] = useState(false);
+  const ready = title.trim().length > 0 && body.trim().length > 0;
 
   function send() {
-    if (!title.trim() || !body.trim()) return Alert.alert('Write a title and a message');
+    if (!ready) return;
     const who = AUDIENCES.find((a) => a.key === audience)?.label || 'Everyone';
     Alert.alert(`Send to ${who}?`, `${title.trim()}\n\n${body.trim()}`, [
       { text: 'Not yet', style: 'cancel' },
-      { text: 'Send', onPress: async () => {
-        setSending(true);
-        try {
-          await sendAdminPush({ title: title.trim(), body: body.trim(), audience });
-          setTitle(''); setBody('');
-          Alert.alert('Sent');
-        } catch (err) {
-          Alert.alert('Not sent', friendlyError(err, 'Please try again.'));
-        } finally {
-          setSending(false);
-        }
-      } },
+      {
+        text: 'Send',
+        onPress: async () => {
+          setSending(true);
+          try {
+            await sendAdminPush({ title: title.trim(), body: body.trim(), audience });
+            setTitle('');
+            setBody('');
+            Alert.alert('Notice sent', `It is on its way to ${who.toLowerCase()} and it is in Announcements.`);
+          } catch (err) {
+            Alert.alert(
+              'We could not confirm the send',
+              `${friendlyError(err, 'Please try again.')} It is saved in Announcements either way — check there before you send it a second time.`
+            );
+          } finally {
+            setSending(false);
+          }
+        },
+      },
     ]);
   }
 
@@ -498,195 +976,661 @@ function NoticePage({ dark }: { dark: boolean }) {
     <View style={styles.form}>
       <View style={styles.chips}>
         {AUDIENCES.map((a) => (
-          <Pressable key={a.key} accessibilityRole="button" accessibilityState={{ selected: audience === a.key }} onPress={() => setAudience(a.key)} style={[styles.chip, dark && styles.chipDark, audience === a.key && styles.chipOn]}>
-            <Text style={[styles.chipText, dark && styles.textDark, audience === a.key && styles.chipTextOn]}>{a.label}</Text>
+          <Pressable
+            key={a.key}
+            accessibilityRole="button"
+            accessibilityState={{ selected: audience === a.key }}
+            accessibilityLabel={`Send to ${a.label}`}
+            onPress={() => setAudience(a.key)}
+            style={[styles.chip, audience === a.key && styles.chipOn]}
+          >
+            <Text style={[styles.chipText, audience === a.key && styles.chipTextOn]}>{a.label}</Text>
           </Pressable>
         ))}
       </View>
-      <Field dark={dark} value={title} onChange={setTitle} placeholder="Title" />
-      <Field dark={dark} value={body} onChange={setBody} placeholder="Message" multiline />
-      <Big label={sending ? 'Sending...' : 'Send notice'} disabled={sending} onPress={send} />
+      <Field label="Title" value={title} onChange={setTitle} placeholder="What is this about?" />
+      <Field label="Message" value={body} onChange={setBody} placeholder="Say it plainly" multiline />
+      {sending ? <Progress label="Sending to phones" fraction={0} indeterminate /> : null}
+      <Big label={sending ? 'Sending...' : 'Send notice'} disabled={sending || !ready} onPress={send} />
+      {!ready && !sending ? <Text style={styles.footnote}>Write a title and a message, then this button turns on.</Text> : null}
     </View>
   );
 }
 
 // ---------- Library ----------
 
-function LibraryPage({ dark, workbench, run }: { dark: boolean; workbench: AdminWorkbench | null; run: (done: string, action: () => Promise<unknown>) => Promise<void> }) {
+function LibraryPage({
+  workbench,
+  run,
+  busy,
+  applyLocally,
+}: {
+  workbench: AdminWorkbench | null;
+  run: RunAction;
+  busy: boolean;
+  applyLocally: (patch: Patch) => void;
+}) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const [transfer, setTransfer] = useState<{ id: string; label: string; fraction: number } | null>(null);
   const live = (workbench?.media || []).filter((m) => m.status === 'published');
-  const stories = (workbench?.stories || []).filter((s) => s.status === 'published');
+  const missingCover = live.filter((m) => !coverFor(m));
+
+  // A5 / V4. Pick a picture, watch it go up, and the row shows it at once.
+  async function changeCover(item: ManagedMedia) {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.9 });
+    const asset = result.canceled ? null : result.assets[0];
+    if (!asset) return;
+    const label = asset.fileName || 'Cover picture';
+    setTransfer({ id: item.id, label, fraction: 0 });
+    try {
+      const upload = await uploadPickedAsset({
+        asset,
+        bucketId: 'app-assets',
+        purpose: 'media_thumbnail',
+        pathPrefix: 'media-thumbnails',
+        relatedTable: 'media_items',
+        relatedId: item.id,
+        onProgress: (fraction) => setTransfer((current) => (current ? { ...current, fraction } : current)),
+      });
+      await updateMediaRecord(item.id, { thumbnailUrl: upload.publicUrl });
+      applyLocally((w) => ({
+        ...w,
+        media: w.media.map((m) => (m.id === item.id ? { ...m, thumbnailUrl: upload.publicUrl } : m)),
+      }));
+      Alert.alert('Cover changed', `"${item.title}" has its new picture now.`);
+    } catch (err) {
+      Alert.alert('Cover not changed', friendlyUploadError(err, 'Try another picture.'));
+    } finally {
+      setTransfer(null);
+    }
+  }
+
+  function mediaCard(item: ManagedMedia) {
+    const cover = coverFor(item);
+    return (
+      <Card key={item.id}>
+        <View style={styles.mediaRow}>
+          {cover ? (
+            <Image source={{ uri: cover }} accessibilityLabel={`Cover for ${item.title}`} contentFit="cover" style={styles.mediaCover} />
+          ) : (
+            <View style={[styles.mediaCover, styles.mediaCoverEmpty]}>
+              <Ionicons name="image-outline" size={20} color={theme.colors.accent} />
+            </View>
+          )}
+          <View style={styles.grow}>
+            <Text style={styles.cardTitle}>{item.title}</Text>
+            <Text style={styles.cardMeta}>
+              {item.mediaType}{item.speaker ? ` • ${item.speaker}` : ''}{item.isFeatured ? ' • Featured' : ''}{cover ? '' : ' • No cover yet'}
+            </Text>
+          </View>
+        </View>
+        {transfer?.id === item.id ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
+        <View style={styles.actions}>
+          <Btn label={cover ? 'Change cover' : 'Add a cover'} disabled={busy || Boolean(transfer)} onPress={() => changeCover(item)} />
+          <Btn
+            label={item.isFeatured ? 'Unfeature' : 'Feature'}
+            disabled={busy || Boolean(transfer)}
+            onPress={() =>
+              run(
+                item.isFeatured
+                  ? { title: 'Taken off the feature spot', body: `"${item.title}" is still in the Media tab.` }
+                  : { title: 'Featured', body: `"${item.title}" is at the top of the Media tab now.` },
+                () => updateMediaRecord(item.id, { isFeatured: !item.isFeatured }),
+                (w) => ({ ...w, media: w.media.map((m) => (m.id === item.id ? { ...m, isFeatured: !item.isFeatured } : m)) })
+              )
+            }
+          />
+        </View>
+        <View style={styles.actions}>
+          <Btn
+            label="Hide"
+            danger
+            disabled={busy || Boolean(transfer)}
+            onPress={() =>
+              confirmAction('Hide this from the Media tab?', `"${item.title}" stays saved and you can bring it back.`, 'Hide', () =>
+                run(
+                  { title: 'Hidden', body: `"${item.title}" is out of the Media tab.` },
+                  () => setMediaStatus(item.id, 'archived'),
+                  (w) => ({ ...w, media: w.media.map((m) => (m.id === item.id ? { ...m, status: 'archived' } : m)) })
+                )
+              )
+            }
+          />
+          <Btn
+            label="Delete"
+            danger
+            disabled={busy || Boolean(transfer)}
+            onPress={() =>
+              confirmAction('Delete this for good?', `"${item.title}" will be removed for everyone.`, 'Delete', () =>
+                run(
+                  { title: 'Deleted', body: `"${item.title}" is gone for everyone.` },
+                  () => deleteMediaItem(item.id),
+                  (w) => ({ ...w, media: w.media.filter((m) => m.id !== item.id) })
+                )
+              )
+            }
+          />
+        </View>
+      </Card>
+    );
+  }
+
+  const liveStories = (workbench?.stories || []).filter((s) => s.status === 'published');
+
   return (
     <View style={styles.rows}>
-      {stories.length ? <Label dark={dark} text="Live stories" /> : null}
-      {stories.map((s) => (
-        <Card key={s.id} dark={dark}>
-          <Text style={[styles.cardTitle, dark && styles.textDark]}>{s.title}</Text>
+      {missingCover.length ? (
+        <>
+          <Label text={`${missingCover.length} with no cover yet`} />
+          <Text style={styles.cardMeta}>A sermon with a picture gets opened. These are the ones still waiting for one.</Text>
+          {missingCover.map(mediaCard)}
+        </>
+      ) : null}
+
+      {liveStories.length ? <Label text="Live stories" /> : null}
+      {liveStories.map((s) => (
+        <Card key={s.id}>
+          <Text style={styles.cardTitle}>{s.title}</Text>
+          <Text style={styles.cardMeta}>{s.region || s.category || 'Story'}</Text>
           <View style={styles.actions}>
-            <Btn label="Delete" danger onPress={() => confirmDelete(`"${s.title}"`, () => run('', () => deleteStory(s.id)))} />
+            <Btn
+              label="Delete"
+              danger
+              disabled={busy}
+              onPress={() =>
+                confirmAction('Delete this story?', `"${s.title}" will be removed for everyone.`, 'Delete', () =>
+                  run(
+                    { title: 'Story deleted', body: 'It is gone from Home for everyone.' },
+                    () => deleteStory(s.id),
+                    (w) => ({ ...w, stories: w.stories.filter((x) => x.id !== s.id) })
+                  )
+                )
+              }
+            />
           </View>
         </Card>
       ))}
-      <Label dark={dark} text="Live media" />
-      {!live.length ? <Empty dark={dark} icon="albums-outline" title="Nothing live yet" body="Post a sermon, video, or song from Post something." /> : null}
-      {live.map((m) => (
-        <Card key={m.id} dark={dark}>
-          <Text style={[styles.cardTitle, dark && styles.textDark]}>{m.title}</Text>
-          <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{m.mediaType}{m.speaker ? ` • ${m.speaker}` : ''}{m.isFeatured ? ' • Featured' : ''}</Text>
-          <View style={styles.actions}>
-            <Btn label={m.isFeatured ? 'Unfeature' : 'Feature'} onPress={() => run('', () => updateMediaRecord(m.id, { isFeatured: !m.isFeatured }))} />
-            <Btn label="Hide" danger onPress={() => run('', () => setMediaStatus(m.id, 'archived'))} />
-          </View>
-        </Card>
-      ))}
+
+      <Label text="Live media" />
+      {workbench === null ? (
+        <View style={styles.empty}>
+          <ActivityIndicator color={theme.colors.accent} />
+          <Text style={styles.cardMeta}>Reading the library...</Text>
+        </View>
+      ) : null}
+      {workbench !== null && !live.length ? (
+        <Empty icon="albums-outline" title="Nothing live yet" body="Post a sermon, video, or song from Post something." />
+      ) : null}
+      {live.length && live.length === missingCover.length ? (
+        <Text style={styles.cardMeta}>Everything live is in the list above, waiting for a cover.</Text>
+      ) : null}
+      {live.filter((m) => Boolean(coverFor(m))).map(mediaCard)}
     </View>
   );
 }
 
 // ---------- Small pieces ----------
 
-function Shell({ dark, title, onBack, busy, children }: { dark: boolean; title: string; onBack: () => void; busy?: boolean; children: React.ReactNode }) {
+function Shell({
+  title,
+  onBack,
+  busy,
+  refreshing,
+  onRefresh,
+  children,
+}: {
+  title: string;
+  onBack: () => void;
+  busy?: boolean;
+  refreshing?: boolean;
+  onRefresh?: () => void;
+  children: React.ReactNode;
+}) {
+  const { theme, dark } = useAppTheme();
+  const styles = useStyles(theme);
   return (
-    <LinearGradient colors={dark ? ['#020817', '#061334', '#071B45'] : ['#F8FBFF', '#FFFFFF', '#F4F8FF']} style={styles.root}>
+    <LinearGradient colors={theme.pageGradient} style={styles.root}>
       <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <SafeAreaView style={styles.safe}>
         <View style={styles.header}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={onBack} hitSlop={10} style={[styles.back, dark && styles.backDark]}>
-            <Ionicons name="chevron-back" size={24} color={dark ? colors.gold : colors.royalBlue} />
+          <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={onBack} hitSlop={12} style={styles.back}>
+            <Ionicons name="chevron-back" size={24} color={theme.colors.accent} />
           </Pressable>
-          <Text style={[styles.title, dark && styles.textDark]}>{title}</Text>
-          {busy ? <ActivityIndicator color={colors.gold} /> : <View style={{ width: 24 }} />}
+          <Text style={styles.title}>{title}</Text>
+          {busy ? <ActivityIndicator color={theme.colors.accent} /> : <View style={styles.headerSpacer} />}
         </View>
-        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>{children}</ScrollView>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            onRefresh ? (
+              <RefreshControl refreshing={Boolean(refreshing)} onRefresh={onRefresh} tintColor={theme.colors.accent} colors={[theme.colors.accentSolid]} />
+            ) : undefined
+          }
+        >
+          {children}
+        </ScrollView>
       </SafeAreaView>
     </LinearGradient>
   );
 }
 
-function Row({ dark, icon, tint, title, sub, badge, onPress }: { dark: boolean; icon: keyof typeof Ionicons.glyphMap; tint: string; title: string; sub: string; badge?: number; onPress: () => void }) {
+type Tone = 'accent' | 'brand' | 'danger' | 'warning' | 'success';
+
+function Row({ icon, tone, title, sub, badge, onPress }: { icon: keyof typeof Ionicons.glyphMap; tone: Tone; title: string; sub: string; badge?: number; onPress: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const glyph = toneStyles(theme, tone);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={title} onPress={onPress} style={[styles.row, dark && styles.cardDark]}>
-      <View style={[styles.rowIcon, { backgroundColor: tint }]}><Ionicons name={icon} size={24} color={colors.white} /></View>
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.rowTitle, dark && styles.textDark]}>{title}</Text>
-        <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{sub}</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${title}. ${sub}`} onPress={onPress} style={styles.row}>
+      <View style={[styles.rowIcon, glyph.chip]}><Ionicons name={icon} size={24} color={glyph.color} /></View>
+      <View style={styles.grow}>
+        <Text style={styles.rowTitle}>{title}</Text>
+        <Text style={styles.cardMeta}>{sub}</Text>
       </View>
       {badge ? <View style={styles.badge}><Text style={styles.badgeText}>{badge}</Text></View> : null}
-      <Ionicons name="chevron-forward" size={20} color={dark ? colors.gold : colors.slate} />
+      <Ionicons name="chevron-forward" size={20} color={theme.colors.accent} />
     </Pressable>
   );
 }
 
-function Tile({ dark, icon, tint, label, hint, onPress }: { dark: boolean; icon: keyof typeof Ionicons.glyphMap; tint: string; label: string; hint: string; onPress: () => void }) {
+function Tile({ icon, tone, label, hint, onPress }: { icon: keyof typeof Ionicons.glyphMap; tone: Tone; label: string; hint: string; onPress: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const glyph = toneStyles(theme, tone);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={[styles.tile, dark && styles.cardDark]}>
-      <View style={[styles.tileIcon, { backgroundColor: tint }]}><Ionicons name={icon} size={30} color={colors.white} /></View>
-      <Text style={[styles.rowTitle, dark && styles.textDark]}>{label}</Text>
-      <Text style={[styles.cardMeta, dark && styles.textDimDark, { textAlign: 'center' }]}>{hint}</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${label}. ${hint}`} onPress={onPress} style={styles.tile}>
+      <View style={[styles.tileIcon, glyph.chip]}><Ionicons name={icon} size={30} color={glyph.color} /></View>
+      <Text style={styles.rowTitle}>{label}</Text>
+      <Text style={styles.centeredMeta}>{hint}</Text>
     </Pressable>
   );
 }
 
-function Card({ dark, children }: { dark: boolean; children: React.ReactNode }) {
-  return <View style={[styles.card, dark && styles.cardDark]}>{children}</View>;
+function toneStyles(theme: AppTheme, tone: Tone): { chip: { backgroundColor: string }; color: string } {
+  if (tone === 'accent') return { chip: { backgroundColor: theme.colors.accentMuted }, color: theme.colors.accent };
+  if (tone === 'danger') return { chip: { backgroundColor: theme.colors.dangerMuted }, color: theme.colors.danger };
+  if (tone === 'warning') return { chip: { backgroundColor: theme.colors.warningMuted }, color: theme.colors.warning };
+  if (tone === 'success') return { chip: { backgroundColor: theme.colors.successMuted }, color: theme.colors.success };
+  return { chip: { backgroundColor: theme.colors.surfaceSunken }, color: theme.colors.textPrimary };
 }
 
-function Label({ dark, text }: { dark: boolean; text: string }) {
-  return <Text style={[styles.label, dark && styles.textDimDark]}>{text}</Text>;
+function Card({ children }: { children: React.ReactNode }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  return <View style={styles.card}>{children}</View>;
 }
 
-function Empty({ dark, icon, title, body }: { dark: boolean; icon: keyof typeof Ionicons.glyphMap; title: string; body: string }) {
+function Label({ text }: { text: string }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  return <Text style={styles.label}>{text}</Text>;
+}
+
+function Notice({ tone, text }: { tone: 'warn' | 'good'; text: string }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   return (
-    <View style={styles.empty}>
-      <Ionicons name={icon} size={34} color={colors.gold} />
-      <Text style={[styles.rowTitle, dark && styles.textDark]}>{title}</Text>
-      <Text style={[styles.cardMeta, dark && styles.textDimDark, { textAlign: 'center' }]}>{body}</Text>
+    <View style={[styles.notice, tone === 'good' && styles.noticeGood]}>
+      <Ionicons name={tone === 'good' ? 'checkmark-circle' : 'alert-circle-outline'} size={20} color={tone === 'good' ? theme.colors.success : theme.colors.warning} />
+      <Text style={styles.noticeText}>{text}</Text>
     </View>
   );
 }
 
-function Btn({ label, danger, onPress }: { label: string; danger?: boolean; onPress: () => void }) {
+function Empty({ icon, title, body }: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" onPress={onPress} style={[styles.btn, danger && styles.btnDanger]}>
+    <View style={styles.empty}>
+      <Ionicons name={icon} size={34} color={theme.colors.accent} />
+      <Text style={styles.rowTitle}>{title}</Text>
+      <Text style={styles.centeredMeta}>{body}</Text>
+    </View>
+  );
+}
+
+/**
+ * The bar the owner asked for: a real percentage, the name of the file, and a
+ * line saying what is happening. `indeterminate` is for the one job whose
+ * length we honestly cannot measure — the push fan-out.
+ */
+function Progress({ label, fraction, indeterminate }: { label: string; fraction: number; indeterminate?: boolean }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const percent = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+  return (
+    <View
+      style={styles.progress}
+      accessibilityLabel={indeterminate ? `${label}. Working now.` : `${label}. ${percent} percent sent.`}
+      accessibilityValue={indeterminate ? undefined : { min: 0, max: 100, now: percent }}
+    >
+      <View style={styles.progressHead}>
+        <Text style={styles.progressLabel}>{label}</Text>
+        {indeterminate ? <ActivityIndicator color={theme.colors.accent} /> : <Text style={styles.progressPercent}>{percent}%</Text>}
+      </View>
+      <View style={styles.progressTrack}>
+        <View style={[styles.progressFill, { width: indeterminate ? '100%' : `${Math.max(4, percent)}%` }]} />
+      </View>
+      <Text style={styles.progressHint}>
+        {indeterminate ? 'Sending now. Keep this screen open.' : percent >= 100 ? 'Finishing up...' : 'Sending now. Keep this screen open.'}
+      </Text>
+    </View>
+  );
+}
+
+/** The confirmation the owner said looked cheap. It arrives, it moves, it is warm. */
+function Success({ title, body, actionLabel, onAction }: { title: string; body: string; actionLabel: string; onAction: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const enter = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(enter, { toValue: 1, useNativeDriver: true, friction: 7, tension: 60 }).start();
+  }, [enter]);
+
+  const lift = enter.interpolate({ inputRange: [0, 1], outputRange: [18, 0] });
+  const scale = enter.interpolate({ inputRange: [0, 1], outputRange: [0.86, 1] });
+
+  return (
+    <Animated.View style={[styles.success, { opacity: enter, transform: [{ translateY: lift }] }]}>
+      <Animated.View style={[styles.successRing, { transform: [{ scale }] }]}>
+        <Ionicons name="checkmark" size={38} color={theme.colors.textOnAccent} />
+      </Animated.View>
+      <Text style={styles.successTitle}>{title}</Text>
+      <Text style={styles.centeredMeta}>{body}</Text>
+      <Big label={actionLabel} onPress={onAction} />
+    </Animated.View>
+  );
+}
+
+function Btn({ label, danger, disabled, onPress }: { label: string; danger?: boolean; disabled?: boolean; onPress: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  return (
+    <Pressable accessibilityRole="button" accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress} style={[styles.btn, danger && styles.btnDanger, disabled && styles.dimmed]}>
       <Text style={[styles.btnText, danger && styles.btnTextDanger]}>{label}</Text>
     </Pressable>
   );
 }
 
 function Big({ label, disabled, onPress }: { label: string; disabled?: boolean; onPress: () => void }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={[styles.big, disabled && { opacity: 0.6 }]}>
+    <Pressable accessibilityRole="button" accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress} style={[styles.big, disabled && styles.dimmed]}>
       <Text style={styles.bigText}>{label}</Text>
     </Pressable>
   );
 }
 
-function Field({ dark, value, onChange, placeholder, multiline, autoCapitalize }: { dark: boolean; value: string; onChange: (v: string) => void; placeholder: string; multiline?: boolean; autoCapitalize?: 'none' | 'sentences' }) {
+function Field({
+  label,
+  value,
+  onChange,
+  placeholder,
+  multiline,
+  autoCapitalize,
+  autoCorrect,
+  keyboardType,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  multiline?: boolean;
+  autoCapitalize?: 'none' | 'sentences';
+  autoCorrect?: boolean;
+  keyboardType?: 'default' | 'url';
+}) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   return (
-    <TextInput
-      value={value}
-      onChangeText={onChange}
-      placeholder={placeholder}
-      placeholderTextColor={dark ? 'rgba(255,255,255,0.45)' : colors.muted}
-      multiline={multiline}
-      autoCapitalize={autoCapitalize}
-      style={[styles.field, dark && styles.fieldDark, multiline && { minHeight: 92, textAlignVertical: 'top' }]}
-    />
+    <View style={styles.fieldWrap}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      <TextInput
+        accessibilityLabel={label}
+        value={value}
+        onChangeText={onChange}
+        placeholder={placeholder}
+        placeholderTextColor={theme.colors.textMuted}
+        multiline={multiline}
+        autoCapitalize={autoCapitalize}
+        autoCorrect={autoCorrect}
+        keyboardType={keyboardType}
+        style={[styles.field, multiline && styles.fieldTall]}
+      />
+    </View>
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1 },
-  safe: { flex: 1 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 8 },
-  back: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.white, ...shadows.soft },
-  backDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  title: { flex: 1, color: colors.royalBlue, fontSize: 24, fontWeight: '900' },
-  scroll: { padding: 16, paddingBottom: 60 },
-  rows: { gap: 12 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 14, padding: 14, borderRadius: 18, backgroundColor: colors.white, ...shadows.soft },
-  rowIcon: { width: 50, height: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center' },
-  rowTitle: { color: colors.royalBlue, fontSize: 17, fontWeight: '900' },
-  badge: { minWidth: 26, height: 26, borderRadius: 13, paddingHorizontal: 8, backgroundColor: colors.red, alignItems: 'center', justifyContent: 'center' },
-  badgeText: { color: colors.white, fontWeight: '900', fontSize: 12 },
-  tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
-  tile: { flexBasis: '47%', flexGrow: 1, alignItems: 'center', gap: 8, padding: 18, borderRadius: 20, backgroundColor: colors.white, ...shadows.soft },
-  tileIcon: { width: 64, height: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center' },
-  card: { padding: 14, borderRadius: 16, backgroundColor: colors.white, gap: 6, ...shadows.soft },
-  cardDark: { backgroundColor: 'rgba(255,255,255,0.06)' },
-  cardTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 15 },
-  cardBody: { color: colors.textBody, lineHeight: 20 },
-  cardMeta: { color: colors.slate, fontSize: 12, marginTop: 2 },
-  label: { color: colors.slate, fontWeight: '800', fontSize: 12, letterSpacing: 0.6, textTransform: 'uppercase', marginTop: 6 },
-  actions: { flexDirection: 'row', gap: 10, marginTop: 8 },
-  btn: { flex: 1, minHeight: 42, borderRadius: 12, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center' },
-  btnDanger: { backgroundColor: 'rgba(220,38,38,0.1)' },
-  btnText: { color: '#071231', fontWeight: '900' },
-  btnTextDanger: { color: colors.red },
-  big: { minHeight: 54, borderRadius: 16, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center', marginTop: 6 },
-  bigText: { color: '#071231', fontWeight: '900', fontSize: 16 },
-  form: { gap: 12 },
-  field: { minHeight: 50, borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12, backgroundColor: colors.white, color: colors.royalBlue, fontSize: 15, borderWidth: 1, borderColor: colors.softLine },
-  fieldDark: { backgroundColor: 'rgba(255,255,255,0.07)', color: colors.white, borderColor: 'rgba(212,175,55,0.24)' },
-  dropzone: { height: 190, borderRadius: 18, borderWidth: 2, borderStyle: 'dashed', borderColor: 'rgba(212,175,55,0.6)', backgroundColor: 'rgba(212,175,55,0.08)', alignItems: 'center', justifyContent: 'center', gap: 8, overflow: 'hidden' },
-  dropzoneSmall: { minHeight: 56, borderRadius: 14, borderWidth: 1.5, borderStyle: 'dashed', borderColor: 'rgba(212,175,55,0.6)', backgroundColor: 'rgba(212,175,55,0.08)', flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 14 },
-  dropzoneDark: { backgroundColor: 'rgba(212,175,55,0.1)' },
-  dropzoneImage: { width: '100%', height: '100%' },
-  dropzoneText: { color: colors.royalBlue, fontWeight: '800', flexShrink: 1 },
-  coverThumb: { width: 34, height: 34, borderRadius: 8 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine },
-  chipDark: { backgroundColor: 'rgba(255,255,255,0.07)', borderColor: 'rgba(212,175,55,0.24)' },
-  chipOn: { backgroundColor: colors.gold, borderColor: colors.gold },
-  chipText: { color: colors.royalBlue, fontWeight: '800' },
-  chipTextOn: { color: '#071231' },
-  or: { textAlign: 'center', color: colors.slate, fontWeight: '800' },
-  warn: { color: colors.red, fontSize: 12, fontWeight: '700' },
-  switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 8 },
-  switchLabel: { color: colors.royalBlue, fontWeight: '800', fontSize: 15 },
-  person: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 12, borderRadius: 14, backgroundColor: colors.white, ...shadows.soft },
-  avatar: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center' },
-  avatarText: { color: '#071231', fontWeight: '900', fontSize: 16 },
-  empty: { alignItems: 'center', gap: 8, padding: 28 },
-  textDark: { color: colors.white },
-  textDimDark: { color: 'rgba(255,255,255,0.68)' },
-});
+const useStyles = createThemedStyles((t) =>
+  StyleSheet.create({
+    root: { flex: 1 },
+    safe: { flex: 1 },
+    grow: { flex: 1 },
+    dimmed: { opacity: 0.55 },
+    header: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 8 },
+    headerSpacer: { width: 24 },
+    back: {
+      width: 44,
+      minHeight: 44,
+      borderRadius: t.radius.xl,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      ...t.elevation.low,
+    },
+    title: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.pageTitle, fontWeight: '900' },
+    scroll: { padding: 16, paddingBottom: 72 },
+    rows: { gap: 12 },
+    row: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 14,
+      padding: 16,
+      minHeight: 56,
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      ...t.elevation.medium,
+    },
+    rowIcon: { width: 50, minHeight: 50, borderRadius: 25, alignItems: 'center', justifyContent: 'center' },
+    rowTitle: { color: t.colors.textPrimary, fontSize: t.type.cardTitle, fontWeight: '900' },
+    badge: {
+      minWidth: 28,
+      minHeight: 28,
+      borderRadius: 14,
+      paddingHorizontal: 8,
+      paddingVertical: 4,
+      backgroundColor: t.colors.dangerMuted,
+      borderWidth: 1,
+      borderColor: t.colors.danger,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    badgeText: { color: t.colors.danger, fontWeight: '900', fontSize: t.type.overline },
+    tiles: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+    tile: {
+      flexBasis: '47%',
+      flexGrow: 1,
+      alignItems: 'center',
+      gap: 8,
+      padding: 18,
+      minHeight: 56,
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      ...t.elevation.medium,
+    },
+    tileIcon: { width: 64, minHeight: 64, borderRadius: 32, alignItems: 'center', justifyContent: 'center' },
+    card: {
+      padding: 14,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      gap: 6,
+      ...t.elevation.medium,
+    },
+    cardTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body },
+    cardBody: { color: t.colors.textSecondary, lineHeight: 20, fontSize: t.type.body },
+    cardMeta: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 2 },
+    centeredMeta: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 2, textAlign: 'center' },
+    label: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.overline, letterSpacing: 0.6, textTransform: 'uppercase', marginTop: 6 },
+    actions: { flexDirection: 'row', gap: 10, marginTop: 8 },
+    btn: {
+      flex: 1,
+      minHeight: 48,
+      paddingHorizontal: 12,
+      paddingVertical: 12,
+      borderRadius: t.radius.md,
+      backgroundColor: t.colors.accentSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    btnDanger: { backgroundColor: t.colors.dangerMuted, borderWidth: 1, borderColor: t.colors.danger },
+    btnText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.meta },
+    btnTextDanger: { color: t.colors.danger },
+    big: {
+      minHeight: 56,
+      paddingVertical: 14,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.accentSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+      marginTop: 6,
+      ...t.elevation.low,
+    },
+    bigText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+    form: { gap: 12 },
+    fieldWrap: { gap: 6 },
+    fieldLabel: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.meta },
+    field: {
+      minHeight: 52,
+      borderRadius: t.radius.md,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      backgroundColor: t.colors.surfaceSunken,
+      color: t.colors.textPrimary,
+      fontSize: t.type.body,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+    },
+    fieldTall: { minHeight: 96, textAlignVertical: 'top' },
+    dropzone: {
+      minHeight: 190,
+      borderRadius: t.radius.xl,
+      borderWidth: 2,
+      borderStyle: 'dashed',
+      borderColor: t.colors.accentBorder,
+      backgroundColor: t.colors.accentMuted,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      padding: 16,
+      overflow: 'hidden',
+    },
+    dropzoneSmall: {
+      minHeight: 60,
+      borderRadius: t.radius.md,
+      borderWidth: 1.5,
+      borderStyle: 'dashed',
+      borderColor: t.colors.accentBorder,
+      backgroundColor: t.colors.accentMuted,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+    },
+    dropzoneImage: { width: '100%', height: '100%' },
+    dropzoneText: { color: t.colors.textPrimary, fontWeight: '800', flexShrink: 1, fontSize: t.type.body },
+    coverThumb: { width: 36, height: 36, borderRadius: t.radius.sm },
+    mediaRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+    mediaCover: { width: 68, height: 44, borderRadius: t.radius.sm, backgroundColor: t.colors.surfaceSunken },
+    mediaCoverEmpty: { alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: t.colors.border },
+    chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+    chip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 16,
+      paddingVertical: 14,
+      minHeight: 48,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+    },
+    chipOn: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+    chipText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+    chipTextOn: { color: t.colors.textOnAccent },
+    or: { textAlign: 'center', color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.meta },
+    warn: { color: t.colors.danger, fontSize: t.type.meta, fontWeight: '700' },
+    footnote: { color: t.colors.textMuted, fontSize: t.type.meta, textAlign: 'center' },
+    inlineRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    switchRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 10 },
+    switchLabel: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
+    person: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      padding: 16,
+      minHeight: 56,
+      borderRadius: t.radius.md,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      ...t.elevation.low,
+    },
+    avatar: { width: 46, minHeight: 46, borderRadius: 23, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center' },
+    avatarText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+    empty: { alignItems: 'center', gap: 8, padding: 28 },
+    notice: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      padding: 14,
+      borderRadius: t.radius.md,
+      backgroundColor: t.colors.warningMuted,
+      borderWidth: 1,
+      borderColor: t.colors.warning,
+      marginBottom: 12,
+    },
+    noticeGood: { backgroundColor: t.colors.successMuted, borderColor: t.colors.success },
+    noticeText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.meta, lineHeight: 19 },
+    progress: {
+      gap: 8,
+      padding: 14,
+      borderRadius: t.radius.md,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      ...t.elevation.low,
+    },
+    progressHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    progressLabel: { flex: 1, color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+    progressPercent: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.cardTitle },
+    progressTrack: { minHeight: 10, borderRadius: t.radius.pill, backgroundColor: t.colors.surfaceSunken, overflow: 'hidden' },
+    progressFill: { minHeight: 10, borderRadius: t.radius.pill, backgroundColor: t.colors.accentSolid },
+    progressHint: { color: t.colors.textMuted, fontSize: t.type.overline },
+    success: { alignItems: 'center', gap: 12, paddingVertical: 32, paddingHorizontal: 20 },
+    successRing: {
+      width: 84,
+      minHeight: 84,
+      borderRadius: 42,
+      backgroundColor: t.colors.accentSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.high,
+    },
+    successTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle, textAlign: 'center' },
+  })
+);

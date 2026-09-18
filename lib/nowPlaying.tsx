@@ -1,26 +1,42 @@
 // One player for the whole app. Start a sermon or a song anywhere, close the
 // sheet, and it keeps playing. A small bar sits above the tab bar so the
 // listener can pause or come back to it from any screen.
+//
+// What plays where, honestly (DO-NOT-BREAK item 17):
+//   - An audio or video FILE keeps playing when the sheet is closed, and it
+//     puts its title, speaker and cover on the lock screen.
+//   - A YouTube / Vimeo / Facebook link plays inside an embedded web view.
+//     Closing the player stops it, and it can never reach the lock screen,
+//     because the app is not the thing playing the sound. The bar says so
+//     instead of pretending otherwise.
 import { Ionicons } from '@expo/vector-icons';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { usePathname } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
+import type { VideoThumbnail } from 'expo-video';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { SharedRef } from './chatService';
 import { ShareToChatSheet } from '../components/ShareToChat';
-import { embedUrl, PlaybackKind } from './embed';
-import { colors, shadows } from './theme';
-import { useThemePreference } from './themePreference';
+import { embedUrl, thumbnailFromUrl, PlaybackKind } from './embed';
+import { createThemedStyles } from './theme';
+import { useAppTheme } from './themePreference';
 
 export type NowPlaying = { title: string; speaker?: string; url: string; type: PlaybackKind; artwork?: string };
+
+const MINISTRY = 'Overcomers Global Network';
 
 type Ctx = {
   item: NowPlaying | null;
   playing: boolean;
+  /** The cover to draw, already worked out from the link when none was given. */
+  artwork?: string;
+  /** A poster frame lifted from an uploaded video that shipped without a cover. */
+  posterFrame: VideoThumbnail | null;
   play: (item: NowPlaying) => void;
   toggle: () => void;
   expand: () => void;
@@ -37,13 +53,20 @@ export function useNowPlaying() {
 
 const TAB_PATHS = new Set(['/', '/index', '/messages', '/give', '/community', '/bible', '/profile']);
 
+/** The cover for whatever is playing: the one we were handed, or the one the link gives us free. */
+function coverFor(item: NowPlaying | null): string | undefined {
+  if (!item) return undefined;
+  return item.artwork || thumbnailFromUrl(item.url) || undefined;
+}
+
 export function NowPlayingProvider({ children }: { children: React.ReactNode }) {
   const [item, setItem] = useState<NowPlaying | null>(null);
   const [expanded, setExpanded] = useState(false);
   const isVideo = item?.type === 'video';
   const isEmbed = item?.type === 'embed';
+  const artwork = coverFor(item);
 
-  const videoPlayer = useVideoPlayer(isVideo && item ? { uri: item.url, metadata: { title: item.title, artist: item.speaker, artwork: item.artwork } } : null, (player) => {
+  const videoPlayer = useVideoPlayer(isVideo && item ? { uri: item.url, metadata: { title: item.title, artist: item.speaker || MINISTRY, artwork } } : null, (player) => {
     player.staysActiveInBackground = true;
     player.showNowPlayingNotification = true;
     player.audioMixingMode = 'doNotMix';
@@ -51,6 +74,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const audioPlayer = useAudioPlayer(item?.type === 'audio' ? { uri: item.url } : null, { keepAudioSessionActive: true });
   const audioStatus = useAudioPlayerStatus(audioPlayer);
   const [videoPlaying, setVideoPlaying] = useState(false);
+  const [posterFrame, setPosterFrame] = useState<VideoThumbnail | null>(null);
 
   useEffect(() => {
     setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' }).catch(() => undefined);
@@ -62,10 +86,39 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       videoPlayer.play();
       setVideoPlaying(true);
     } else if (item.type === 'audio') {
-      audioPlayer.setActiveForLockScreen(true, { title: item.title, artist: item.speaker || 'Overcomers Global Network', artworkUrl: item.artwork });
+      // Title, speaker and cover on the lock screen and in Control Centre.
+      // expo-audio 57.0.5 AudioMetadata is { title, artist, albumTitle, artworkUrl }.
+      audioPlayer.setActiveForLockScreen(true, {
+        title: item.title,
+        artist: item.speaker || MINISTRY,
+        albumTitle: MINISTRY,
+        artworkUrl: artwork,
+      });
       audioPlayer.play();
     }
   }, [item?.url]);
+
+  // An uploaded video posted without a cover still gets a picture: one frame
+  // lifted from the video itself. expo-video 57.0.4 exposes this on the player
+  // instance (generateThumbnailsAsync(times, options) -> VideoThumbnail[]),
+  // and a VideoThumbnail is a native image reference, so it can be drawn by
+  // expo-image but cannot be saved as a cover URL. If the frame cannot be made
+  // — a stream that has not buffered, an audio-only file — we simply keep the
+  // branded artwork instead of showing an empty grey hole.
+  useEffect(() => {
+    setPosterFrame(null);
+    if (!isVideo || !item || artwork) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const frames = await videoPlayer.generateThumbnailsAsync(1, { maxWidth: 480 });
+        if (!cancelled && frames.length) setPosterFrame(frames[0]);
+      } catch {
+        if (!cancelled) setPosterFrame(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [item?.url, isVideo, artwork, videoPlayer]);
 
   useEffect(() => {
     if (!isVideo) return;
@@ -73,11 +126,23 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     return () => sub.remove();
   }, [isVideo, videoPlayer]);
 
-  const playing = isVideo ? videoPlaying : item?.type === 'audio' ? audioStatus.playing : Boolean(item);
+  // An embedded video only exists while the sheet is open — React Native's
+  // Modal unmounts its children when it is hidden, so the web view and the
+  // video inside it are gone the moment the player is minimised. Saying
+  // "playing" at that point would be a lie, so we do not.
+  const playing = isVideo
+    ? videoPlaying
+    : item?.type === 'audio'
+      ? audioStatus.playing
+      : isEmbed
+        ? expanded
+        : false;
 
   const ctx = useMemo<Ctx>(() => ({
     item,
     playing,
+    artwork,
+    posterFrame,
     play: (next) => { setItem(next); setExpanded(true); },
     toggle: () => {
       if (!item) return;
@@ -92,7 +157,7 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
       setExpanded(false);
       setItem(null);
     },
-  }), [item, playing, isVideo, videoPlaying, audioStatus.playing]);
+  }), [item, playing, artwork, posterFrame, isVideo, videoPlaying, audioStatus.playing]);
 
   return (
     <NowPlayingContext.Provider value={ctx}>
@@ -103,31 +168,75 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   );
 }
 
+/** The cover, a poster frame, or the ministry's own mark. Never an empty box. */
+function Artwork({ ctx, size, label }: { ctx: Ctx; size: 'mini' | 'sheet'; label: string }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const [failed, setFailed] = useState(false);
+  const box = size === 'mini' ? styles.miniArt : styles.sheetArt;
+  const glyph = size === 'mini' ? 20 : 34;
+  const source = !failed && ctx.artwork ? { uri: ctx.artwork } : !failed && ctx.posterFrame ? ctx.posterFrame : null;
+
+  if (source) {
+    return (
+      <Image
+        source={source}
+        style={box}
+        contentFit="cover"
+        accessibilityLabel={label}
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <LinearGradient colors={theme.pageGradient} style={box} accessibilityLabel={label}>
+      <Ionicons name={ctx.item?.type === 'audio' ? 'musical-notes' : 'play-circle'} size={glyph} color={theme.colors.accent} />
+    </LinearGradient>
+  );
+}
+
 function MiniPlayer({ ctx, visible }: { ctx: Ctx; visible: boolean }) {
-  const { themePreference } = useThemePreference();
-  const dark = themePreference === 'dark';
+  const { theme, dark } = useAppTheme();
+  const styles = useStyles(theme);
   const insets = useSafeAreaInsets();
   const pathname = usePathname();
   if (!visible || !ctx.item) return null;
   const onTab = TAB_PATHS.has(pathname);
   const bottom = onTab ? (Platform.OS === 'ios' ? 92 : 78) : insets.bottom + 10;
+  const isEmbed = ctx.item.type === 'embed';
+  // A minimised web-view video is genuinely stopped. Say that, rather than
+  // leaving a bar that looks like it is still playing.
+  const subtitle = isEmbed ? 'Paused — tap to watch again' : ctx.item.speaker || MINISTRY;
   return (
     <View pointerEvents="box-none" style={[styles.miniWrap, { bottom }]}>
-      <Pressable accessibilityRole="button" accessibilityLabel="Open the player" onPress={ctx.expand} style={[styles.mini, dark && styles.miniDark]}>
-        <View style={styles.miniArt}>
-          <Ionicons name={ctx.item.type === 'audio' ? 'musical-notes' : 'play-circle'} size={20} color="#071231" />
-        </View>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Open the player for ${ctx.item.title}`}
+        onPress={ctx.expand}
+        style={styles.mini}
+      >
+        <Artwork ctx={ctx} size="mini" label={`Cover for ${ctx.item.title}`} />
         <View style={{ flex: 1 }}>
-          <Text numberOfLines={1} style={[styles.miniTitle, dark && styles.miniTitleDark]}>{ctx.item.title}</Text>
-          <Text numberOfLines={1} style={[styles.miniSub, dark && styles.miniSubDark]}>{ctx.item.speaker || 'Overcomers Global Network'}</Text>
+          <Text numberOfLines={1} style={styles.miniTitle}>{ctx.item.title}</Text>
+          <Text numberOfLines={1} style={styles.miniSub}>{subtitle}</Text>
         </View>
-        {ctx.item.type !== 'embed' ? (
-          <Pressable accessibilityRole="button" accessibilityLabel={ctx.playing ? 'Pause' : 'Play'} onPress={ctx.toggle} hitSlop={8} style={styles.miniButton}>
-            <Ionicons name={ctx.playing ? 'pause' : 'play'} size={22} color={dark ? colors.gold : colors.royalBlue} />
-          </Pressable>
-        ) : null}
-        <Pressable accessibilityRole="button" accessibilityLabel="Stop playing" onPress={ctx.stop} hitSlop={8} style={styles.miniButton}>
-          <Ionicons name="close" size={20} color={dark ? 'rgba(255,255,255,0.7)' : colors.slate} />
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={ctx.playing ? `Pause ${ctx.item.title}` : `Play ${ctx.item.title}`}
+          onPress={ctx.toggle}
+          hitSlop={10}
+          style={styles.miniButton}
+        >
+          <Ionicons name={ctx.playing ? 'pause' : 'play'} size={22} color={theme.colors.accent} />
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Stop playing ${ctx.item.title}`}
+          onPress={ctx.stop}
+          hitSlop={10}
+          style={styles.miniButton}
+        >
+          <Ionicons name="close" size={20} color={dark ? theme.colors.textMuted : theme.colors.textSecondary} />
         </Pressable>
       </Pressable>
     </View>
@@ -137,101 +246,191 @@ function MiniPlayer({ ctx, visible }: { ctx: Ctx; visible: boolean }) {
 function PlayerSheet({ ctx, visible, onMinimize, videoPlayer, isVideo, isEmbed }: {
   ctx: Ctx; visible: boolean; onMinimize: () => void; videoPlayer: ReturnType<typeof useVideoPlayer>; isVideo: boolean; isEmbed: boolean;
 }) {
-  const { themePreference } = useThemePreference();
-  const dark = themePreference === 'dark';
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const item = ctx.item;
   const embed = item && isEmbed ? embedUrl(item.url) : null;
   const [shareOpen, setShareOpen] = useState(false);
-  const shared: SharedRef | null = item ? { kind: item.type === 'audio' ? 'music' : item.type === 'video' || item.type === 'embed' ? 'video' : 'sermon', title: item.title, speaker: item.speaker, url: item.url, artwork: item.artwork } : null;
+  const [embedFailed, setEmbedFailed] = useState(false);
+  const shared: SharedRef | null = item ? { kind: item.type === 'audio' ? 'music' : item.type === 'video' || item.type === 'embed' ? 'video' : 'sermon', title: item.title, speaker: item.speaker, url: item.url, artwork: ctx.artwork } : null;
+
+  useEffect(() => { setEmbedFailed(false); }, [item?.url]);
+
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onMinimize}>
-      <Pressable style={styles.backdrop} onPress={onMinimize} accessibilityLabel="Minimize the player">
-        <Pressable style={[styles.sheet, dark && styles.sheetDark]} onPress={() => undefined}>
+      <View style={styles.backdrop}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close the player"
+          onPress={onMinimize}
+          style={styles.backdropFill}
+        />
+        <View style={styles.sheet}>
           <View style={styles.grabber} />
           <View style={styles.header}>
             <View style={{ flex: 1 }}>
-              <Text numberOfLines={2} style={[styles.title, dark && styles.titleDark]}>{item?.title || 'OGN Media'}</Text>
-              <Text numberOfLines={1} style={[styles.artist, dark && styles.artistDark]}>{item?.speaker || 'Overcomers Global Network'}</Text>
+              <Text style={styles.title}>{item?.title || 'OGN Media'}</Text>
+              <Text style={styles.artist}>{item?.speaker || MINISTRY}</Text>
             </View>
-            <Pressable accessibilityRole="button" accessibilityLabel="Minimize the player" onPress={onMinimize} style={[styles.round, dark && styles.roundDark]}>
-              <Ionicons name="chevron-down" size={22} color={dark ? colors.gold : colors.royalBlue} />
+            <Pressable accessibilityRole="button" accessibilityLabel="Minimise the player" onPress={onMinimize} style={styles.round}>
+              <Ionicons name="chevron-down" size={22} color={theme.colors.accent} />
             </Pressable>
           </View>
 
           {isVideo ? (
             <VideoView player={videoPlayer} style={styles.video} nativeControls allowsPictureInPicture contentFit="contain" />
-          ) : isEmbed && embed ? (
+          ) : isEmbed && embed && !embedFailed ? (
             <View style={styles.video}>
               <WebView
                 source={{ uri: embed }}
                 allowsInlineMediaPlayback
                 mediaPlaybackRequiresUserAction={false}
                 allowsFullscreenVideo
+                allowsPictureInPictureMediaPlayback
                 javaScriptEnabled
-                style={{ backgroundColor: '#020817' }}
+                domStorageEnabled
+                // Without a hardware layer the YouTube player stutters or shows
+                // a black frame on a lot of Android devices.
+                androidLayerType="hardware"
+                setSupportMultipleWindows={false}
+                startInLoadingState
+                renderLoading={() => (
+                  <View style={styles.videoBusy}>
+                    <ActivityIndicator color={theme.colors.accent} />
+                    <Text style={styles.videoBusyText}>Starting the video…</Text>
+                  </View>
+                )}
+                onError={() => setEmbedFailed(true)}
+                onHttpError={() => setEmbedFailed(true)}
+                style={styles.webview}
               />
             </View>
+          ) : isEmbed ? (
+            <View style={styles.videoBusy}>
+              <Ionicons name="cloud-offline-outline" size={32} color={theme.colors.accent} />
+              <Text style={styles.videoBusyText}>
+                {embed ? 'This video would not start. Check your connection, or watch it in your browser.' : 'That video link does not work any more.'}
+              </Text>
+              {item ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open ${item.title} in your browser`}
+                  onPress={() => { Linking.openURL(item.url).catch(() => setEmbedFailed(true)); }}
+                  style={styles.goldControl}
+                >
+                  <Ionicons name="open-outline" size={20} color={theme.colors.textOnAccent} />
+                  <Text style={styles.goldControlText}>Open in browser</Text>
+                </Pressable>
+              ) : null}
+            </View>
           ) : (
-            <LinearGradient colors={dark ? ['#071B45', '#0B2A66'] : ['#FFFFFF', '#FFF5D8']} style={styles.audioPanel}>
-              <Ionicons name="musical-notes" size={42} color={colors.gold} />
-              <Text style={[styles.audioStatus, dark && styles.artistDark]}>{ctx.playing ? 'Playing, keeps going in the background' : 'Ready'}</Text>
-              <Pressable onPress={ctx.toggle} style={styles.goldControl}>
-                <Ionicons name={ctx.playing ? 'pause' : 'play'} size={22} color="#071231" />
+            <LinearGradient colors={theme.pageGradient} style={styles.audioPanel}>
+              <Artwork ctx={ctx} size="sheet" label={`Cover for ${item?.title || 'this message'}`} />
+              <Text style={styles.audioStatus}>{ctx.playing ? 'Playing — it keeps going when you close this' : 'Ready to play'}</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={ctx.playing ? 'Pause' : 'Play'}
+                onPress={ctx.toggle}
+                style={styles.goldControl}
+              >
+                <Ionicons name={ctx.playing ? 'pause' : 'play'} size={22} color={theme.colors.textOnAccent} />
                 <Text style={styles.goldControlText}>{ctx.playing ? 'Pause' : 'Play'}</Text>
               </Pressable>
             </LinearGradient>
           )}
 
+          {isEmbed ? (
+            <Text style={styles.note}>
+              Videos from YouTube, Vimeo and Facebook play here inside the app. They stop when you close the player, and they cannot be controlled from your lock screen.
+            </Text>
+          ) : null}
+
           <View style={styles.actions}>
-            <Pressable onPress={() => item && Share.share({ message: `${item.title}\n${item.url}` })} style={[styles.action, dark && styles.actionDark]}>
-              <Ionicons name="share-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-              <Text style={[styles.actionText, dark && styles.actionTextDark]}>Share</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Share a link to this"
+              onPress={() => { if (item) void Share.share({ message: `${item.title}\n${item.url}` }); }}
+              style={styles.action}
+            >
+              <Ionicons name="share-outline" size={18} color={theme.colors.accent} />
+              <Text style={styles.actionText}>Share</Text>
             </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Share to a group" onPress={() => setShareOpen(true)} style={[styles.action, dark && styles.actionDark]}>
-              <Ionicons name="people-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-              <Text style={[styles.actionText, dark && styles.actionTextDark]}>To a group</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Share to a group" onPress={() => setShareOpen(true)} style={styles.action}>
+              <Ionicons name="people-outline" size={18} color={theme.colors.accent} />
+              <Text style={styles.actionText}>To a group</Text>
             </Pressable>
-            <Pressable onPress={ctx.stop} style={[styles.action, dark && styles.actionDark]}>
-              <Ionicons name="stop-circle-outline" size={18} color={colors.red} />
-              <Text style={[styles.actionText, dark && styles.actionTextDark]}>Stop</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Stop playing" onPress={ctx.stop} style={styles.action}>
+              <Ionicons name="stop-circle-outline" size={18} color={theme.colors.danger} />
+              <Text style={styles.actionText}>Stop</Text>
             </Pressable>
           </View>
-        </Pressable>
-      </Pressable>
-      <ShareToChatSheet item={shared} visible={shareOpen} dark={dark} onClose={() => setShareOpen(false)} />
+        </View>
+      </View>
+      <ShareToChatSheet item={shared} visible={shareOpen} dark={theme.dark} onClose={() => setShareOpen(false)} />
     </Modal>
   );
 }
 
-const styles = StyleSheet.create({
+const useStyles = createThemedStyles((t) => StyleSheet.create({
   miniWrap: { position: 'absolute', left: 12, right: 12 },
-  mini: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, ...shadows.soft },
-  miniDark: { backgroundColor: '#0B1F4D', borderColor: 'rgba(212,175,55,0.3)' },
-  miniArt: { width: 38, height: 38, borderRadius: 12, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center' },
-  miniTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 13 },
-  miniTitleDark: { color: colors.white },
-  miniSub: { color: colors.slate, fontSize: 11, marginTop: 1 },
-  miniSubDark: { color: 'rgba(255,255,255,0.7)' },
-  miniButton: { width: 36, height: 36, alignItems: 'center', justifyContent: 'center' },
-  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(2,8,23,0.58)' },
-  sheet: { borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: colors.white, padding: 16, paddingBottom: 28, gap: 14 },
-  sheetDark: { backgroundColor: '#071B45', borderTopWidth: 1, borderTopColor: 'rgba(212,175,55,0.28)' },
-  grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.18)' },
+  mini: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'stretch',
+    gap: 10,
+    padding: 10,
+    minHeight: 64,
+    borderRadius: t.radius.lg,
+    backgroundColor: t.colors.navBar,
+    borderWidth: 1,
+    borderColor: t.colors.borderStrong,
+    ...t.elevation.high,
+  },
+  miniArt: { width: 44, height: 44, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceSunken, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  miniTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+  miniSub: { color: t.colors.textMuted, fontSize: 12, marginTop: 1 },
+  miniButton: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+
+  backdrop: { flex: 1, minHeight: 240, justifyContent: 'flex-end', backgroundColor: t.colors.overlay },
+  backdropFill: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, minHeight: 240 },
+  sheet: {
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    backgroundColor: t.dark ? t.colors.page : t.colors.surfaceRaised,
+    borderTopWidth: 1,
+    borderTopColor: t.colors.accentBorder,
+    padding: t.spacing.lg,
+    paddingBottom: 28,
+    gap: 14,
+  },
+  grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: t.radius.pill, backgroundColor: t.colors.borderStrong },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  title: { color: colors.royalBlue, fontWeight: '900', fontSize: 20 },
-  titleDark: { color: colors.white },
-  artist: { color: colors.slate, marginTop: 3 },
-  artistDark: { color: 'rgba(255,255,255,0.74)' },
-  round: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
-  roundDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  video: { width: '100%', aspectRatio: 16 / 9, borderRadius: 14, backgroundColor: '#020817', overflow: 'hidden' },
-  audioPanel: { minHeight: 190, borderRadius: 16, alignItems: 'center', justifyContent: 'center', gap: 12, borderWidth: 1, borderColor: 'rgba(212,175,55,0.28)' },
-  audioStatus: { color: colors.royalBlue, fontWeight: '800' },
-  goldControl: { minHeight: 46, borderRadius: 999, backgroundColor: colors.gold, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  goldControlText: { color: '#071231', fontWeight: '900' },
+  title: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle },
+  artist: { color: t.colors.textSecondary, marginTop: 3, fontSize: t.type.body },
+  round: { minWidth: 48, minHeight: 48, borderRadius: 24, backgroundColor: t.colors.accentMuted, alignItems: 'center', justifyContent: 'center' },
+
+  video: { width: '100%', aspectRatio: 16 / 9, borderRadius: t.radius.lg, backgroundColor: t.colors.brandSolid, overflow: 'hidden' },
+  webview: { backgroundColor: t.colors.brandSolid },
+  videoBusy: {
+    width: '100%',
+    minHeight: 180,
+    borderRadius: t.radius.lg,
+    backgroundColor: t.colors.surfaceSunken,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: t.spacing.lg,
+  },
+  videoBusyText: { color: t.colors.textSecondary, fontSize: t.type.body, textAlign: 'center', lineHeight: 21 },
+
+  sheetArt: { width: 96, height: 96, borderRadius: t.radius.lg, backgroundColor: t.colors.surfaceSunken, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  audioPanel: { minHeight: 220, borderRadius: t.radius.lg, alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: t.spacing.lg, borderWidth: 1, borderColor: t.colors.accentBorder },
+  audioStatus: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body, textAlign: 'center', paddingHorizontal: t.spacing.lg },
+  goldControl: { minHeight: 48, borderRadius: t.radius.pill, backgroundColor: t.colors.accentSolid, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  goldControlText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+
+  note: { color: t.colors.textMuted, fontSize: 12, lineHeight: 18 },
   actions: { flexDirection: 'row', gap: 10 },
-  action: { flex: 1, minHeight: 56, borderRadius: 13, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', gap: 4, ...shadows.soft },
-  actionDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.2)' },
-  actionText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12, textAlign: 'center' },
-  actionTextDark: { color: colors.gold },
-});
+  action: { flex: 1, minHeight: 56, borderRadius: t.radius.md, borderWidth: 1, borderColor: t.colors.border, backgroundColor: t.colors.surface, alignItems: 'center', justifyContent: 'center', gap: 4, ...t.elevation.low },
+  actionText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: 12, textAlign: 'center' },
+}));

@@ -5,9 +5,9 @@ import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { getChatRooms, joinChatRoom, sendChatMessage, SharedRef } from '../lib/chatService';
+import { chatRoomTitle, getChatRooms, joinChatRoom, sendChatMessage, SharedRef } from '../lib/chatService';
 import { friendlyError } from '../lib/errorMessages';
-import { colors, shadows } from '../lib/theme';
+import { AppTheme, createThemedStyles, getTheme } from '../lib/theme';
 import { ChatRoom } from '../types/models';
 
 const NOTE_TYPES: { key: NonNullable<SharedRef['noteType']>; label: string; icon: keyof typeof Ionicons.glyphMap; prompt: string }[] = [
@@ -26,18 +26,22 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
 
   useEffect(() => {
     if (!visible) return;
     let active = true;
     setLoading(true);
     setLoadError(null);
-    getChatRooms().then((list) => {
-      if (!active) return;
-      const shareable = list.filter((r) => r.type !== 'announcement');
-      setRooms(shareable);
-      setRoomId((current) => shareable.some((r) => r.id === current) ? current : shareable[0]?.id || null);
-    }).catch((err) => { if (active) setLoadError(friendlyError(err, 'Groups could not load. Close and try again.')); })
+    getChatRooms()
+      .then((list) => {
+        if (!active) return;
+        const shareable = list.filter((r) => r.type !== 'announcement');
+        setRooms(shareable);
+        setRoomId((current) => (shareable.some((r) => r.id === current) ? current : shareable[0]?.id || null));
+      })
+      .catch((err) => { if (active) setLoadError(friendlyError(err, 'Your groups could not load. Close this and try again.')); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [visible]);
@@ -50,7 +54,12 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
       const result = await sendChatMessage(roomId, text.trim(), undefined, { ...item, noteType });
       setText('');
       onClose();
-      Alert.alert(result.isFlagged ? 'Held for review' : 'Shared', result.isFlagged ? 'A moderator will look at it before others see it.' : `Sent to ${rooms.find((r) => r.id === roomId)?.name || 'the group'}.`);
+      Alert.alert(
+        result.isFlagged ? 'Thank you for sharing' : 'Shared',
+        result.isFlagged
+          ? 'One of our team will read this first, and then it goes out to the group.'
+          : `Sent to ${rooms.find((r) => r.id === roomId)?.name || 'the group'}.`,
+      );
     } catch (err) {
       Alert.alert('Not shared', friendlyError(err, 'Please sign in and try again.'));
     } finally {
@@ -58,33 +67,53 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
     }
   }
 
+  function dismiss() {
+    if (sending) return;
+    onClose();
+  }
+
   const type = NOTE_TYPES.find((t) => t.key === noteType) || NOTE_TYPES[0];
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={() => { if (!sending) onClose(); }}>
-      <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <Pressable style={StyleSheet.absoluteFill} onPress={() => { if (!sending) onClose(); }} accessibilityLabel="Close share sheet" />
-        <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: '88%', flexGrow: 0 }} contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(16, insets.bottom) }, dark && styles.sheetDark]}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={dismiss}>
+      <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+        <Pressable
+          style={StyleSheet.absoluteFill}
+          disabled={sending}
+          onPress={dismiss}
+          accessibilityRole="button"
+          accessibilityLabel="Close sharing"
+        />
+        <ScrollView keyboardShouldPersistTaps="handled" style={styles.sheetScroll} contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(16, insets.bottom) }]}>
           <View style={styles.grabber} />
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Text style={[styles.heading, dark && styles.textDark]}>Share to a group</Text>
-            <Pressable accessibilityRole="button" accessibilityLabel="Close group sharing" disabled={sending} onPress={onClose} style={{ minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }}><Ionicons name="close" size={22} color={dark ? colors.white : colors.royalBlue} /></Pressable>
+          <View style={styles.headingRow}>
+            <Text style={styles.heading}>Share to a group</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close sharing" disabled={sending} onPress={dismiss} style={styles.closeButton}>
+              <Ionicons name="close" size={22} color={theme.colors.textPrimary} />
+            </Pressable>
           </View>
           {item ? (
-            <View style={[styles.itemCard, dark && styles.itemCardDark]}>
-              <Ionicons name={iconFor(item.kind)} size={20} color={colors.gold} />
+            <View style={styles.itemCard}>
+              <Ionicons name={iconFor(item.kind)} size={20} color={theme.colors.accent} />
               <View style={{ flex: 1 }}>
-                <Text numberOfLines={1} style={[styles.itemTitle, dark && styles.textDark]}>{item.title}</Text>
-                {item.speaker ? <Text numberOfLines={1} style={[styles.itemMeta, dark && styles.textDimDark]}>{item.speaker}</Text> : null}
-                {item.scripture ? <Text style={[styles.itemMeta, dark && styles.textDimDark, { marginTop: 8, lineHeight: 20 }]}>{item.scripture.text}</Text> : null}
+                <Text style={styles.itemTitle}>{item.title}</Text>
+                {item.speaker ? <Text style={styles.itemMeta}>{item.speaker}</Text> : null}
+                {item.scripture ? <Text style={[styles.itemMeta, styles.itemScripture]}>{item.scripture.text}</Text> : null}
               </View>
             </View>
           ) : null}
 
           <View style={styles.chips}>
             {NOTE_TYPES.map((t) => (
-              <Pressable key={t.key} accessibilityRole="button" accessibilityState={{ selected: noteType === t.key }} onPress={() => setNoteType(t.key)} style={[styles.chip, dark && styles.chipDark, noteType === t.key && styles.chipOn]}>
-                <Ionicons name={t.icon} size={15} color={noteType === t.key ? '#071231' : dark ? colors.gold : colors.royalBlue} />
-                <Text style={[styles.chipText, dark && styles.textDark, noteType === t.key && styles.chipTextOn]}>{t.label}</Text>
+              <Pressable
+                key={t.key}
+                accessibilityRole="button"
+                accessibilityLabel={`Share this as a ${t.label.toLowerCase()}`}
+                accessibilityState={{ selected: noteType === t.key }}
+                onPress={() => setNoteType(t.key)}
+                style={[styles.chip, noteType === t.key && styles.chipOn]}
+              >
+                <Ionicons name={t.icon} size={15} color={noteType === t.key ? theme.colors.textOnAccent : theme.colors.accent} />
+                <Text style={[styles.chipText, noteType === t.key && styles.chipTextOn]}>{t.label}</Text>
               </Pressable>
             ))}
           </View>
@@ -92,24 +121,38 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
             value={text}
             onChangeText={setText}
             placeholder={type.prompt}
-            placeholderTextColor={dark ? 'rgba(255,255,255,0.45)' : colors.muted}
+            accessibilityLabel={type.prompt}
+            placeholderTextColor={theme.colors.textMuted}
             multiline
-            style={[styles.input, dark && styles.inputDark]}
+            style={styles.input}
           />
 
-          <Text style={[styles.label, dark && styles.textDimDark]}>Send to</Text>
+          <Text style={styles.label}>Send to</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rooms}>
             {rooms.map((r) => (
-              <Pressable key={r.id} accessibilityRole="button" accessibilityState={{ selected: roomId === r.id }} onPress={() => setRoomId(r.id)} style={[styles.room, dark && styles.chipDark, roomId === r.id && styles.roomOn]}>
-                <Text numberOfLines={1} style={[styles.roomText, dark && styles.textDark, roomId === r.id && styles.chipTextOn]}>{r.name}</Text>
+              <Pressable
+                key={r.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Send to ${r.name}`}
+                accessibilityState={{ selected: roomId === r.id }}
+                onPress={() => setRoomId(r.id)}
+                style={[styles.room, roomId === r.id && styles.roomOn]}
+              >
+                <Text numberOfLines={1} style={[styles.roomText, roomId === r.id && styles.chipTextOn]}>{chatRoomTitle(r)}</Text>
               </Pressable>
             ))}
-            {loading ? <ActivityIndicator color={colors.gold} /> : !rooms.length ? <Text style={[styles.itemMeta, dark && styles.textDimDark]}>{loadError || 'No groups available yet.'}</Text> : null}
+            {loading ? <ActivityIndicator color={theme.colors.accent} /> : !rooms.length ? <Text style={styles.itemMeta}>{loadError || 'You are not in a group yet.'}</Text> : null}
           </ScrollView>
 
-          <Pressable accessibilityRole="button" disabled={sending || loading || Boolean(loadError) || !roomId} onPress={send} style={[styles.send, (sending || !roomId) && { opacity: 0.6 }]}>
-            {sending ? <ActivityIndicator color="#071231" /> : <Ionicons name="send" size={18} color="#071231" />}
-            <Text style={styles.sendText}>{sending ? 'Sending...' : 'Send'}</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={sending ? 'Sending' : 'Send to the group'}
+            disabled={sending || loading || Boolean(loadError) || !roomId}
+            onPress={send}
+            style={[styles.send, (sending || !roomId) && styles.sendIdle]}
+          >
+            {sending ? <ActivityIndicator color={theme.colors.textOnAccent} /> : <Ionicons name="send" size={18} color={theme.colors.textOnAccent} />}
+            <Text style={styles.sendText}>{sending ? 'Sending…' : 'Send'}</Text>
           </Pressable>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -118,26 +161,33 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
 }
 
 export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; dark: boolean; own: boolean; onOpen: (shared: SharedRef) => void }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
   const type = NOTE_TYPES.find((t) => t.key === shared.noteType);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`Open ${shared.title}`} onPress={() => onOpen(shared)} style={[styles.card, dark && styles.cardDark, own && styles.cardOwn]}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`Open ${shared.title}`} onPress={() => onOpen(shared)} style={[styles.card, own && styles.cardOwn]}>
       {type ? (
         <View style={styles.cardTag}>
-          <Ionicons name={type.icon} size={13} color={colors.deepGold} />
+          <Ionicons name={type.icon} size={13} color={theme.colors.accent} />
           <Text style={styles.cardTagText}>{type.label}</Text>
         </View>
       ) : null}
       <View style={styles.cardRow}>
-        <View style={[styles.cardIcon, dark && styles.cardIconDark]}>
-          <Ionicons name={iconFor(shared.kind)} size={20} color={dark ? colors.gold : colors.royalBlue} />
+        <View style={styles.cardIcon}>
+          <Ionicons name={iconFor(shared.kind)} size={20} color={theme.colors.accent} />
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text numberOfLines={2} style={[styles.cardTitle, dark && styles.textDark]}>{shared.title}</Text>
-          <Text numberOfLines={1} style={[styles.cardMeta, dark && styles.textDimDark]}>{labelFor(shared.kind)}{shared.speaker ? ` • ${shared.speaker}` : ''}</Text>
+          <Text numberOfLines={2} style={styles.cardTitle}>{shared.title}</Text>
+          <Text numberOfLines={1} style={styles.cardMeta}>{labelFor(shared.kind)}{shared.speaker ? ` • ${shared.speaker}` : ''}</Text>
         </View>
-        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' ? 'open-outline' : 'play-circle'} size={24} color={dark ? colors.gold : colors.deepGold} />
+        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' ? 'open-outline' : 'play-circle'} size={24} color={theme.colors.accent} />
       </View>
-      {shared.scripture ? <><Text style={[styles.cardTitle, dark && styles.textDark]}>{shared.scripture.text}</Text>{shared.scripture.copyright ? <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{shared.scripture.copyright}</Text> : null}</> : null}
+      {shared.scripture ? (
+        <>
+          <Text style={styles.cardTitle}>{shared.scripture.text}</Text>
+          {shared.scripture.copyright ? <Text style={styles.cardMeta}>{shared.scripture.copyright}</Text> : null}
+        </>
+      ) : null}
     </Pressable>
   );
 }
@@ -155,41 +205,38 @@ function labelFor(kind: SharedRef['kind']) {
   return kind === 'music' ? 'Song' : kind === 'video' ? 'Video' : kind === 'story' ? 'Story' : kind === 'article' ? 'Article' : 'Sermon';
 }
 
-const styles = StyleSheet.create({
-  backdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(2,8,23,0.58)' },
-  sheet: { borderTopLeftRadius: 22, borderTopRightRadius: 22, backgroundColor: colors.white, padding: 16, paddingBottom: 30, gap: 12 },
-  sheetDark: { backgroundColor: '#071B45', borderTopWidth: 1, borderTopColor: 'rgba(212,175,55,0.28)' },
-  grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.18)' },
-  heading: { color: colors.royalBlue, fontWeight: '900', fontSize: 18 },
-  itemCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 10, borderRadius: 12, backgroundColor: 'rgba(212,175,55,0.12)' },
-  itemCardDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  itemTitle: { color: colors.royalBlue, fontWeight: '800' },
-  itemMeta: { color: colors.slate, fontSize: 12 },
+const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
+  backdrop: { flex: 1, minHeight: 200, justifyContent: 'flex-end', backgroundColor: t.colors.overlay },
+  sheetScroll: { maxHeight: '88%', flexGrow: 0 },
+  sheet: { borderTopLeftRadius: t.radius.xl, borderTopRightRadius: t.radius.xl, backgroundColor: t.colors.surfaceRaised, borderTopWidth: 1, borderColor: t.colors.accentBorder, padding: 16, paddingBottom: 30, gap: 12 },
+  grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: t.radius.pill, backgroundColor: t.colors.border },
+  headingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  heading: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle },
+  closeButton: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+  itemCard: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: t.radius.md, backgroundColor: t.colors.accentMuted },
+  itemTitle: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
+  itemMeta: { color: t.colors.textSecondary, fontSize: t.type.meta },
+  itemScripture: { marginTop: 8, lineHeight: 20 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine },
-  chipDark: { backgroundColor: 'rgba(255,255,255,0.07)', borderColor: 'rgba(212,175,55,0.24)' },
-  chipOn: { backgroundColor: colors.gold, borderColor: colors.gold },
-  chipText: { color: colors.royalBlue, fontWeight: '800', fontSize: 13 },
-  chipTextOn: { color: '#071231' },
-  input: { minHeight: 84, borderRadius: 14, padding: 12, backgroundColor: colors.white, color: colors.royalBlue, borderWidth: 1, borderColor: colors.softLine, textAlignVertical: 'top' },
-  inputDark: { backgroundColor: 'rgba(255,255,255,0.07)', color: colors.white, borderColor: 'rgba(212,175,55,0.24)' },
-  label: { color: colors.slate, fontWeight: '800', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6 },
-  rooms: { gap: 8 },
-  room: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, maxWidth: 180 },
-  roomOn: { backgroundColor: colors.gold, borderColor: colors.gold },
-  roomText: { color: colors.royalBlue, fontWeight: '800', fontSize: 13 },
-  send: { minHeight: 52, borderRadius: 16, backgroundColor: colors.gold, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  sendText: { color: '#071231', fontWeight: '900', fontSize: 16 },
-  card: { marginTop: 6, padding: 10, borderRadius: 14, backgroundColor: 'rgba(15,23,42,0.05)', gap: 6, ...shadows.soft },
-  cardDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
-  cardOwn: { backgroundColor: 'rgba(255,255,255,0.35)' },
-  cardTag: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: 'rgba(212,175,55,0.18)' },
-  cardTagText: { color: colors.deepGold, fontWeight: '900', fontSize: 11 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 18, minHeight: 48, borderRadius: t.radius.pill, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.borderStrong },
+  chipOn: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+  chipText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+  chipTextOn: { color: t.colors.textOnAccent },
+  input: { minHeight: 92, borderRadius: t.radius.lg, padding: 12, backgroundColor: t.colors.surfaceSunken, color: t.colors.textPrimary, borderWidth: 1, borderColor: t.colors.borderStrong, textAlignVertical: 'top', fontSize: t.type.body },
+  label: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6 },
+  rooms: { gap: 8, alignItems: 'center' },
+  room: { paddingHorizontal: 16, minHeight: 48, justifyContent: 'center', borderRadius: t.radius.pill, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.borderStrong, maxWidth: 200 },
+  roomOn: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+  roomText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+  send: { minHeight: 54, borderRadius: t.radius.lg, backgroundColor: t.colors.accentSolid, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  sendIdle: { opacity: 0.6 },
+  sendText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+  card: { marginTop: 6, alignSelf: 'stretch', minWidth: 200, minHeight: 56, padding: 10, borderRadius: t.radius.lg, backgroundColor: t.colors.surfaceSunken, gap: 6, ...t.elevation.low },
+  cardOwn: { backgroundColor: t.colors.accentMuted },
+  cardTag: { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start', paddingHorizontal: 8, paddingVertical: 3, borderRadius: t.radius.pill, backgroundColor: t.colors.accentMuted },
+  cardTagText: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.overline },
   cardRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  cardIcon: { width: 40, height: 40, borderRadius: 12, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center' },
-  cardIconDark: { backgroundColor: 'rgba(255,255,255,0.1)' },
-  cardTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 14 },
-  cardMeta: { color: colors.slate, fontSize: 12, marginTop: 2 },
-  textDark: { color: colors.white },
-  textDimDark: { color: 'rgba(255,255,255,0.68)' },
-});
+  cardIcon: { width: 40, height: 40, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceRaised, alignItems: 'center', justifyContent: 'center' },
+  cardTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+  cardMeta: { color: t.colors.textSecondary, fontSize: t.type.overline, marginTop: 2 },
+}));

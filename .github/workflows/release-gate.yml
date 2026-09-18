@@ -1,0 +1,81 @@
+# Can this commit go in front of the congregation?
+#
+# The two audit lanes in this folder build the app and drive it on a real
+# simulator or emulator. They are thorough and they are slow — ninety minutes
+# and a macOS runner. This one is the opposite: it never builds anything, it
+# only reads the code, and it finishes in a couple of minutes on a free Linux
+# runner. It is meant to run on every push, which is the only way a gate ever
+# catches anything.
+#
+# Four questions, in the order that fails cheapest first:
+#   1. Does the TypeScript still compile?
+#   2. Do the checked-in test suites still pass?
+#   3. Does the release gate report a blocker?
+#   4. And, for the record, what is the honest full state of the app?
+#
+# Step 3 is the one that stops a merge. It runs against
+# qa/standards/baseline.json, which is the agreed list of what was already
+# broken the day the gate was switched on — so this job goes red for a
+# blocker that is NEW, not for the backlog. qa/standards/README.md explains
+# why, and says the baseline file should only ever get smaller.
+#
+# Step 4 runs the gate with no baseline at all and is allowed to fail. Its
+# output is the true picture, printed on every run so nobody has to remember
+# to ask for it.
+#
+# Nothing secret is needed here. This job does not sign in, does not reach
+# Supabase and does not build a bundle, so there are no EXPO_PUBLIC_* values
+# to write and no secrets to leak.
+name: Release gate
+
+on:
+  push:
+  pull_request:
+
+# A push that lands while an earlier one is still running makes the earlier
+# one pointless. Cancelling it keeps this cheap enough to leave on every
+# branch.
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          # setup-node's own npm cache keys on package-lock.json, which is
+          # exactly what decides the install. The audit lanes cache Gradle by
+          # hand for the same reason; here the built-in is enough.
+          cache: npm
+
+      - name: Install dependencies
+        # The postinstall step asks the machine which Swift it has and does
+        # nothing at all when there is none, so it is a no-op on Linux.
+        run: npm ci --no-audit --no-fund
+
+      - name: Does it still compile
+        run: npm run typecheck
+
+      - name: Do the checked-in tests still pass
+        # Named one by one on purpose. The working copy lives on an external
+        # drive that writes AppleDouble "._" siblings next to every file, and
+        # `node --test qa/` picks those up and tries to run them.
+        run: npm test
+
+      - name: Is anything NEW stopping the release
+        # Exit code 1 means a blocker, and a blocker fails this job. Findings
+        # already agreed in the baseline do not.
+        run: npm run gate -- --baseline qa/standards/baseline.json
+
+      - name: The honest full picture, for the record
+        # Never fails the build. This is the backlog, printed so it stays
+        # visible instead of living only in somebody's terminal.
+        continue-on-error: true
+        run: npm run gate
