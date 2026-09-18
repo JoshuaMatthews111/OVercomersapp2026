@@ -1,13 +1,39 @@
 // Evangelism map. Regions are drawn as real outlines, colored by status.
 // Workers on the field show up live. Leaders can outline a region by tapping
 // corners on the map or by pulling the shape from OpenStreetMap.
+//
+// Map engine: MapLibre with free OpenStreetMap-style tiles (OpenFreeMap). No
+// Google key, no billing account, no card. The old react-native-maps used
+// Google Maps on Android, which needs a paid key. MapLibre needs none and
+// draws the same territory outlines, live workers and contacts. iOS looked the
+// same either way; Android was the one that went blank without a Google key.
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import MapView, { LatLng, Marker, Polygon, Polyline, Region } from 'react-native-maps';
+import { Camera, type CameraRef, GeoJSONSource, Layer, Map, type MapRef, Marker, UserLocation } from '@maplibre/maplibre-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+/** The app stores points as {latitude, longitude}; MapLibre speaks [lng, lat]. */
+type LatLng = { latitude: number; longitude: number };
+/** Free vector tiles, no key. Liberty is a Google-Maps-like street style. */
+const MAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
+const toLngLat = (p: LatLng): [number, number] => [p.longitude, p.latitude];
+/** A latitude span (old "latitudeDelta") turned into a MapLibre zoom level. */
+const deltaToZoom = (delta: number): number => Math.max(1, Math.min(20, Math.round(Math.log2(360 / delta))));
+/** True when a point sits inside a ring, by the ray-casting rule. */
+function pointInRing(point: LatLng, ring: LatLng[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i].longitude, yi = ring[i].latitude;
+    const xj = ring[j].longitude, yj = ring[j].latitude;
+    const hit = (yi > point.latitude) !== (yj > point.latitude) &&
+      point.longitude < ((xj - xi) * (point.latitude - yi)) / (yj - yi) + xi;
+    if (hit) inside = !inside;
+  }
+  return inside;
+}
 import { PrimaryButton } from '../components/PrimaryButton';
 import { Screen } from '../components/Screen';
 import { useAccessProfile } from '../lib/accessControl';
@@ -56,7 +82,9 @@ function withAlpha(hex: string, alpha: number) {
 export default function MapsScreen() {
   const { access, loadingAccess } = useAccessProfile();
   const insets = useSafeAreaInsets();
-  const mapRef = useRef<MapView | null>(null);
+  const mapRef = useRef<MapRef | null>(null);
+  const cameraRef = useRef<CameraRef | null>(null);
+  const zoomRef = useRef<number>(deltaToZoom(levelDelta.city));
   const [territoryList, setTerritoryList] = useState<Territory[]>([]);
   const [contactList, setContactList] = useState<OutreachContact[]>([]);
   const [selected, setSelected] = useState<Territory | null>(null);
@@ -65,7 +93,6 @@ export default function MapsScreen() {
   const [sheetHeight, setSheetHeight] = useState(150);
   const [loadingMap, setLoadingMap] = useState(true);
   const [mapError, setMapError] = useState<string | null>(null);
-  const regionRef = useRef<Region | null>(null);
   const searchResults = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return needle ? territoryList.filter((t) => t.name.toLowerCase().includes(needle) || t.streetNames?.some((name) => name.toLowerCase().includes(needle))).slice(0, 8) : [];
@@ -144,9 +171,15 @@ export default function MapsScreen() {
       .sort((a, b) => (rank[a.level] ?? 9) - (rank[b.level] ?? 9) || distance(a) - distance(b))
       .find((t) => distance(t) < (t.level === 'country' ? 30 : t.level === 'region' ? 6 : 1.5));
     if (nearest) { setSelected(nearest); setSheet('summary'); }
-    mapRef.current?.animateToRegion({ ...openedOnMe, latitudeDelta: 0.03, longitudeDelta: 0.03 }, 700);
+    flyTo(openedOnMe, deltaToZoom(0.03), 700);
     setOpenedOnMe(null);
   }, [openedOnMe, territoryList]);
+
+  /** Move the camera to a point at a zoom level. Replaces animateToRegion. */
+  function flyTo(center: LatLng, zoom: number, duration: number) {
+    zoomRef.current = zoom;
+    cameraRef.current?.flyTo({ center: toLngLat(center), zoom, duration });
+  }
 
   const children = useMemo(() => territoryList.filter((t) => t.parentId === selected?.id), [selected, territoryList]);
   const drawn = useMemo(() => territoryList.filter((t) => t.boundary?.length), [territoryList]);
@@ -159,8 +192,16 @@ export default function MapsScreen() {
     Keyboard.dismiss();
     setSheet('summary');
     const coordinates = territory.boundary?.flat() || [];
-    if (coordinates.length > 2) mapRef.current?.fitToCoordinates(coordinates, { edgePadding: { top: insets.top + 125, bottom: sheetHeight + 24, left: 36, right: 36 }, animated: true });
-    else mapRef.current?.animateToRegion({ ...territory.center, latitudeDelta: levelDelta[territory.level], longitudeDelta: levelDelta[territory.level] }, 650);
+    if (coordinates.length > 2) {
+      let west = 180, south = 90, east = -180, north = -90;
+      for (const c of coordinates) {
+        west = Math.min(west, c.longitude); east = Math.max(east, c.longitude);
+        south = Math.min(south, c.latitude); north = Math.max(north, c.latitude);
+      }
+      cameraRef.current?.fitBounds([west, south, east, north], { padding: { top: insets.top + 125, bottom: sheetHeight + 24, left: 36, right: 36 }, duration: 650 });
+    } else {
+      flyTo(territory.center, deltaToZoom(levelDelta[territory.level]), 650);
+    }
   }
 
   function runSearch() {
@@ -177,13 +218,14 @@ export default function MapsScreen() {
     const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
     const here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
     setMyLocation(here);
-    mapRef.current?.animateToRegion({ ...here, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 800);
+    flyTo(here, deltaToZoom(0.01), 800);
     return here;
   }
 
-  function zoom(factor: number) {
-    const region = regionRef.current;
-    if (region) mapRef.current?.animateToRegion({ ...region, latitudeDelta: Math.min(140, Math.max(0.002, region.latitudeDelta * factor)), longitudeDelta: Math.min(170, Math.max(0.002, region.longitudeDelta * factor)) }, 250);
+  function zoom(step: number) {
+    const next = Math.max(1, Math.min(20, zoomRef.current + step));
+    zoomRef.current = next;
+    cameraRef.current?.zoomTo(next, { duration: 250 });
   }
 
   async function retryMap() {
@@ -315,57 +357,89 @@ export default function MapsScreen() {
   }
 
   const accent = statusColor[selected.status];
+
+  // Every drawn region as one GeoJSON layer, colored per-feature by status.
+  const regionShape = useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: drawn.flatMap((t) => (t.boundary || []).map((ring, index) => ({
+      type: 'Feature' as const,
+      properties: {
+        fill: statusColor[t.status],
+        opacity: t.id === selected.id ? 0.28 : 0.16,
+        width: t.id === selected.id ? 3 : 2,
+      },
+      geometry: { type: 'Polygon' as const, coordinates: [[...ring, ring[0]].map(toLngLat)] },
+      id: `${t.id}-${index}`,
+    }))),
+  }), [drawn, selected.id]);
+
+  const drawShape = useMemo(() => ({
+    type: 'FeatureCollection' as const,
+    features: drawing && drawing.length > 1
+      ? [{ type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates: drawing.map(toLngLat) } }]
+      : [],
+  }), [drawing]);
+
+  // A tap: add a corner while drawing, else select the drawn region under it.
+  function onMapPress(event: { geometry?: { coordinates?: [number, number] } } | any) {
+    const coords: [number, number] | undefined = event?.geometry?.coordinates;
+    if (!coords) return;
+    const point: LatLng = { latitude: coords[1], longitude: coords[0] };
+    if (drawing) { setDrawing([...drawing, point]); return; }
+    for (const t of drawn) {
+      if ((t.boundary || []).some((ring) => pointInRing(point, ring))) { focusTerritory(t); return; }
+    }
+  }
+
   return (
     <View style={styles.root}>
-      <MapView
+      <Map
         ref={mapRef}
         style={StyleSheet.absoluteFill}
-        mapType="standard"
-        mapPadding={{ top: insets.top + 110, right: 12, bottom: sheetHeight + 12, left: 12 }}
-        onRegionChangeComplete={(region) => { regionRef.current = region; }}
-        showsUserLocation
-        initialRegion={{ latitude: selected.center.latitude, longitude: selected.center.longitude, latitudeDelta: levelDelta[selected.level], longitudeDelta: levelDelta[selected.level] }}
-        onPress={(event) => { if (drawing) setDrawing([...drawing, event.nativeEvent.coordinate]); }}
+        mapStyle={MAP_STYLE_URL}
+        contentInset={{ top: insets.top + 110, right: 12, bottom: sheetHeight + 12, left: 12 }}
+        onRegionDidChange={(e) => { if (typeof e?.nativeEvent?.zoom === 'number') zoomRef.current = e.nativeEvent.zoom; }}
+        onDidFinishLoadingMap={() => flyTo(selected.center, deltaToZoom(levelDelta[selected.level]), 0)}
+        onPress={(e: any) => onMapPress(e?.nativeEvent)}
       >
-        {drawn.map((t) => t.boundary!.map((ring, index) => (
-          <Polygon
-            key={`${t.id}-${index}`}
-            coordinates={ring}
-            strokeColor={statusColor[t.status]}
-            strokeWidth={t.id === selected.id ? 3 : 2}
-            fillColor={withAlpha(statusColor[t.status], t.id === selected.id ? 0.28 : 0.16)}
-            tappable
-            onPress={() => focusTerritory(t)}
-          />
-        )))}
+        <Camera ref={cameraRef} />
+        <UserLocation />
+
+        <GeoJSONSource id="regions" data={regionShape}>
+          <Layer id="regions-fill" type="fill" paint={{ 'fill-color': ['get', 'fill'], 'fill-opacity': ['get', 'opacity'] }} />
+          <Layer id="regions-line" type="line" paint={{ 'line-color': ['get', 'fill'], 'line-width': ['get', 'width'] }} />
+        </GeoJSONSource>
+
         {[selected, ...children].filter((t) => !t.boundary?.length && t.level !== 'global').map((t) => (
-          <Marker key={t.id} coordinate={t.center} onPress={() => focusTerritory(t)}>
-            <View style={[styles.pin, { borderColor: statusColor[t.status] }]}>
+          <Marker key={t.id} id={t.id} lngLat={toLngLat(t.center)} anchor="center">
+            <Pressable onPress={() => focusTerritory(t)} style={[styles.pin, { borderColor: statusColor[t.status] }]}>
               <View style={[styles.pinDot, { backgroundColor: statusColor[t.status] }]} />
               <Text numberOfLines={1} style={styles.pinText}>{t.name}</Text>
-            </View>
+            </Pressable>
           </Marker>
         ))}
         {relatedContacts.map((c) => c.location ? (
-          <Marker key={c.id} coordinate={c.location} title={c.name} description={c.followUpNeeded ? 'Follow-up due' : 'Reached'}>
+          <Marker key={c.id} id={c.id} lngLat={toLngLat(c.location)} anchor="center">
             <View style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.brightBlue }]} />
           </Marker>
         ) : null)}
         {workers.map((w) => w.location ? (
-          <Marker key={w.id} coordinate={w.location} title={w.displayName} description="On the field now">
+          <Marker key={w.id} id={w.id} lngLat={toLngLat(w.location)} anchor="center">
             <View style={styles.worker}>
               <View style={styles.workerPulse} />
               <Ionicons name="walk" size={14} color={colors.white} />
             </View>
           </Marker>
         ) : null)}
-        {drawing?.length ? (
-          <>
-            <Polyline coordinates={drawing} strokeColor={colors.gold} strokeWidth={3} lineDashPattern={[6, 4]} />
-            {drawing.map((p, i) => <Marker key={i} coordinate={p} anchor={{ x: 0.5, y: 0.5 }}><View style={styles.corner} /></Marker>)}
-          </>
+        {drawShape.features.length ? (
+          <GeoJSONSource id="draw" data={drawShape}>
+            <Layer id="draw-line" type="line" paint={{ 'line-color': colors.gold, 'line-width': 3, 'line-dasharray': [2, 1.5] }} />
+          </GeoJSONSource>
         ) : null}
-      </MapView>
+        {drawing?.map((p, i) => (
+          <Marker key={`corner-${i}`} id={`corner-${i}`} lngLat={toLngLat(p)} anchor="center"><View style={styles.corner} /></Marker>
+        ))}
+      </Map>
 
       {/* Top bar */}
       <View style={[styles.topBar, { top: insets.top + 8 }]}>
@@ -384,8 +458,8 @@ export default function MapsScreen() {
         </ScrollView>
       ) : null}
       <View style={[styles.mapControls, { bottom: sheetHeight + 24 }]}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Zoom in" onPress={() => zoom(0.5)} style={styles.roundButton}><Ionicons name="add" size={24} color={colors.royalBlue} /></Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Zoom out" onPress={() => zoom(2)} style={styles.roundButton}><Ionicons name="remove" size={24} color={colors.royalBlue} /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Zoom in" onPress={() => zoom(1)} style={styles.roundButton}><Ionicons name="add" size={24} color={colors.royalBlue} /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Zoom out" onPress={() => zoom(-1)} style={styles.roundButton}><Ionicons name="remove" size={24} color={colors.royalBlue} /></Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Fit selected region" onPress={() => focusTerritory(selected)} style={styles.roundButton}><Ionicons name="scan-outline" size={22} color={colors.royalBlue} /></Pressable>
       </View>
 

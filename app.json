@@ -3,7 +3,7 @@
     "name": "Overcomers Global Network",
     "slug": "overcomers-global-network-app",
     "scheme": "ognapp",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/images/ogn-app-icon.png",
     "userInterfaceStyle": "light",
@@ -76,7 +76,8 @@
       ],
       "expo-asset",
       "expo-image",
-      "expo-status-bar"
+      "expo-status-bar",
+      "@maplibre/maplibre-react-native"
     ],
     "extra": {
       "router": {
