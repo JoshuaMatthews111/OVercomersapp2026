@@ -4,6 +4,7 @@ import { supabase } from './supabase';
 import { UploadPurpose, recordUploadedFile } from './uploadAnalysis';
 
 import { hasSupabase } from './publicEnv';
+import { readUploadBody } from './uploadBody';
 
 export type AppUpload = {
   publicUrl: string;
@@ -30,12 +31,11 @@ export async function uploadPickedAsset(input: {
   const mimeType = input.asset.mimeType || inferMimeType(input.asset.fileName, input.asset.type);
   const fileName = sanitizeFileName(input.asset.fileName || `${input.purpose}.${extensionFromMime(mimeType)}`);
   const objectPath = `${input.pathPrefix || userId}/${Date.now()}-${fileName}`;
-  const response = await fetch(input.asset.uri);
-  const blob = await response.blob();
+  const upload = await readUploadBody(input.asset.uri);
 
   const { error: uploadError } = await supabase.storage
     .from(input.bucketId)
-    .upload(objectPath, blob, {
+    .upload(objectPath, upload.body, {
       contentType: mimeType,
       upsert: true,
     });
@@ -48,7 +48,7 @@ export async function uploadPickedAsset(input: {
     objectPath,
     fileName,
     mimeType,
-    sizeBytes: input.asset.fileSize,
+    sizeBytes: upload.size,
     purpose: input.purpose,
     relatedTable: input.relatedTable,
     relatedId: input.relatedId,
@@ -74,12 +74,11 @@ export async function uploadDocumentAsset(input: {
   const mimeType = input.asset.mimeType || inferMimeType(input.asset.name);
   const fileName = sanitizeFileName(input.asset.name || `${input.purpose}.${extensionFromMime(mimeType)}`);
   const objectPath = `${input.pathPrefix || userId}/${Date.now()}-${fileName}`;
-  const response = await fetch(input.asset.uri);
-  const blob = await response.blob();
+  const upload = await readUploadBody(input.asset.uri);
 
   const { error: uploadError } = await supabase.storage
     .from(input.bucketId)
-    .upload(objectPath, blob, {
+    .upload(objectPath, upload.body, {
       contentType: mimeType,
       upsert: true,
     });
@@ -92,7 +91,7 @@ export async function uploadDocumentAsset(input: {
     objectPath,
     fileName,
     mimeType,
-    sizeBytes: input.asset.size,
+    sizeBytes: upload.size,
     purpose: input.purpose,
     relatedTable: input.relatedTable,
     relatedId: input.relatedId,

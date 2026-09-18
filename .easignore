@@ -1,4 +1,15 @@
 # Not needed to build the app; keeps the EAS upload small (was 180 MB).
+.git/
+node_modules/
+.expo/
+*.log
+coverage/
+google-play-service-account.json
+*-service-account.json
+# Local configuration is supplied by the selected EAS environment.
+.env
+.env.local
+.env.*.local
 *_HANDOFF.md
 .cocoapods-home/
 .github/

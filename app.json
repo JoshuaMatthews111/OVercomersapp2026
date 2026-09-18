@@ -73,7 +73,9 @@
           "supportsPictureInPicture": true
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-image",
+      "expo-status-bar"
     ],
     "extra": {
       "router": {
@@ -85,7 +87,7 @@
     },
     "owner": "joshflaww",
     "runtimeVersion": {
-      "policy": "appVersion"
+      "policy": "fingerprint"
     },
     "updates": {
       "url": "https://u.expo.dev/8e9b3da8-b8dc-4275-a247-e226a4eca99a",

@@ -30,7 +30,7 @@ export default function ResetPasswordScreen() {
       return;
     }
     Alert.alert('Password updated', 'You can now sign in with your new password.', [
-      { text: 'Continue', onPress: () => router.replace('/' as any) },
+      { text: 'Continue', onPress: () => router.replace('/welcome') },
     ]);
   }
 
@@ -62,7 +62,7 @@ export default function ResetPasswordScreen() {
           <Pressable onPress={updatePassword} disabled={submitting} style={[styles.button, submitting && styles.buttonDisabled]}>
             {submitting ? <ActivityIndicator color="#071231" /> : <Text style={styles.buttonText}>Save New Password</Text>}
           </Pressable>
-          <Pressable onPress={() => router.replace('/' as any)} style={styles.secondaryButton}>
+          <Pressable onPress={() => router.replace('/welcome')} style={styles.secondaryButton}>
             <Text style={styles.secondaryText}>Back to Sign In</Text>
           </Pressable>
         </View>

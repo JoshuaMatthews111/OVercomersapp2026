@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Session } from '@supabase/supabase-js';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import { Alert, Image, Linking, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -34,6 +34,7 @@ const art = {
 };
 
 export default function ProfileScreen() {
+  const params = useLocalSearchParams<{ settings?: string }>();
   const { access } = useAccessProfile();
   const { themePreference, setThemePreference } = useThemePreference();
   const insets = useSafeAreaInsets();
@@ -46,6 +47,13 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [settingsDetail, setSettingsDetail] = useState<SettingsDetail>(null);
   const [showNotificationSettings, setShowNotificationSettings] = useState(false);
+  useEffect(() => {
+    if (params.settings === 'notifications') {
+      setShowNotificationSettings(true);
+      setSettingsDetail(null);
+      router.setParams({ settings: undefined });
+    }
+  }, [params.settings]);
   const [notificationPrefs, setNotificationPrefs] = useState<NotificationPreferences>({
     announcements: true,
     sermons: true,
@@ -107,7 +115,11 @@ export default function ProfileScreen() {
     // iPhone lane signed out of the same test account, and a member would get
     // the same surprise on their second phone. "Sign out everywhere" can be
     // its own switch in Account Settings later.
-    await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
+    const { error } = await supabase.auth.signOut({ scope: 'local' });
+    if (error) {
+      Alert.alert('Sign out failed', friendlyError(error, 'Please check your connection and try again.'));
+      return;
+    }
     // "/" is also the tabs' Home; the welcome screen has its own address.
     router.replace('/welcome');
   }

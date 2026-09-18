@@ -5,8 +5,8 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import MapView, { LatLng, Marker, Polygon, Polyline } from 'react-native-maps';
+import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import MapView, { LatLng, Marker, Polygon, Polyline, Region } from 'react-native-maps';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { Screen } from '../components/Screen';
@@ -54,13 +54,22 @@ function withAlpha(hex: string, alpha: number) {
 }
 
 export default function MapsScreen() {
-  const { access } = useAccessProfile();
+  const { access, loadingAccess } = useAccessProfile();
   const insets = useSafeAreaInsets();
   const mapRef = useRef<MapView | null>(null);
   const [territoryList, setTerritoryList] = useState<Territory[]>([]);
   const [contactList, setContactList] = useState<OutreachContact[]>([]);
   const [selected, setSelected] = useState<Territory | null>(null);
   const [query, setQuery] = useState('');
+  const [collapsed, setCollapsed] = useState(true);
+  const [sheetHeight, setSheetHeight] = useState(150);
+  const [loadingMap, setLoadingMap] = useState(true);
+  const [mapError, setMapError] = useState<string | null>(null);
+  const regionRef = useRef<Region | null>(null);
+  const searchResults = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return needle ? territoryList.filter((t) => t.name.toLowerCase().includes(needle) || t.streetNames?.some((name) => name.toLowerCase().includes(needle))).slice(0, 8) : [];
+  }, [query, territoryList]);
   const [myLocation, setMyLocation] = useState<LatLng | null>(null);
   const [workers, setWorkers] = useState<LiveWorker[]>([]);
   const [checkinId, setCheckinId] = useState<string | null>(null);
@@ -84,6 +93,7 @@ export default function MapsScreen() {
   }
 
   useEffect(() => {
+    if (loadingAccess || !access.canUseEvangelism) return;
     // Open on the person, not on the country. Joshua opened the map in Mentor,
     // Ohio and got the whole United States centered on Canada. Now: load the
     // territories, then quietly ask where the phone is, pick the smallest
@@ -92,7 +102,7 @@ export default function MapsScreen() {
       .then(async () => {
         try {
           const perm = await Location.getForegroundPermissionsAsync();
-          const status = perm.status === 'granted' ? 'granted' : (await Location.requestForegroundPermissionsAsync()).status;
+          const status = perm.status;
           if (status !== 'granted') return;
           const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
           const here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
@@ -100,11 +110,12 @@ export default function MapsScreen() {
           setOpenedOnMe(here);
         } catch { /* stay on the default view */ }
       })
-      .catch(() => undefined);
+      .catch((err) => setMapError(friendlyError(err, 'Regions could not load. Please try again.')))
+      .finally(() => setLoadingMap(false));
     const unsubscribe = subscribeLiveWorkers(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); });
     const poll = setInterval(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); }, 60 * 1000);
     return () => { unsubscribe(); clearInterval(poll); };
-  }, []);
+  }, [loadingAccess, access.canUseEvangelism]);
 
   // While checked in, tell the server we are still here once a minute.
   useEffect(() => {
@@ -144,8 +155,12 @@ export default function MapsScreen() {
 
   function focusTerritory(territory: Territory) {
     setSelected(territory);
+    setQuery('');
+    Keyboard.dismiss();
     setSheet('summary');
-    mapRef.current?.animateToRegion({ latitude: territory.center.latitude, longitude: territory.center.longitude, latitudeDelta: levelDelta[territory.level], longitudeDelta: levelDelta[territory.level] }, 650);
+    const coordinates = territory.boundary?.flat() || [];
+    if (coordinates.length > 2) mapRef.current?.fitToCoordinates(coordinates, { edgePadding: { top: insets.top + 125, bottom: sheetHeight + 24, left: 36, right: 36 }, animated: true });
+    else mapRef.current?.animateToRegion({ ...territory.center, latitudeDelta: levelDelta[territory.level], longitudeDelta: levelDelta[territory.level] }, 650);
   }
 
   function runSearch() {
@@ -159,11 +174,22 @@ export default function MapsScreen() {
   async function locateMe(): Promise<LatLng | null> {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== 'granted') { Alert.alert('Location needed', 'Turn on location to see where you are on the map.'); return null; }
-    const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Highest });
+    const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
     const here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
     setMyLocation(here);
     mapRef.current?.animateToRegion({ ...here, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 800);
     return here;
+  }
+
+  function zoom(factor: number) {
+    const region = regionRef.current;
+    if (region) mapRef.current?.animateToRegion({ ...region, latitudeDelta: Math.min(140, Math.max(0.002, region.latitudeDelta * factor)), longitudeDelta: Math.min(170, Math.max(0.002, region.longitudeDelta * factor)) }, 250);
+  }
+
+  async function retryMap() {
+    setLoadingMap(true); setMapError(null);
+    try { await loadAll(); } catch (err) { setMapError(friendlyError(err, 'Regions could not load. Please try again.')); }
+    finally { setLoadingMap(false); }
   }
 
   async function toggleCheckin() {
@@ -261,6 +287,8 @@ export default function MapsScreen() {
     }
   }
 
+  if (loadingAccess) return <Screen><ActivityIndicator color={colors.gold} /></Screen>;
+
   if (!access.canUseEvangelism) {
     return (
       <Screen>
@@ -275,7 +303,7 @@ export default function MapsScreen() {
   }
 
   if (!selected) {
-    return <Screen><View style={styles.gate}><ActivityIndicator color={colors.gold} /><Text style={styles.gateBody}>Loading regions...</Text></View></Screen>;
+    return <Screen><Pressable accessibilityRole="button" onPress={goBack}><Text style={styles.backText}>Back</Text></Pressable><View style={styles.gate}>{loadingMap ? <ActivityIndicator color={colors.gold} /> : <Ionicons name="map-outline" size={36} color={colors.gold} />}<Text style={styles.gateBody}>{loadingMap ? 'Loading regions…' : mapError || 'No outreach regions are available yet.'}</Text>{!loadingMap ? <PrimaryButton label="Try again" onPress={retryMap} /> : null}</View></Screen>;
   }
 
   const accent = statusColor[selected.status];
@@ -285,6 +313,8 @@ export default function MapsScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         mapType="standard"
+        mapPadding={{ top: insets.top + 110, right: 12, bottom: sheetHeight + 12, left: 12 }}
+        onRegionChangeComplete={(region) => { regionRef.current = region; }}
         showsUserLocation
         initialRegion={{ latitude: selected.center.latitude, longitude: selected.center.longitude, latitudeDelta: levelDelta[selected.level], longitudeDelta: levelDelta[selected.level] }}
         onPress={(event) => { if (drawing) setDrawing([...drawing, event.nativeEvent.coordinate]); }}
@@ -336,11 +366,23 @@ export default function MapsScreen() {
           <Ionicons name="search" size={16} color={colors.slate} />
           <TextInput value={query} onChangeText={setQuery} onSubmitEditing={runSearch} placeholder="Find a region or street" placeholderTextColor={colors.slate} style={styles.searchInput} returnKeyType="search" />
         </View>
-        <Pressable accessibilityRole="button" accessibilityLabel="My location" onPress={locateMe} style={styles.roundButton}><Ionicons name="locate" size={20} color={colors.royalBlue} /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="My location" onPress={() => locateMe().catch((err) => Alert.alert('Location unavailable', friendlyError(err, 'Please try again.')))} style={styles.roundButton}><Ionicons name="locate" size={20} color={colors.royalBlue} /></Pressable>
+      </View>
+
+      {query.trim() ? (
+        <ScrollView keyboardShouldPersistTaps="handled" style={[styles.searchResults, { top: insets.top + 58 }]}>
+          {searchResults.length ? searchResults.map((territory) => <Pressable key={territory.id} accessibilityRole="button" onPress={() => focusTerritory(territory)} style={styles.searchResult}><Text style={styles.contactName}>{territory.name}</Text><Text style={styles.contactSub}>{territory.level} • {statusLabel[territory.status]}</Text></Pressable>) : <Text style={styles.empty}>No matching regions. Try a nearby city or street.</Text>}
+          <Pressable accessibilityRole="button" onPress={() => { setQuery(''); Keyboard.dismiss(); }} style={styles.searchResult}><Text style={styles.backText}>Clear search</Text></Pressable>
+        </ScrollView>
+      ) : null}
+      <View style={[styles.mapControls, { bottom: sheetHeight + 24 }]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Zoom in" onPress={() => zoom(0.5)} style={styles.roundButton}><Ionicons name="add" size={24} color={colors.royalBlue} /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Zoom out" onPress={() => zoom(2)} style={styles.roundButton}><Ionicons name="remove" size={24} color={colors.royalBlue} /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Fit selected region" onPress={() => focusTerritory(selected)} style={styles.roundButton}><Ionicons name="scan-outline" size={22} color={colors.royalBlue} /></Pressable>
       </View>
 
       {/* Legend + live count */}
-      <View style={[styles.legend, { top: insets.top + 62 }]}>
+      <View pointerEvents="none" style={[styles.legend, { top: insets.top + 62, opacity: query.trim() ? 0 : 1 }]}>
         {(['covered', 'in_progress', 'untapped', 'follow_up_due'] as Territory['status'][]).map((s) => (
           <View key={s} style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: statusColor[s] }]} /><Text style={styles.legendText}>{statusLabel[s]}</Text></View>
         ))}
@@ -359,8 +401,8 @@ export default function MapsScreen() {
         </View>
       ) : (
         /* Bottom sheet */
-        <View style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]}>
-          <View style={styles.grabber} />
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]} onLayout={(event) => setSheetHeight(event.nativeEvent.layout.height)}>
+          <Pressable accessibilityRole="button" accessibilityLabel={collapsed ? 'Expand region details' : 'Collapse region details'} accessibilityState={{ expanded: !collapsed }} onPress={() => setCollapsed((value) => !value)} style={styles.sheetToggle}><View style={styles.grabber} /><Text style={styles.backText}>{collapsed ? 'Show details' : 'Show more map'} <Ionicons name={collapsed ? 'chevron-up' : 'chevron-down'} size={16} /></Text></Pressable>
           <View style={styles.sheetHeader}>
             <View style={[styles.statusChip, { backgroundColor: withAlpha(accent, 0.16) }]}><View style={[styles.legendDot, { backgroundColor: accent }]} /><Text style={[styles.statusChipText, { color: accent }]}>{statusLabel[selected.status]}</Text></View>
             <Text style={styles.levelText}>{selected.level}</Text>
@@ -368,6 +410,7 @@ export default function MapsScreen() {
           <Text style={styles.sheetTitle}>{selected.name}</Text>
           {workersHere.length ? <Text style={styles.liveLine}>{workersHere.map((w) => w.displayName).join(', ')} on the field now</Text> : null}
 
+          {!collapsed ? <>
           <View style={styles.tabs}>
             {([['summary', 'Region'], ['people', 'Records'], ['record', 'Add record'], ...(access.canOverrideLeaderData ? [['admin', 'Fix numbers']] : [])] as [typeof sheet, string][]).map(([key, label]) => (
               <Pressable key={key} accessibilityRole="button" accessibilityState={{ selected: sheet === key }} onPress={() => setSheet(key)} style={[styles.tab, sheet === key && styles.tabOn]}>
@@ -470,7 +513,8 @@ export default function MapsScreen() {
               </View>
             ) : null}
           </ScrollView>
-        </View>
+          </> : null}
+        </KeyboardAvoidingView>
       )}
     </View>
   );
@@ -490,6 +534,10 @@ function Flag({ label, value, onPress }: { label: string; value: boolean; onPres
 }
 
 const styles = StyleSheet.create({
+  mapControls: { position: 'absolute', right: 12, gap: 8 },
+  searchResults: { position: 'absolute', left: 12, right: 12, maxHeight: '40%', borderRadius: 16, paddingHorizontal: 14, backgroundColor: colors.white, zIndex: 20, elevation: 12 },
+  searchResult: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.softLine },
+  sheetToggle: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   root: { flex: 1, backgroundColor: '#E8EEF7' },
   topBar: { position: 'absolute', left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
   roundButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
@@ -520,7 +568,7 @@ const styles = StyleSheet.create({
   levelText: { color: colors.slate, fontWeight: '800', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.6 },
   sheetTitle: { color: colors.royalBlue, fontSize: 22, fontWeight: '900', marginTop: 6 },
   liveLine: { color: colors.brightBlue, fontWeight: '800', fontSize: 12, marginTop: 2 },
-  tabs: { flexDirection: 'row', gap: 6, marginTop: 10 },
+  tabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
   tab: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.06)' },
   tabOn: { backgroundColor: colors.royalBlue },
   tabText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },

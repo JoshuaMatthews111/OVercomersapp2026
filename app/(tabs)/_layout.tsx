@@ -47,15 +47,15 @@ export default function TabLayout() {
         if (!mounted) return;
         if (!data.session) {
           setCheckingSession(false);
-          router.replace('/');
+          router.replace('/welcome');
           return;
         }
         const access = await getAccessProfile();
         if (!mounted) return;
         if (access.accountStatus === 'paused' || access.accountStatus === 'removed') {
-          await supabase.auth.signOut();
+          await supabase.auth.signOut({ scope: 'local' });
           Alert.alert('Account unavailable', access.accountStatusReason || 'This account has been paused by an administrator.');
-          router.replace('/');
+          router.replace('/welcome');
           return;
         }
         setCheckingSession(false);
@@ -98,7 +98,7 @@ export default function TabLayout() {
         <Pressable onPress={() => { setCheckingSession(true); setSessionError(null); setSessionCheckNonce((value) => value + 1); }} style={styles.retryButton}>
           <Text style={styles.retryText}>Try Again</Text>
         </Pressable>
-        <Pressable onPress={async () => { await supabase.auth.signOut(); router.replace('/'); }} style={styles.signOutButton}>
+        <Pressable onPress={async () => { await supabase.auth.signOut({ scope: 'local' }); router.replace('/welcome'); }} style={styles.signOutButton}>
           <Text style={[styles.signOutText, { color: dark ? colors.white : colors.royalBlue }]}>Back to Sign In</Text>
         </Pressable>
       </View>

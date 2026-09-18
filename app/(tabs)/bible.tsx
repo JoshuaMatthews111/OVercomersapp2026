@@ -1,4 +1,7 @@
 import { publicEnv } from '../../lib/publicEnv';
+import { useLocalSearchParams } from 'expo-router';
+import { ShareToChatSheet } from '../../components/ShareToChat';
+import { SharedRef } from '../../lib/chatService';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -37,6 +40,7 @@ const art = {
 };
 
 export default function BibleScreen() {
+  const params = useLocalSearchParams<{ bookId?: string; chapter?: string; verse?: string; version?: string }>();
   const { themePreference } = useThemePreference();
   const dark = themePreference === 'dark';
   const [version, setVersion] = useState<BibleVersion>('KJV');
@@ -49,6 +53,24 @@ export default function BibleScreen() {
   const [noteText, setNoteText] = useState('');
   const [savingBible, setSavingBible] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [sharedVerse, setSharedVerse] = useState<SharedRef | null>(null);
+
+  useEffect(() => {
+    if (!params.bookId || !BIBLE_BOOKS.some((book) => book.id === params.bookId)) return;
+    setSelection(normalizeBibleSelection({ bookId: params.bookId, chapter: Number(params.chapter) || 1, verse: Number(params.verse) || 1 }));
+    if (allVersions.includes(params.version as BibleVersion)) setVersion(params.version as BibleVersion);
+    setReadMode('verse');
+  }, [params.bookId, params.chapter, params.verse, params.version]);
+
+  async function shareToGroup() {
+    if (loading) return;
+    try {
+      const verse = await getBiblePassage(version, selection, 'verse');
+      const text = verse.verses.find((item) => item.verse === selection.verse)?.text || verse.content;
+      if (!text) return Alert.alert('Scripture unavailable', 'Load this verse before sharing.');
+      setSharedVerse({ kind: 'scripture', title: verse.reference + ' (' + version + ')', scripture: { ...selection, version, text, copyright: verse.copyright } });
+    } catch (err) { Alert.alert('Scripture unavailable', friendlyError(err, 'Please try again.')); }
+  }
 
   const currentBook = useMemo(() => getBibleBook(selection.bookId), [selection.bookId]);
   const chapterNumbers = useMemo(
@@ -228,9 +250,10 @@ export default function BibleScreen() {
           </View>
 
           <View style={[styles.toolCard, dark && styles.toolCardDark]}>
-            <Tool label="Read" icon="book" active dark={dark} />
+            <Tool label="Group" icon="people-outline" dark={dark} onPress={shareToGroup} />
             <Tool label="Note" icon="create-outline" dark={dark} onPress={() => setNoteOpen(true)} />
             <Tool label={savingBible ? 'Saving' : 'Save'} icon="bookmark-outline" dark={dark} onPress={saveVerse} />
+            <Tool label="Share" icon="share-outline" dark={dark} onPress={shareVerse} />
           </View>
 
           <View style={[styles.readerCard, dark && styles.readerCardDark]}>
@@ -281,6 +304,7 @@ export default function BibleScreen() {
         </ScrollView>
       </SafeAreaView>
 
+      <ShareToChatSheet item={sharedVerse} visible={Boolean(sharedVerse)} dark={dark} onClose={() => setSharedVerse(null)} />
       <ScripturePicker
         mode={pickerMode}
         dark={dark}

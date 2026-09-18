@@ -1,7 +1,7 @@
 import { RealtimeChannel } from '@supabase/supabase-js';
-import { chatRooms } from '../data/mockData';
 import { ChatRoom } from '../types/models';
 import { supabase } from './supabase';
+import { readUploadBody } from './uploadBody';
 
 import { hasSupabase } from './publicEnv';
 
@@ -17,7 +17,8 @@ export type ChatAttachment = {
 
 // A card for something shared from the app into a chat.
 export type SharedRef = {
-  kind: 'sermon' | 'music' | 'video' | 'story' | 'article';
+  kind: 'sermon' | 'music' | 'video' | 'story' | 'article' | 'scripture';
+  scripture?: { bookId: string; chapter: number; verse: number; version: 'KJV' | 'NLT' | 'AMP'; text: string; copyright?: string };
   title: string;
   speaker?: string;
   url?: string;
@@ -84,10 +85,10 @@ export async function uploadChatAttachment(channelId: string, file: { uri: strin
   const mimeType = file.mimeType || 'application/octet-stream';
   const safeName = (file.name || `attachment`).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'attachment';
   const path = `${channelId}/${userId}/${Date.now()}-${safeName}`;
-  const blob = await (await fetch(file.uri)).blob();
-  const { error } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(path, blob, { contentType: mimeType, upsert: false });
+  const upload = await readUploadBody(file.uri);
+  const { error } = await supabase.storage.from(ATTACHMENT_BUCKET).upload(path, upload.body, { contentType: mimeType, upsert: false });
   if (error) throw error;
-  return { path, kind: attachmentKindFromMime(mimeType), name: safeName, size: file.size || blob.size || undefined };
+  return { path, kind: attachmentKindFromMime(mimeType), name: safeName, size: upload.size };
 }
 
 export type ChatProfileSearchResult = {
@@ -115,12 +116,13 @@ function normalizeRoomType(type?: string): ChatRoom['type'] {
 }
 
 export async function getChatRooms(): Promise<ChatRoom[]> {
-  if (!hasSupabase) return chatRooms;
+  if (!hasSupabase) return [];
   const { data, error } = await supabase.from('chat_channels').select('*').order('created_at');
   // Never show invented rooms to a real member. The mock list (1,245 members
   // in a "Global Prayer Room") is for a build with no Supabase at all; a failed
   // query on the live backend must read as empty, not as a thriving community.
-  if (error || !data) return [];
+  if (error) throw error;
+  if (!data) return [];
   return data.map((row) => ({
     id: row.id,
     name: row.name,
@@ -133,27 +135,23 @@ export async function getChatRooms(): Promise<ChatRoom[]> {
 }
 
 export async function getChatMessages(channelId: string): Promise<ChatMessage[]> {
-  if (!hasSupabase) {
-    return [
-      { id: 'local-1', channelId, body: 'Welcome to the OGN Global Prayer Room.', displayName: 'OGN Team', createdAt: new Date().toISOString() },
-      { id: 'local-2', channelId, body: 'Drop your prayer request and stay connected.', displayName: 'Community', createdAt: new Date().toISOString() }
-    ];
-  }
+  if (!hasSupabase) throw new Error('Chat is unavailable. Please try again later.');
 
   const { data, error } = await supabase
     .from('chat_messages')
     .select('id, channel_id, user_id, body, created_at, is_flagged, attachment_path, attachment_type, attachment_name, attachment_size, shared_ref')
     .eq('channel_id', channelId)
     .is('deleted_at', null)
-    .order('created_at', { ascending: true })
+    .order('created_at', { ascending: false })
     .limit(50);
 
-  if (error || !data) return [];
+  if (error) throw error;
+  if (!data) return [];
   const [profiles, links] = await Promise.all([
     getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean)),
     signAttachmentLinks(data.map((row: any) => row.attachment_path).filter(Boolean)),
   ]);
-  return data.map((row: any) => ({
+  return data.reverse().map((row: any) => ({
     id: row.id,
     channelId: row.channel_id,
     userId: row.user_id,
@@ -168,7 +166,7 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
 }
 
 export async function sendChatMessage(channelId: string, body: string, attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number }, shared?: SharedRef) {
-  if (!hasSupabase) return { id: `local-${Date.now()}`, isFlagged: false };
+  if (!hasSupabase) throw new Error('Chat is unavailable. Your message was not sent.');
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) throw new Error('Sign in before posting to chat.');
 
@@ -328,21 +326,17 @@ export async function searchChatProfiles(query: string): Promise<ChatProfileSear
 
 export async function getChatMembers(channelId: string): Promise<ChatMember[]> {
   if (!hasSupabase) return [];
-  const { data, error } = await supabase
-    .from('chat_members')
-    .select('user_id, role, joined_at')
-    .eq('channel_id', channelId)
-    .order('joined_at', { ascending: false })
-    .limit(80);
-  if (error || !data) return [];
+  const { data, error } = await supabase.rpc('get_chat_member_roster', { p_channel_id: channelId });
+  if (error) throw error;
+  if (!data) return [];
   const profiles = await getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean));
   return data.map((row: any) => ({
     userId: row.user_id,
     role: row.role || 'member',
     joinedAt: row.joined_at || undefined,
-    displayName: profiles.get(row.user_id)?.displayName || 'OGN Member',
+    displayName: row.display_name || 'OGN Member',
     phone: profiles.get(row.user_id)?.phone,
-    avatarUrl: profiles.get(row.user_id)?.avatarUrl,
+    avatarUrl: row.avatar_url || undefined,
   }));
 }
 

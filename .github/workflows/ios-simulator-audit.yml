@@ -25,7 +25,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - name: Which toolchain this runner has
         run: |
@@ -33,7 +33,7 @@ jobs:
           swift --version
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Write the app's public configuration
         # Without these the app builds but cannot reach Supabase, and every
@@ -158,3 +158,7 @@ jobs:
         with:
           name: ios-screenshots
           path: qa/ios-shots/
+
+      - name: Require real signed-in device coverage
+        if: always()
+        run: node qa/assert-device-audit.mjs qa/ios-shots/ios-drive-report.json

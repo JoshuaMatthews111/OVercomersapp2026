@@ -3,7 +3,8 @@
 // card that others can tap to play or open.
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { getChatRooms, joinChatRoom, sendChatMessage, SharedRef } from '../lib/chatService';
 import { friendlyError } from '../lib/errorMessages';
 import { colors, shadows } from '../lib/theme';
@@ -22,18 +23,27 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
   const [noteType, setNoteType] = useState<SharedRef['noteType']>('takeaway');
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     if (!visible) return;
+    let active = true;
+    setLoading(true);
+    setLoadError(null);
     getChatRooms().then((list) => {
+      if (!active) return;
       const shareable = list.filter((r) => r.type !== 'announcement');
       setRooms(shareable);
-      setRoomId((current) => current || shareable[0]?.id || null);
-    }).catch(() => undefined);
+      setRoomId((current) => shareable.some((r) => r.id === current) ? current : shareable[0]?.id || null);
+    }).catch((err) => { if (active) setLoadError(friendlyError(err, 'Groups could not load. Close and try again.')); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, [visible]);
 
   async function send() {
-    if (!item || !roomId) return;
+    if (!item || !roomId || sending) return;
     setSending(true);
     try {
       await joinChatRoom(roomId);
@@ -50,9 +60,10 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
 
   const type = NOTE_TYPES.find((t) => t.key === noteType) || NOTE_TYPES[0];
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close share sheet">
-        <Pressable style={[styles.sheet, dark && styles.sheetDark]} onPress={() => undefined}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={() => { if (!sending) onClose(); }}>
+      <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => { if (!sending) onClose(); }} accessibilityLabel="Close share sheet" />
+        <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: '88%', flexGrow: 0 }} contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(16, insets.bottom) }, dark && styles.sheetDark]}>
           <View style={styles.grabber} />
           <Text style={[styles.heading, dark && styles.textDark]}>Share to a group</Text>
           {item ? (
@@ -89,15 +100,15 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
                 <Text numberOfLines={1} style={[styles.roomText, dark && styles.textDark, roomId === r.id && styles.chipTextOn]}>{r.name}</Text>
               </Pressable>
             ))}
-            {!rooms.length ? <ActivityIndicator color={colors.gold} /> : null}
+            {loading ? <ActivityIndicator color={colors.gold} /> : !rooms.length ? <Text style={[styles.itemMeta, dark && styles.textDimDark]}>{loadError || 'No groups available yet.'}</Text> : null}
           </ScrollView>
 
-          <Pressable accessibilityRole="button" disabled={sending || !roomId} onPress={send} style={[styles.send, (sending || !roomId) && { opacity: 0.6 }]}>
+          <Pressable accessibilityRole="button" disabled={sending || loading || Boolean(loadError) || !roomId} onPress={send} style={[styles.send, (sending || !roomId) && { opacity: 0.6 }]}>
             {sending ? <ActivityIndicator color="#071231" /> : <Ionicons name="send" size={18} color="#071231" />}
             <Text style={styles.sendText}>{sending ? 'Sending...' : 'Send'}</Text>
           </Pressable>
-        </Pressable>
-      </Pressable>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -120,13 +131,15 @@ export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; d
           <Text numberOfLines={2} style={[styles.cardTitle, dark && styles.textDark]}>{shared.title}</Text>
           <Text numberOfLines={1} style={[styles.cardMeta, dark && styles.textDimDark]}>{labelFor(shared.kind)}{shared.speaker ? ` • ${shared.speaker}` : ''}</Text>
         </View>
-        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' ? 'open-outline' : 'play-circle'} size={24} color={dark ? colors.gold : colors.deepGold} />
+        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' ? 'open-outline' : 'play-circle'} size={24} color={dark ? colors.gold : colors.deepGold} />
       </View>
+      {shared.scripture ? <><Text style={[styles.cardTitle, dark && styles.textDark]}>{shared.scripture.text}</Text>{shared.scripture.copyright ? <Text style={[styles.cardMeta, dark && styles.textDimDark]}>{shared.scripture.copyright}</Text> : null}</> : null}
     </Pressable>
   );
 }
 
 function iconFor(kind: SharedRef['kind']): keyof typeof Ionicons.glyphMap {
+  if (kind === 'scripture') return 'book';
   if (kind === 'music') return 'musical-notes';
   if (kind === 'video') return 'videocam';
   if (kind === 'story') return 'images';
@@ -134,6 +147,7 @@ function iconFor(kind: SharedRef['kind']): keyof typeof Ionicons.glyphMap {
   return 'mic';
 }
 function labelFor(kind: SharedRef['kind']) {
+  if (kind === 'scripture') return 'Scripture';
   return kind === 'music' ? 'Song' : kind === 'video' ? 'Video' : kind === 'story' ? 'Story' : kind === 'article' ? 'Article' : 'Sermon';
 }
 

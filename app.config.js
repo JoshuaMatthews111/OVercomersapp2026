@@ -2,7 +2,6 @@
 // extra.publicEnv at prebuild time so the native app carries them even if
 // the JS bundle was built without them. Nothing secret: these are the same
 // values that ship inside every JS bundle already.
-const base = require('./app.json');
 
 const PUBLIC_KEYS = [
   'EXPO_PUBLIC_SUPABASE_URL',
@@ -17,11 +16,11 @@ const PUBLIC_KEYS = [
   'EXPO_PUBLIC_LIVE_STREAM_URL',
 ];
 
-module.exports = () => {
+module.exports = ({ config }) => {
   const publicEnv = {};
   for (const key of PUBLIC_KEYS) if (process.env[key]) publicEnv[key] = process.env[key];
   return {
-    ...base.expo,
-    extra: { ...(base.expo.extra || {}), publicEnv },
+    ...config,
+    extra: { ...(config.extra || {}), publicEnv },
   };
 };

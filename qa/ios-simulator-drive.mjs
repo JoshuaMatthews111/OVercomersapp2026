@@ -570,10 +570,10 @@ async function proveSignedIn() {
   for (let attempt = 0; attempt < 3; attempt++) {
     await sleep(3000);
     words = (await tree()).map(labelOf).filter(Boolean).join(" | ");
-    if (words.toLowerCase().includes(EMAIL.toLowerCase()) || /sign in to ogn|require an account/i.test(words)) break;
+    if (words.toLowerCase().includes(EMAIL.toLowerCase()) || /sign in to ogn|require an account|get started|welcome back/i.test(words)) break;
   }
   const emailShown = words.toLowerCase().includes(EMAIL.toLowerCase());
-  const askedToSignIn = /sign in to ogn|require an account/i.test(words);
+  const askedToSignIn = /sign in to ogn|require an account|get started|welcome back/i.test(words);
   if (emailShown) return { ok: true, why: "the More tab shows the account's email" };
   if (askedToSignIn) return { ok: false, why: 'the More tab says "Sign in to OGN" — the app does not hold the session' };
   return { ok: false, why: "the More tab shows neither the email nor a sign-in card" };

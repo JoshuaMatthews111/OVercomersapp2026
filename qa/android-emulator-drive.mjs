@@ -447,7 +447,7 @@ async function proveSignedIn() {
   await sleep(3500);
   const words = (await tree()).map(labelOf).filter(Boolean).join(" | ");
   const emailShown = words.toLowerCase().includes(EMAIL.toLowerCase()) || /fableqa@ove/i.test(words);
-  const askedToSignIn = /sign in to ogn|require an account/i.test(words);
+  const askedToSignIn = /sign in to ogn|require an account|get started|welcome back/i.test(words);
   if (emailShown) return { ok: true, why: "the More tab shows the account's email" };
   if (askedToSignIn) return { ok: false, why: 'the More tab says "Sign in to OGN" — the app does not hold the session' };
   return { ok: false, why: "the More tab shows neither the email nor a sign-in card" };

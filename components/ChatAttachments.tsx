@@ -5,8 +5,11 @@ import { Ionicons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useState } from 'react';
-import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { friendlyError } from '../lib/errorMessages';
 import { ChatAttachment, ChatAttachmentKind, attachmentKindFromMime } from '../lib/chatService';
 import { colors, shadows } from '../lib/theme';
 
@@ -30,7 +33,7 @@ async function pick(choice: Choice['key']): Promise<PickedFile | null> {
   let result: ImagePicker.ImagePickerResult;
   if (choice === 'camera') {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) return null;
+    if (!permission.granted) { Alert.alert('Camera access needed', 'Allow camera access in Settings, or choose a photo from your library.'); return null; }
     result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images', 'videos'], quality: 0.85, videoMaxDuration: 120 });
   } else {
     // The system picker needs no library permission on iOS 14+ / Android 13+.
@@ -48,15 +51,31 @@ async function pick(choice: Choice['key']): Promise<PickedFile | null> {
 }
 
 export function AttachSheet({ visible, dark, onClose, onPicked }: { visible: boolean; dark: boolean; onClose: () => void; onPicked: (file: PickedFile) => void }) {
-  async function choose(choice: Choice['key']) {
+  const pendingChoice = useRef<Choice['key'] | null>(null);
+  const insets = useSafeAreaInsets();
+  async function openPicker() {
+    const choice = pendingChoice.current;
+    pendingChoice.current = null;
+    if (!choice) return;
+    try {
+      const file = await pick(choice);
+      if (file) {
+        if (file.size && file.size > 50 * 1024 * 1024) return Alert.alert('File too large', 'Choose a photo, video or file under 50 MB.');
+        onPicked(file);
+      }
+    } catch (err) { Alert.alert('Could not open attachment', friendlyError(err, 'Please try choosing the file again.')); }
+  }
+  function choose(choice: Choice['key']) {
+    if (pendingChoice.current) return;
+    pendingChoice.current = choice;
     onClose();
-    const file = await pick(choice).catch(() => null);
-    if (file) onPicked(file);
+    // iOS cannot present the system picker while its parent modal dismisses.
+    if (Platform.OS !== 'ios') openPicker();
   }
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} onDismiss={openPicker}>
       <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel="Close attachment choices">
-        <View style={[styles.sheet, dark && styles.sheetDark]}>
+        <View style={[styles.sheet, { marginBottom: Math.max(12, insets.bottom) }, dark && styles.sheetDark]}>
           <View style={styles.grid}>
             {CHOICES.map((choice) => (
               <Pressable key={choice.key} accessibilityRole="button" accessibilityLabel={choice.label} onPress={() => choose(choice.key)} style={styles.choice}>
@@ -75,12 +94,14 @@ export function AttachSheet({ visible, dark, onClose, onPicked }: { visible: boo
 
 export function AttachmentPreview({ file, dark, sending, onCancel, onSend }: { file: PickedFile | null; dark: boolean; sending: boolean; onCancel: () => void; onSend: (caption: string) => void }) {
   const [caption, setCaption] = useState('');
+  const insets = useSafeAreaInsets();
+  useEffect(() => { setCaption(''); }, [file?.uri]);
   if (!file) return null;
   return (
-    <Modal visible transparent={false} animationType="slide" onRequestClose={onCancel}>
-      <View style={styles.previewRoot}>
-        <View style={styles.previewTop}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Cancel attachment" onPress={onCancel} hitSlop={10} style={styles.previewClose}>
+    <Modal visible transparent={false} animationType="slide" onRequestClose={() => { if (!sending) onCancel(); }}>
+      <KeyboardAvoidingView style={styles.previewRoot} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={[styles.previewTop, { paddingTop: insets.top + 8 }]}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Cancel attachment" disabled={sending} onPress={onCancel} hitSlop={10} style={styles.previewClose}>
             <Ionicons name="close" size={26} color={colors.white} />
           </Pressable>
           <Text numberOfLines={1} style={styles.previewName}>{file.name || (file.kind === 'image' ? 'Photo' : file.kind === 'video' ? 'Video' : 'File')}</Text>
@@ -88,15 +109,15 @@ export function AttachmentPreview({ file, dark, sending, onCancel, onSend }: { f
         <View style={styles.previewStage}>
           {file.kind === 'image' ? (
             <Image source={{ uri: file.uri }} contentFit="contain" style={styles.previewImage} />
-          ) : (
+          ) : file.kind === 'video' ? <VideoPreview uri={file.uri} /> : (
             <View style={styles.previewFile}>
-              <Ionicons name={file.kind === 'video' ? 'videocam' : file.kind === 'audio' ? 'musical-notes' : 'document-text'} size={64} color={colors.gold} />
-              <Text style={styles.previewFileText}>{file.kind === 'video' ? 'Video ready to send' : file.kind === 'audio' ? 'Audio ready to send' : 'Document ready to send'}</Text>
+              <Ionicons name={file.kind === 'audio' ? 'musical-notes' : 'document-text'} size={64} color={colors.gold} />
+              <Text style={styles.previewFileText}>{file.kind === 'audio' ? 'Audio ready to send' : 'Document ready to send'}</Text>
               {file.size ? <Text style={styles.previewFileMeta}>{formatSize(file.size)}</Text> : null}
             </View>
           )}
         </View>
-        <View style={styles.previewBar}>
+        <View style={[styles.previewBar, { paddingBottom: Math.max(12, insets.bottom) }]}>
           <TextInput
             value={caption}
             onChangeText={setCaption}
@@ -110,9 +131,14 @@ export function AttachmentPreview({ file, dark, sending, onCancel, onSend }: { f
             {sending ? <ActivityIndicator color="#071231" /> : <Ionicons name="send" size={20} color="#071231" />}
           </Pressable>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
+}
+
+function VideoPreview({ uri }: { uri: string }) {
+  const player = useVideoPlayer(uri);
+  return <VideoView player={player} nativeControls contentFit="contain" style={styles.previewImage} />;
 }
 
 export function AttachmentBubble({ attachment, dark, own, onOpen }: { attachment: ChatAttachment; dark: boolean; own: boolean; onOpen: (attachment: ChatAttachment) => void }) {
@@ -146,11 +172,12 @@ export function AttachmentBubble({ attachment, dark, own, onOpen }: { attachment
 }
 
 export function PhotoViewer({ url, onClose }: { url: string | null; onClose: () => void }) {
+  const insets = useSafeAreaInsets();
   return (
     <Modal visible={Boolean(url)} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.viewer} onPress={onClose} accessibilityLabel="Close photo">
         {url ? <Image source={{ uri: url }} contentFit="contain" style={styles.viewerImage} /> : null}
-        <View style={styles.viewerClose}><Ionicons name="close" size={28} color={colors.white} /></View>
+        <View style={[styles.viewerClose, { top: insets.top + 12 }]}><Ionicons name="close" size={28} color={colors.white} /></View>
       </Pressable>
     </Modal>
   );
@@ -184,7 +211,7 @@ const styles = StyleSheet.create({
   captionInput: { flex: 1, minHeight: 46, maxHeight: 120, borderRadius: 23, paddingHorizontal: 16, paddingVertical: 12, backgroundColor: 'rgba(255,255,255,0.12)', color: colors.white },
   previewSend: { width: 50, height: 50, borderRadius: 25, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center' },
   imageWrap: { marginTop: 6, borderRadius: 14, overflow: 'hidden', backgroundColor: 'rgba(15,23,42,0.06)' },
-  image: { width: 220, height: 220 },
+  image: { width: 220, maxWidth: '100%', aspectRatio: 1 },
   videoWrap: { marginTop: 6, width: 220, height: 150, borderRadius: 14, backgroundColor: '#0B1F4D', alignItems: 'center', justifyContent: 'center', gap: 8 },
   videoPlay: { width: 54, height: 54, borderRadius: 27, backgroundColor: 'rgba(255,255,255,0.18)', alignItems: 'center', justifyContent: 'center' },
   videoLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 12, fontWeight: '700' },

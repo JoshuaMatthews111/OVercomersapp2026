@@ -66,11 +66,12 @@ function normalizeAccess(rawRoles: RawAppRole[], user?: { id?: string; email?: s
 export async function getAccessProfile(): Promise<AccessProfile> {
   if (!hasSupabase) return memberAccess;
 
-  const { data: userResult } = await supabase.auth.getUser();
+  const { data: userResult, error: userError } = await supabase.auth.getUser();
+  if (userError) throw userError;
   const user = userResult.user;
   if (!user) return memberAccess;
 
-  const [{ data, error }, { data: statusRow }] = await Promise.all([
+  const [{ data, error }, { data: statusRow, error: statusError }] = await Promise.all([
     supabase
     .from('user_roles')
       .select('role')
@@ -81,6 +82,7 @@ export async function getAccessProfile(): Promise<AccessProfile> {
       .eq('user_id', user.id)
       .maybeSingle()
   ]);
+  if (statusError) throw statusError;
 
   const accountStatus = (statusRow?.status || 'active') as AccessProfile['accountStatus'];
   const accountStatusReason = statusRow?.reason || undefined;
@@ -114,22 +116,29 @@ export function useAccessProfile() {
 
   useEffect(() => {
     let mounted = true;
-    getAccessProfile()
-      .then((nextAccess) => {
-        if (mounted) setAccess(nextAccess);
-      })
-      .finally(() => {
-        if (mounted) setLoadingAccess(false);
-      });
-
-    const { data } = supabase.auth.onAuthStateChange(() => {
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let revision = 0;
+    function refreshAccess(currentRevision: number) {
       getAccessProfile().then((nextAccess) => {
-        if (mounted) setAccess(nextAccess);
+        if (mounted && revision === currentRevision) setAccess(nextAccess);
+      }).catch(() => {
+        if (mounted && revision === currentRevision) setAccess(memberAccess);
+      }).finally(() => {
+        if (mounted && revision === currentRevision) setLoadingAccess(false);
       });
+    }
+    refreshAccess(revision);
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      clearTimeout(refreshTimer);
+      const currentRevision = ++revision;
+      if (!session) { setAccess(memberAccess); setLoadingAccess(false); return; }
+      // Auth callbacks must return before starting another auth request.
+      refreshTimer = setTimeout(() => refreshAccess(currentRevision), 0);
     });
 
     return () => {
       mounted = false;
+      clearTimeout(refreshTimer);
       data.subscription.unsubscribe();
     };
   }, []);

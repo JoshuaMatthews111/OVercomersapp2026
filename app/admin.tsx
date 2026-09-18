@@ -59,7 +59,7 @@ const MEDIA_KINDS: { key: MediaKind; label: string; icon: keyof typeof Ionicons.
 ];
 
 export default function AdminScreen() {
-  const { access } = useAccessProfile();
+  const { access, loadingAccess } = useAccessProfile();
   const { themePreference } = useThemePreference();
   const dark = themePreference === 'dark';
   // The Chat tab's "Send" button deep-links straight to the notice form.
@@ -69,9 +69,13 @@ export default function AdminScreen() {
   const [busy, setBusy] = useState(false);
 
   async function refresh() {
+    if (loadingAccess || (!access.canManageContent && !access.canModerateChat)) return;
     try { setWorkbench(await getAdminWorkbench()); } catch { /* keep what we have */ }
   }
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => {
+    if (!loadingAccess && (access.canManageContent || access.canModerateChat)) refresh();
+    else setWorkbench(null);
+  }, [loadingAccess, access.userId, access.canManageContent, access.canModerateChat]);
 
   async function run(done: string, action: () => Promise<unknown>) {
     setBusy(true);
@@ -90,6 +94,10 @@ export default function AdminScreen() {
   const waitingStories = (workbench?.stories || []).filter((s) => s.status !== 'published');
   const newPrayers = (workbench?.prayers || []).filter((p) => p.status === 'new');
   const reviewCount = heldMessages.length + waitingStories.length + newPrayers.length;
+
+  if (loadingAccess) {
+    return <Shell dark={dark} title="Admin" onBack={() => router.back()}><ActivityIndicator color={colors.gold} /></Shell>;
+  }
 
   if (!access.canManageContent && !access.canModerateChat) {
     return (

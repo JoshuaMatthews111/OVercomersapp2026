@@ -4,7 +4,8 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Animated, Easing } from 'react-native';
-import { Image, Linking, Pressable, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, AppState, Image, Linking, Pressable, ScrollView, StatusBar, StyleSheet, Text, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors } from '../lib/theme';
 import { storyRemainingLabel } from '../lib/storyTime';
 import { ShareToChatSheet } from '../components/ShareToChat';
@@ -14,6 +15,7 @@ import { ShareToChatSheet } from '../components/ShareToChat';
 const IMAGE_STORY_MS = 7000;
 
 export default function StoryViewerScreen() {
+  const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{
     title?: string;
     category?: string;
@@ -25,6 +27,8 @@ export default function StoryViewerScreen() {
     expiresAt?: string;
   }>();
   const [imageFailed, setImageFailed] = useState(false);
+  const [mediaReady, setMediaReady] = useState(false);
+  const [foreground, setForeground] = useState(AppState.currentState === 'active');
   const mediaUrl = Array.isArray(params.imageUrl) ? params.imageUrl[0] : params.imageUrl;
   const actionUrl = Array.isArray(params.actionUrl) ? params.actionUrl[0] : params.actionUrl;
   const accent = Array.isArray(params.accent) ? params.accent[0] : params.accent || colors.gold;
@@ -34,6 +38,10 @@ export default function StoryViewerScreen() {
   const isVideo = Boolean(mediaUrl && isVideoUrl(mediaUrl));
   const [paused, setPaused] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
+    return () => subscription.remove();
+  }, []);
   const title = Array.isArray(params.title) ? params.title[0] : params.title;
 
   // The bar across the top is the playback timer. It fills over 7 seconds for
@@ -48,7 +56,7 @@ export default function StoryViewerScreen() {
     else router.replace('/(tabs)' as any);
   }
   useEffect(() => {
-    if (isVideo || paused || shareOpen) return;
+    if (isVideo || !mediaReady || imageFailed || paused || shareOpen || !foreground) return;
     const current = (playback as any).__getValue ? (playback as any).__getValue() : 0;
     const animation = Animated.timing(playback, {
       toValue: 1,
@@ -58,7 +66,7 @@ export default function StoryViewerScreen() {
     });
     animation.start(({ finished }) => { if (finished) close(); });
     return () => animation.stop();
-  }, [isVideo, paused, shareOpen]);
+  }, [isVideo, mediaReady, imageFailed, paused, shareOpen, foreground]);
   const progressWidth = playback.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   async function openAction() {
@@ -67,9 +75,9 @@ export default function StoryViewerScreen() {
   }
 
   return (
-    <LinearGradient colors={['#020817', '#061334', '#071B45']} style={styles.root}>
+    <LinearGradient colors={['#020817', '#061334', '#071B45']} style={[styles.root, { paddingTop: insets.top + 18, paddingBottom: insets.bottom }]}>
       <StatusBar barStyle="light-content" />
-      <View style={styles.progressTrack}>
+      <View style={[styles.progressTrack, { top: insets.top + 6 }]}>
         <Animated.View style={[styles.progressFill, { width: progressWidth, backgroundColor: accent }]} />
       </View>
 
@@ -81,25 +89,29 @@ export default function StoryViewerScreen() {
           <Text numberOfLines={1} style={styles.storyHeaderTitle}>{params.title || 'OGN Story'}</Text>
           <Text numberOfLines={1} style={styles.storyHeaderSub}>{params.category || 'Story'} • {remaining}</Text>
         </View>
+        <Pressable accessibilityRole="button" accessibilityLabel={paused ? 'Resume story' : 'Pause story'} onPress={() => setPaused((value) => !value)} style={styles.closeButton}>
+          <Ionicons name={paused ? 'play' : 'pause'} size={20} color={colors.white} />
+        </Pressable>
         <Pressable accessibilityRole="button" accessibilityLabel="Close story" onPress={close} style={styles.closeButton}>
           <Ionicons name="close" size={24} color={colors.white} />
         </Pressable>
       </View>
 
       <Pressable style={styles.mediaFrame} onPressIn={() => setPaused(true)} onPressOut={() => setPaused(false)} accessibilityLabel="Story media, hold to pause">
-        {isVideo && mediaUrl ? (
-          <StoryVideo url={mediaUrl} onEnd={close} progress={playback} paused={paused} />
+        {isVideo && mediaUrl && !imageFailed ? (
+          <StoryVideo url={mediaUrl} onEnd={close} progress={playback} paused={paused || shareOpen || !foreground} onReady={() => setMediaReady(true)} onError={() => setImageFailed(true)} />
         ) : mediaUrl && !imageFailed ? (
-          <Image source={{ uri: mediaUrl }} resizeMode="cover" style={styles.media} onError={() => setImageFailed(true)} />
+          <Image source={{ uri: mediaUrl }} resizeMode="contain" style={styles.media} onLoad={() => setMediaReady(true)} onError={() => setImageFailed(true)} />
         ) : (
           <LinearGradient colors={['#061334', '#0A2A66']} style={styles.mediaFallback}>
             <Ionicons name="planet-outline" size={70} color={accent} />
             <Text style={styles.fallbackTitle}>Story media unavailable</Text>
           </LinearGradient>
         )}
+        {mediaUrl && !mediaReady && !imageFailed ? <ActivityIndicator accessibilityLabel="Loading story" color={colors.gold} style={StyleSheet.absoluteFill} /> : null}
       </Pressable>
 
-      <LinearGradient colors={['transparent', 'rgba(2,8,23,0.82)', '#020817']} style={styles.captionPanel}>
+      <ScrollView style={styles.captionPanel} contentContainerStyle={{ padding: 18, gap: 8 }}>
         <Text style={styles.category}>{params.category || 'Story'}</Text>
         <Text style={styles.title}>{params.title || 'OGN Story'}</Text>
         <Text style={styles.body}>{params.body || 'This story update is live for 24 hours.'}</Text>
@@ -115,7 +127,7 @@ export default function StoryViewerScreen() {
             <Text style={styles.shareText}>To a group</Text>
           </Pressable>
         </View>
-      </LinearGradient>
+      </ScrollView>
       <ShareToChatSheet
         item={{ kind: 'story', title: title || 'OGN Story', url: mediaUrl, artwork: mediaUrl }}
         visible={shareOpen}
@@ -126,7 +138,7 @@ export default function StoryViewerScreen() {
   );
 }
 
-function StoryVideo({ url, onEnd, progress, paused }: { url: string; onEnd: () => void; progress: Animated.Value; paused: boolean }) {
+function StoryVideo({ url, onEnd, progress, paused, onReady, onError }: { url: string; onEnd: () => void; progress: Animated.Value; paused: boolean; onReady: () => void; onError: () => void }) {
   const player = useVideoPlayer({ uri: url }, (instance) => {
     instance.loop = false;
     instance.timeUpdateEventInterval = 0.25;
@@ -134,13 +146,18 @@ function StoryVideo({ url, onEnd, progress, paused }: { url: string; onEnd: () =
   });
   useEffect(() => {
     const ended = player.addListener('playToEnd', onEnd);
+    const status = player.addListener('statusChange', ({ status }) => {
+      if (status === 'readyToPlay') onReady();
+      if (status === 'error') onError();
+    });
+    if (player.status === 'readyToPlay') onReady();
     const tick = player.addListener('timeUpdate', ({ currentTime }) => {
       if (player.duration > 0) progress.setValue(Math.min(1, currentTime / player.duration));
     });
-    return () => { ended.remove(); tick.remove(); };
+    return () => { ended.remove(); tick.remove(); status.remove(); };
   }, [player]);
   useEffect(() => { if (paused) player.pause(); else player.play(); }, [paused]);
-  return <VideoView player={player} style={styles.media} nativeControls={false} contentFit="cover" />;
+  return <VideoView player={player} style={styles.media} nativeControls={false} contentFit="contain" />;
 }
 
 
@@ -166,7 +183,7 @@ const styles = StyleSheet.create({
   media: { width: '100%', height: '100%' },
   mediaFallback: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   fallbackTitle: { color: colors.white, fontWeight: '900' },
-  captionPanel: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 20, paddingTop: 88, paddingBottom: 34 },
+  captionPanel: { flexGrow: 0, maxHeight: '32%' },
   category: { color: colors.gold, fontWeight: '900', textTransform: 'uppercase', fontSize: 12 },
   title: { color: colors.white, fontWeight: '900', fontSize: 28, marginTop: 6 },
   body: { color: 'rgba(255,255,255,0.84)', lineHeight: 22, marginTop: 8, fontSize: 15 },

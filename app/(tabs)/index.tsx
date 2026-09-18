@@ -130,11 +130,10 @@ export default function HomeScreen() {
             <View style={styles.topRow}>
               <Image source={art.seal} style={styles.seal} resizeMode="contain" />
               <View style={styles.headerActions}>
-                <Pressable onPress={() => Alert.alert('Notifications', 'Manage chat, sermon, article, and announcement notifications from More / Profile.')} style={[styles.headerIcon, !dark && styles.headerIconLight]} hitSlop={8}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Notification settings" onPress={() => router.push({ pathname: '/(tabs)/profile', params: { settings: 'notifications' } })} style={[styles.headerIcon, !dark && styles.headerIconLight]} hitSlop={8}>
                   <Ionicons name="notifications-outline" size={22} color={dark ? colors.gold : colors.royalBlue} />
-                  <View style={styles.notificationDot} />
                 </Pressable>
-                <Pressable onPress={() => router.push('/(tabs)/profile' as any)} style={[styles.headerIcon, !dark && styles.headerIconLight]} hitSlop={8}>
+                <Pressable accessibilityRole="button" accessibilityLabel="Open profile" onPress={() => router.push('/(tabs)/profile' as any)} style={[styles.headerIcon, !dark && styles.headerIconLight]} hitSlop={8}>
                   <Ionicons name="person-circle-outline" size={25} color={dark ? colors.gold : colors.royalBlue} />
                 </Pressable>
               </View>
@@ -187,7 +186,7 @@ export default function HomeScreen() {
 
           <View style={styles.sectionHeader}>
             <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Stories Around the World</Text>
-            <Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>{access.canManageContent ? 'Manage' : 'View All'}</Text>
+            {access.canManageContent ? <Pressable accessibilityRole="button" onPress={() => router.push('/admin')}><Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>Manage</Text></Pressable> : null}
           </View>
           {storiesEmpty ? (
             <StoriesEmpty dark={dark} />
@@ -197,15 +196,14 @@ export default function HomeScreen() {
             </ScrollView>
           )}
 
-          {dark ? (
-            <Pressable onPress={() => router.push('/prayer' as any)} style={styles.prayerDarkApproved}>
-              <Image source={art.prayerDarkApproved} resizeMode="stretch" style={styles.referenceImage} />
-            </Pressable>
-          ) : (
-            <Pressable onPress={() => router.push('/prayer' as any)} style={styles.prayerLightApproved}>
-              <Image source={art.prayerLightApproved} resizeMode="stretch" style={styles.referenceImage} />
-            </Pressable>
-          )}
+          <Pressable accessibilityRole="button" accessibilityLabel="Send your prayer request" onPress={() => router.push('/prayer')} style={[styles.prayerCard, !dark && styles.prayerCardLight]}>
+            <Image source={require('../../assets/images/ogn-prayer-hands-v5.png')} resizeMode="cover" style={styles.prayerArt} />
+            <View style={{ flex: 1, minWidth: 0, gap: 6 }}>
+              <Text style={[styles.prayerTitle, !dark && styles.prayerTitleLight]}>We’re here to pray with you</Text>
+              <Text style={[styles.prayerBody, !dark && styles.prayerBodyLight]}>Share a request with the OGN prayer team.</Text>
+              <Text style={[styles.prayerLink, !dark && styles.prayerTitleLight]}>Send request →</Text>
+            </View>
+          </Pressable>
 
           <View style={[styles.impactCard, dark && styles.impactCardDark]}>
             <Text style={[styles.impactHeading, dark && styles.impactHeadingDark]}>Our Global Impact</Text>
@@ -222,10 +220,9 @@ export default function HomeScreen() {
 
           <View style={styles.sectionHeader}>
             <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.75} style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Upcoming Services</Text>
-            <Text style={[styles.sectionAction, dark && styles.sectionActionDark]}>View All</Text>
           </View>
           <View style={styles.eventsRow}>
-            {upcomingEvents.slice(0, 3).map((event) => <EventCard key={event.id} event={event} dark={dark} />)}
+            {upcomingEvents.map((event) => <EventCard key={event.id} event={event} dark={dark} />)}
             {!upcomingEvents.length ? (
               <View style={[styles.emptyEvents, dark && styles.emptyEventsDark]}>
                 <Ionicons name="calendar-outline" size={22} color={colors.gold} />
@@ -362,13 +359,13 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   safe: { flex: 1 },
   scroll: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 112 },
-  hero: { minHeight: 430, marginHorizontal: -16, paddingHorizontal: 16, overflow: 'hidden' },
+  hero: { paddingBottom: 24, minHeight: 350, marginHorizontal: -16, paddingHorizontal: 16, overflow: 'hidden' },
   heroGlobe: { position: 'absolute', left: '-4%', top: -4, width: '108%', height: 344 },
-  heroScrim: { position: 'absolute', left: 0, right: 0, top: 0, height: 430 },
+  heroScrim: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
   heroGlobeDark: { opacity: 0.72 },
   heroGlobeLight: { opacity: 0.98 },
   topRow: { zIndex: 2, flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
-  seal: { width: 144, height: 125 },
+  seal: { width: 120, height: 100 },
   headerActions: { flexDirection: 'row', gap: 10, paddingTop: 8 },
   headerIcon: {
     width: 48,
@@ -382,11 +379,11 @@ const styles = StyleSheet.create({
   },
   headerIconLight: { backgroundColor: 'rgba(255,255,255,0.88)', borderColor: 'rgba(212,175,55,0.24)', ...shadows.soft },
   notificationDot: { position: 'absolute', top: 7, right: 8, width: 11, height: 11, borderRadius: 6, backgroundColor: colors.gold },
-  welcome: { zIndex: 2, color: 'rgba(255,255,255,0.86)', fontSize: 15, fontWeight: '800', letterSpacing: 2.2, marginTop: 34 },
+  welcome: { zIndex: 2, color: 'rgba(255,255,255,0.86)', fontSize: 15, fontWeight: '800', letterSpacing: 2.2, marginTop: 24 },
   welcomeLight: { color: colors.royalBlue, opacity: 0.8 },
-  brandTitle: { zIndex: 2, color: colors.white, fontWeight: '900', fontSize: 41, lineHeight: 45, marginTop: 6, textShadowColor: 'rgba(2,8,23,0.45)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 8 },
+  brandTitle: { zIndex: 2, color: colors.white, fontWeight: '900', fontSize: 34, lineHeight: 39, marginTop: 6, textShadowColor: 'rgba(2,8,23,0.45)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 8 },
   brandTitleLight: { color: colors.royalBlue, textShadowColor: 'rgba(255,255,255,0.9)' },
-  motto: { zIndex: 2, color: colors.gold, fontWeight: '800', fontSize: 23, marginTop: 8 },
+  motto: { zIndex: 2, color: colors.gold, fontWeight: '800', fontSize: 20, marginTop: 8 },
   mottoLight: { color: colors.royalBlue },
   missionLine: { zIndex: 2, marginTop: 22, minHeight: 44, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   line: { flex: 1, height: 1.5, backgroundColor: colors.gold, opacity: 0.7 },
@@ -422,7 +419,7 @@ const styles = StyleSheet.create({
   broadcastSpeakerLight: { color: colors.deepGold },
   watchRow: { marginTop: 16, gap: 12 },
   viewerInfo: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  viewerText: { color: 'rgba(255,255,255,0.84)', fontWeight: '700' },
+  viewerText: { flexShrink: 1, color: 'rgba(255,255,255,0.84)', fontWeight: '700' },
   viewerTextLight: { color: colors.royalBlue },
   watchButton: { alignSelf: 'flex-start', minHeight: 42, borderRadius: 10, paddingHorizontal: 16, backgroundColor: colors.gold, flexDirection: 'row', alignItems: 'center', gap: 8 },
   watchButtonText: { color: '#071231', fontWeight: '900' },
@@ -454,6 +451,14 @@ const styles = StyleSheet.create({
   storyEmptyInner: { alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(15,23,42,0.05)' },
   storyEmptyInnerDark: { backgroundColor: 'rgba(255,255,255,0.08)' },
 
+  prayerCard: { marginTop: 20, padding: 14, gap: 14, flexDirection: 'row', alignItems: 'center', borderRadius: 18, backgroundColor: '#071B45', borderWidth: 1, borderColor: 'rgba(212,175,55,0.4)' },
+  prayerCardLight: { backgroundColor: colors.white },
+  prayerArt: { width: 88, aspectRatio: 1, borderRadius: 14 },
+  prayerTitle: { color: colors.gold, fontSize: 18, fontWeight: '800' },
+  prayerTitleLight: { color: colors.royalBlue },
+  prayerBody: { color: '#CBD5E1', fontSize: 14, lineHeight: 20 },
+  prayerBodyLight: { color: colors.slate },
+  prayerLink: { color: colors.gold, fontSize: 14, fontWeight: '800', marginTop: 4 },
   prayerDarkApproved: { marginTop: 17, height: 104, borderRadius: 13, overflow: 'hidden', backgroundColor: '#071B45', ...shadows.soft },
   prayerLightApproved: { marginTop: 17, height: 104, borderRadius: 13, overflow: 'hidden', backgroundColor: colors.white, ...shadows.soft },
 

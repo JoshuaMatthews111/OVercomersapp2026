@@ -117,10 +117,10 @@ export default function PrayerScreen() {
       <BackHeader title="Prayer Requests" subtitle="We believe in the power of prayer and agree with you." onBack={goBack} />
 
       <View style={styles.segmentRow}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Submit prayer request" onPress={() => switchMode('submit')} style={[styles.segment, mode === 'submit' && styles.segmentActive]}>
+        <Pressable accessibilityRole="tab" accessibilityState={{ selected: mode === 'submit' }} accessibilityLabel="Submit prayer request" onPress={() => switchMode('submit')} style={[styles.segment, mode === 'submit' && styles.segmentActive]}>
           <Text style={mode === 'submit' ? styles.segmentActiveText : styles.segmentText}>Submit Request</Text>
         </Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="View my prayer requests" onPress={() => switchMode('mine')} style={[styles.segment, mode === 'mine' && styles.segmentActive]}>
+        <Pressable accessibilityRole="tab" accessibilityState={{ selected: mode === 'mine' }} accessibilityLabel="View my prayer requests" onPress={() => switchMode('mine')} style={[styles.segment, mode === 'mine' && styles.segmentActive]}>
           <Text style={mode === 'mine' ? styles.segmentActiveText : styles.segmentText}>My Requests</Text>
         </Pressable>
       </View>
@@ -157,7 +157,7 @@ export default function PrayerScreen() {
                 <Text style={styles.label}>Category *</Text>
                 <View style={styles.pillRow}>
                   {categories.map((item) => (
-                    <Pressable key={item} onPress={() => setCategory(item)} style={[styles.categoryPill, category === item && styles.categoryPillActive]}>
+                    <Pressable key={item} accessibilityRole="button" accessibilityState={{ selected: category === item }} onPress={() => setCategory(item)} style={[styles.categoryPill, category === item && styles.categoryPillActive]}>
                       <Text style={[styles.categoryText, category === item && styles.categoryTextActive]}>{item}</Text>
                     </Pressable>
                   ))}
@@ -176,7 +176,7 @@ export default function PrayerScreen() {
               </View>
               <View style={styles.field}>
                 <Text style={styles.label}>Privacy</Text>
-                <Pressable onPress={() => setIsPrivate((current) => !current)} style={styles.privacyRow}>
+                <Pressable accessibilityRole="switch" accessibilityLabel="Share with prayer team only" accessibilityState={{ checked: isPrivate }} onPress={() => setIsPrivate((current) => !current)} style={styles.privacyRow}>
                   <Ionicons name={isPrivate ? 'lock-closed' : 'earth'} size={18} color={colors.royalBlue} />
                   <View style={{ flex: 1 }}>
                     <Text style={styles.privacyTitle}>{isPrivate ? 'Share with Prayer Team' : 'Public Prayer Wall'}</Text>

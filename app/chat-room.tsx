@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Alert, AppState, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../lib/accessControl';
 import {
@@ -72,6 +72,8 @@ export default function ChatRoomScreen() {
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const [selectedProfile, setSelectedProfile] = useState<{ userId?: string; displayName: string; phone?: string; avatarUrl?: string; role?: string } | null>(null);
   const [leaderOpen, setLeaderOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [memberQuery, setMemberQuery] = useState('');
   const [memberUserId, setMemberUserId] = useState('');
   const [profileResults, setProfileResults] = useState<ChatProfileSearchResult[]>([]);
@@ -87,17 +89,24 @@ export default function ChatRoomScreen() {
     let cancelled = false;
     setLoading(true);
     joinChatRoom(roomId)
-      .catch(() => undefined)
-      .then(() => getChatMessages(roomId))
+      .then(async () => {
+        const [items, members] = await Promise.all([getChatMessages(roomId), getChatMembers(roomId)]);
+        if (!cancelled) setRoomMembers(members);
+        return items;
+      })
       .then((items) => { if (!cancelled && items) setMessages(items); })
       .catch((err) => { if (!cancelled) setError(friendlyError(err, 'Messages did not load. Pull to try again.')); })
       .finally(() => { if (!cancelled) setLoading(false); });
-    if (access.canManageChatMembers) getChatMembers(roomId).then(setRoomMembers).catch(() => undefined);
     const channel = subscribeToChat(roomId, (message) => {
-      setMessages((current) => (current.some((item) => item.id === message.id) ? current : [...current, message]));
+      if (!cancelled) setMessages((current) => [...current.filter((item) => item.id !== message.id), message]);
     });
+    const refresh = () => getChatMessages(roomId).then((items) => { if (!cancelled) setMessages(items); }).catch(() => undefined);
+    const foreground = AppState.addEventListener('change', (state) => { if (state === 'active') refresh(); });
+    const poll = setInterval(refresh, 30000);
     return () => {
       cancelled = true;
+      foreground.remove();
+      clearInterval(poll);
       if (channel) supabase.removeChannel(channel);
     };
   }, [access.canManageChatMembers, roomId]);
@@ -131,6 +140,18 @@ export default function ChatRoomScreen() {
 
   const title = room?.name || (typeof params.name === 'string' ? params.name : 'Chat');
 
+  async function refreshRoom() {
+    setRefreshing(true);
+    setError(null);
+    try {
+      await joinChatRoom(roomId);
+      const [items, members] = await Promise.all([getChatMessages(roomId), getChatMembers(roomId)]);
+      setMessages(items);
+      setRoomMembers(members);
+    } catch (err) { setError(friendlyError(err, 'Messages did not load. Pull to try again.')); }
+    finally { setRefreshing(false); }
+  }
+
   async function post() {
     const text = body.trim();
     if (!roomId || !text || sending) return;
@@ -138,7 +159,7 @@ export default function ChatRoomScreen() {
     setSending(true);
     try {
       const result = await sendChatMessage(roomId, text);
-      setMessages((current) => [...current, { id: result.id, channelId: roomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString(), isFlagged: result.isFlagged }]);
+      setMessages((current) => [...current.filter((item) => item.id !== result.id), { id: result.id, channelId: roomId, userId: currentUserId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString(), isFlagged: result.isFlagged }]);
       setBody('');
       if (result.isFlagged) Alert.alert('Held for review', 'Your message has words our filter flags. A moderator will look at it before others see it.');
     } catch (err) {
@@ -149,13 +170,13 @@ export default function ChatRoomScreen() {
   }
 
   async function sendAttachment(caption: string) {
-    if (!roomId || !pendingFile) return;
+    if (!roomId || !pendingFile || sendingFile) return;
     setSendingFile(true);
     try {
       await joinChatRoom(roomId);
       const uploaded = await uploadChatAttachment(roomId, pendingFile);
       const sent = await sendChatMessage(roomId, caption, uploaded);
-      setMessages((current) => [...current, {
+      setMessages((current) => [...current.filter((item) => item.id !== sent.id), {
         id: sent.id, channelId: roomId, userId: currentUserId || undefined, body: caption, displayName: 'You', createdAt: new Date().toISOString(), isFlagged: sent.isFlagged,
         attachment: { path: uploaded.path, url: pendingFile.uri, kind: uploaded.kind, name: uploaded.name, size: uploaded.size },
       }]);
@@ -180,8 +201,12 @@ export default function ChatRoomScreen() {
   }
 
   function openShared(shared: SharedRef) {
+    if (shared.kind === 'scripture' && shared.scripture) {
+      const verse = shared.scripture;
+      return router.push({ pathname: '/(tabs)/bible', params: { bookId: verse.bookId, chapter: String(verse.chapter), verse: String(verse.verse), version: verse.version } });
+    }
     if (!shared.url) return;
-    if (shared.kind === 'story') return setPhotoUrl(shared.url);
+    if (shared.kind === 'story') return router.push({ pathname: '/story-viewer', params: { title: shared.title, imageUrl: shared.url } });
     if (shared.kind === 'article') return openExternalUrl(shared.url);
     nowPlaying.play({ title: shared.title, speaker: shared.speaker, url: shared.url, artwork: shared.artwork, type: playbackKind(shared.url, shared.kind === 'music' ? 'audio' : 'video') });
   }
@@ -299,12 +324,12 @@ export default function ChatRoomScreen() {
           <View style={[styles.headerAvatar, room?.type === 'announcement' && styles.headerAvatarGold, room?.type === 'leader' && styles.headerAvatarPurple]}>
             <Ionicons name={roomIcon(room?.type || 'general')} size={18} color={colors.white} />
           </View>
-          <View style={{ flex: 1, minWidth: 0 }}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Group information and members" onPress={() => { setMembersOpen(true); refreshRoom(); }} style={{ flex: 1, minWidth: 0, minHeight: 44, justifyContent: 'center' }}>
             <Text numberOfLines={1} style={[styles.headerTitle, dark && styles.headerTitleDark]}>{title}</Text>
             <Text numberOfLines={1} style={[styles.headerSub, dark && styles.headerSubDark]}>
-              {room ? `${roomLabel(room.type)} • ${room.region || 'Global'} • ${room.members.toLocaleString()} ${room.members === 1 ? 'member' : 'members'}` : ' '}
+              {room ? `${roomLabel(room.type)} • ${room.region || 'Global'} • ${roomMembers.length.toLocaleString()} ${roomMembers.length === 1 ? 'member' : 'members'} • View group` : ' '}
             </Text>
-          </View>
+          </Pressable>
           {access.canManageChatMembers ? (
             <Pressable accessibilityRole="button" accessibilityLabel="Leader tools" onPress={() => setLeaderOpen(true)} style={styles.headerButton} hitSlop={8}>
               <Ionicons name="shield-checkmark-outline" size={22} color={colors.gold} />
@@ -317,6 +342,8 @@ export default function ChatRoomScreen() {
             ref={listRef}
             data={rows}
             inverted
+            refreshing={refreshing}
+            onRefresh={refreshRoom}
             keyExtractor={(item) => (item.kind === 'day' ? item.id : item.message.id)}
             renderItem={renderRow}
             contentContainerStyle={styles.listContent}
@@ -377,8 +404,27 @@ export default function ChatRoomScreen() {
       </SafeAreaView>
 
       <AttachSheet visible={attachOpen} dark={dark} onClose={() => setAttachOpen(false)} onPicked={setPendingFile} />
-      <AttachmentPreview file={pendingFile} dark={dark} sending={sendingFile} onCancel={() => setPendingFile(null)} onSend={sendAttachment} />
+      <AttachmentPreview file={pendingFile} dark={dark} sending={sendingFile} onCancel={() => { if (!sendingFile) setPendingFile(null); }} onSend={sendAttachment} />
       <PhotoViewer url={photoUrl} onClose={() => setPhotoUrl(null)} />
+
+      <Modal visible={membersOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setMembersOpen(false)}>
+        <SafeAreaView style={[styles.sheet, dark ? styles.rootDark : styles.rootLight]}>
+          <View style={styles.sheetHeader}>
+            <Text style={[styles.sheetTitle, dark && styles.headerTitleDark]}>{title}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close group information" onPress={() => setMembersOpen(false)} style={styles.headerButton}><Ionicons name="close" size={24} color={dark ? colors.white : colors.royalBlue} /></Pressable>
+          </View>
+          <Text style={[styles.sheetSub, dark && styles.headerSubDark]}>{roomMembers.length} members • Share encouragement, scripture, photos and videos.</Text>
+          <FlatList data={roomMembers} keyExtractor={(member) => member.userId} refreshing={refreshing} onRefresh={refreshRoom}
+            ListEmptyComponent={<Text style={[styles.sheetSub, dark && styles.headerSubDark]}>{refreshing ? 'Loading members…' : error || 'No members to show.'}</Text>}
+            renderItem={({ item }) => (
+              <Pressable accessibilityRole="button" accessibilityLabel={'Open ' + item.displayName + ' profile'} style={styles.memberRow} onPress={() => { setMembersOpen(false); router.push({ pathname: '/person', params: { id: item.userId, name: item.displayName } }); }}>
+                <View style={styles.messageAvatar}>{item.avatarUrl ? <Image source={{ uri: item.avatarUrl }} style={styles.avatarImage} /> : <Text style={styles.avatarInitial}>{initials(item.displayName)}</Text>}</View>
+                <View style={{ flex: 1 }}><Text style={[styles.profilePeekName, dark && styles.headerTitleDark]}>{item.displayName}{item.userId === currentUserId ? ' (you)' : ''}</Text><Text style={[styles.profilePeekMeta, dark && styles.headerSubDark]}>{item.role || 'Member'}</Text></View>
+                <Ionicons name="chevron-forward" size={18} color={colors.gold} />
+              </Pressable>
+            )} />
+        </SafeAreaView>
+      </Modal>
 
       <Modal visible={leaderOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setLeaderOpen(false)}>
         <View style={[styles.sheet, dark ? styles.rootDark : styles.rootLight]}>

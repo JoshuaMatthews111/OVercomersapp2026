@@ -166,9 +166,8 @@ export default function MediaScreen() {
               <Pressable onPress={openMediaSearch} style={[styles.iconButton, dark && styles.iconButtonDark]}>
                 <Ionicons name="search-outline" size={24} color={dark ? colors.white : colors.royalBlue} />
               </Pressable>
-              <Pressable onPress={() => Alert.alert('Notifications', 'New sermon, article, video, and music alerts can be managed in More / Profile.')} style={[styles.iconButton, dark && styles.iconButtonDark]}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Notification settings" onPress={() => router.push({ pathname: '/(tabs)/profile', params: { settings: 'notifications' } })} style={[styles.iconButton, dark && styles.iconButtonDark]}>
                 <Ionicons name="notifications-outline" size={22} color={dark ? colors.gold : colors.royalBlue} />
-                <View style={styles.notificationDot} />
               </Pressable>
               <Pressable onPress={() => router.push('/(tabs)/profile' as any)} style={[styles.profileButton, dark && styles.profileButtonDark]}>
                 <Ionicons name="person" size={22} color={dark ? colors.gold : colors.deepGold} />

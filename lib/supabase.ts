@@ -3,6 +3,7 @@ import { createClient } from '@supabase/supabase-js';
 import { AppState, Platform } from 'react-native';
 
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './publicEnv';
+import { fetchWithTimeout } from './requestTimeout';
 
 // A blank address would crash the whole app at launch inside supabase-js.
 // Fall back to a harmless placeholder so the app opens and shows its
@@ -11,6 +12,7 @@ const url = SUPABASE_URL || 'https://not-configured.supabase.co';
 const anon = SUPABASE_ANON_KEY || 'not-configured';
 
 export const supabase = createClient(url, anon, {
+  global: { fetch: (input, init) => fetchWithTimeout(input, init, String(input).includes('/storage/v1/object/') && init?.body ? 120000 : 15000) },
   auth: {
     storage: AsyncStorage,
     autoRefreshToken: true,

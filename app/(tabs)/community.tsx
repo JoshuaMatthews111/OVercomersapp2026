@@ -7,6 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
 import { Announcement, getAnnouncements, subscribeToAnnouncements } from '../../lib/announcementsService';
 import { getChatRooms } from '../../lib/chatService';
+import { friendlyError } from '../../lib/errorMessages';
 import { colors, shadows } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
 import { ChatRoom } from '../../types/models';
@@ -42,11 +43,15 @@ export default function CommunityScreen() {
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [roomList, notices] = await Promise.all([getChatRooms().catch(() => [] as ChatRoom[]), getAnnouncements().catch(() => [] as Announcement[])]);
-    setRooms(roomList);
-    setAnnouncements(notices);
+    setLoadError(null);
+    try {
+      const [roomList, notices] = await Promise.all([getChatRooms(), getAnnouncements()]);
+      setRooms(roomList);
+      setAnnouncements(notices);
+    } catch (err) { setLoadError(friendlyError(err, 'Chat could not load. Pull down to try again.')); }
   }, []);
 
   useEffect(() => {
@@ -113,6 +118,7 @@ export default function CommunityScreen() {
               );
             })}
           </View>
+          {loadError ? <Pressable accessibilityRole="button" accessibilityLabel="Retry loading chats" onPress={refresh} style={{ padding: 16 }}><Text style={{ color: dark ? colors.gold : colors.royalBlue }}>{loadError} Tap to retry.</Text></Pressable> : null}
 
           {chatTab !== 'announcements' ? (
             <>
@@ -137,7 +143,7 @@ export default function CommunityScreen() {
                     </View>
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text numberOfLines={1} style={[styles.roomName, dark && styles.roomNameDark]}>{room.name}</Text>
-                      <Text numberOfLines={1} style={[styles.roomPreview, dark && styles.roomPreviewDark]}>{roomLabel(room.type)} • {room.region || 'Global'} • {room.members.toLocaleString()} {room.members === 1 ? 'member' : 'members'}</Text>
+                      <Text numberOfLines={1} style={[styles.roomPreview, dark && styles.roomPreviewDark]}>{roomLabel(room.type)} • {room.region || 'Global'}</Text>
                     </View>
                     {room.unread > 0 ? (
                       <View style={styles.unreadBadge}><Text style={styles.unreadText}>{room.unread}</Text></View>

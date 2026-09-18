@@ -12,7 +12,7 @@ const presetAmounts = [25, 50, 100, 500];
 const givingPageUrl = 'https://overcomersglobalnetwork.com/give/';
 const customStripeUrl = 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b';
 const art = {
-  hero: require('../../assets/images/ogn-separated-ui/giving/giving-hero-full-light.png'),
+  hero: require('../../assets/images/ogn-separated-ui/giving/giving-basket-photo-light.png'),
 };
 
 export default function GiveScreen() {
@@ -58,9 +58,10 @@ export default function GiveScreen() {
             </View>
           </View>
 
-          <Pressable onPress={() => openGiving(selectedAmount)} style={[styles.heroCard, dark && styles.heroCardDark]}>
+          <View style={[styles.heroCard, dark && styles.heroCardDark]}>
             <Image source={art.hero} resizeMode="cover" style={styles.heroImage} />
-          </Pressable>
+            <View style={styles.heroCopy}><Text style={[styles.heroTitle, dark && styles.heroTitleDark]}>Generosity that reaches further</Text><Text style={[styles.heroBody, dark && styles.heroBodyDark]}>Help bring teaching, prayer and practical care to communities around the world.</Text></View>
+          </View>
           <View style={styles.securityRow}>
             <Ionicons name="lock-closed" size={16} color={colors.gold} />
             <Text style={[styles.securityText, dark && styles.securityTextDark]}>Secure checkout through Stripe and OGN web giving</Text>
@@ -71,6 +72,8 @@ export default function GiveScreen() {
             {presetAmounts.map((amount) => (
               <Pressable
                 key={amount}
+                accessibilityRole="button"
+                accessibilityState={{ selected: selectedAmount === amount }}
                 onPress={() => setSelectedAmount(amount)}
                 style={[styles.amountCard, dark && styles.amountCardDark, selectedAmount === amount && styles.amountCardActive, selectedAmount === amount && dark && styles.amountCardActiveDark]}
               >
@@ -100,7 +103,7 @@ export default function GiveScreen() {
                 placeholderTextColor={dark ? 'rgba(255,255,255,0.5)' : colors.muted}
                 style={[styles.customInput, dark && styles.customInputDark]}
               />
-              <Text style={[styles.customBody, dark && styles.customBodyDark]}>Stripe's page will ask you to type the amount again. That is a Stripe limit we are replacing.</Text>
+              <Text style={[styles.customBody, dark && styles.customBodyDark]}>Enter your preferred amount again on the secure checkout page.</Text>
             </View>
             <Pressable accessibilityRole="button" accessibilityLabel="Open custom giving" onPress={() => openGiving(undefined, true)} style={styles.customOpenButton}>
               <Ionicons name="chevron-forward" size={20} color="#071231" />
@@ -144,20 +147,21 @@ const styles = StyleSheet.create({
   titleDark: { color: colors.white },
   subtitle: { color: colors.deepGold, fontWeight: '800', marginTop: 2 },
   subtitleDark: { color: colors.gold },
-  heroCard: { aspectRatio: 1588 / 719, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', overflow: 'hidden', backgroundColor: colors.white, ...shadows.lift },
-  heroCardDark: { borderColor: 'rgba(212,175,55,0.62)' },
-  heroImage: { width: '100%', height: '100%' },
-  heroTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 31, marginTop: 8 },
+  heroCard: { borderRadius: 18, borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', overflow: 'hidden', backgroundColor: colors.white, ...shadows.lift },
+  heroCardDark: { backgroundColor: '#071B45', borderColor: 'rgba(212,175,55,0.62)' },
+  heroImage: { width: '100%', aspectRatio: 1.7 },
+  heroCopy: { padding: 20 },
+  heroTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 25, marginTop: 0 },
   heroTitleDark: { color: colors.gold },
-  heroBody: { color: colors.slate, textAlign: 'center', lineHeight: 21, marginTop: 8 },
+  heroBody: { color: colors.slate, lineHeight: 21, marginTop: 8 },
   heroBodyDark: { color: 'rgba(255,255,255,0.82)' },
   securityRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 16, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: 'rgba(212,175,55,0.12)' },
-  securityText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
+  securityText: { flex: 1, color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
   securityTextDark: { color: colors.gold },
   sectionTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 21, marginTop: 22, marginBottom: 12 },
   sectionTitleDark: { color: colors.white },
   amountGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  amountCard: { width: '48.5%', minHeight: 78, borderRadius: 16, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
+  amountCard: { flexBasis: '45%', flexGrow: 1, minHeight: 78, borderRadius: 16, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
   amountCardDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.22)' },
   amountCardActive: { backgroundColor: colors.royalBlue, borderColor: colors.gold },
   amountCardActiveDark: { backgroundColor: 'rgba(212,175,55,0.16)' },
