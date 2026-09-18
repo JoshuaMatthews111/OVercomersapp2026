@@ -68,7 +68,22 @@ export async function retireAnnouncement(id: string) {
  */
 type AnnouncementListener = (item: Announcement) => void;
 
-const liveListeners = new Set<AnnouncementListener>();
+/**
+ * Told, in words a screen can show, when live updates are not arriving.
+ *
+ * This is deliberately not an error: notices are still saved and still read
+ * normally, so the honest thing to say is "this list may be behind, pull down
+ * to refresh" — not "something went wrong".
+ */
+export type AnnouncementProblemListener = (message: string) => void;
+
+/** The one sentence this file ever asks a screen to show. */
+export const ANNOUNCEMENTS_OFFLINE_NOTICE =
+  'New notices are not arriving on their own just now. Pull down to refresh and you will see the latest.';
+
+type LiveSubscriber = { onNew: AnnouncementListener; onProblem?: AnnouncementProblemListener };
+
+const liveListeners = new Set<LiveSubscriber>();
 let liveChannel: ReturnType<typeof supabase.channel> | null = null;
 let openTimer: ReturnType<typeof setTimeout> | undefined;
 let closeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -84,23 +99,67 @@ function toAnnouncement(row: any): Announcement {
   };
 }
 
+/**
+ * Hand one plain sentence to a screen.
+ *
+ * A screen that cannot even take a message has gone away mid-update, so it is
+ * dropped from the list rather than being tried again on every notice for the
+ * rest of the session.
+ */
+function tellSubscriber(subscriber: LiveSubscriber, message: string) {
+  if (!subscriber.onProblem) return;
+  try {
+    subscriber.onProblem(message);
+  } catch (error) {
+    liveListeners.delete(subscriber);
+    console.warn('A screen could not take a notices update and was dropped:', error instanceof Error ? error.message : 'unknown problem');
+  }
+}
+
+/** Pass one plain sentence to every screen listening, without ever throwing. */
+function tellEveryone(message: string) {
+  for (const subscriber of [...liveListeners]) tellSubscriber(subscriber, message);
+}
+
 function openLiveChannel() {
   openTimer = undefined;
   if (liveChannel || liveListeners.size === 0) return;
   const channel = supabase.channel('announcements-feed');
   liveChannel = channel;
+  let reportedOffline = false;
   channel
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'announcements' }, (payload) => {
       const item = toAnnouncement(payload.new);
-      liveListeners.forEach((listener) => {
-        try { listener(item); } catch { /* one unhappy screen must not stop the others */ }
-      });
+      for (const subscriber of [...liveListeners]) {
+        try {
+          subscriber.onNew(item);
+        } catch (error) {
+          // One screen failing to take a new notice must not stop the others —
+          // but it must not disappear either. That screen's list is now behind
+          // what the server has, so tell it so, in words it can put on screen.
+          console.warn('A screen could not take a live notice:', error instanceof Error ? error.message : 'unknown problem');
+          tellSubscriber(subscriber, ANNOUNCEMENTS_OFFLINE_NOTICE);
+        }
+      }
     })
     .subscribe((status) => {
-      // CHANNEL_ERROR and TIMED_OUT are handled by realtime-js, which keeps
-      // trying on its own; swallowing them here is what stops a bad network
-      // from turning into anything the person can see. CLOSED means this
-      // channel is finished, so let the next subscriber start a clean one.
+      // realtime-js keeps retrying a dropped socket on its own, so this is not
+      // an error and must not read like one. It does mean the feed will sit
+      // still until it reconnects, which is worth one quiet line rather than
+      // leaving somebody staring at a list that never moves.
+      if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        if (!reportedOffline) {
+          reportedOffline = true;
+          tellEveryone(ANNOUNCEMENTS_OFFLINE_NOTICE);
+        }
+        return;
+      }
+      if (status === 'SUBSCRIBED') {
+        reportedOffline = false;
+        return;
+      }
+      // CLOSED means this channel is finished, so let the next subscriber
+      // start a clean one.
       if (status === 'CLOSED' && liveChannel === channel) liveChannel = null;
     });
 }
@@ -112,12 +171,25 @@ function closeLiveChannel() {
   const channel = liveChannel;
   liveChannel = null;
   if (!channel) return;
-  supabase.removeChannel(channel).catch(() => undefined);
+  supabase.removeChannel(channel).catch((error) => {
+    // Nobody is listening any more, so there is nothing to put on screen. The
+    // socket is dropped either way; this only records that the tidy-up itself
+    // did not complete, so a leaked channel is findable rather than invisible.
+    console.warn('The notices connection did not close cleanly:', error instanceof Error ? error.message : 'unknown problem');
+  });
 }
 
-export function subscribeToAnnouncements(onNew: AnnouncementListener) {
+/**
+ * Listen for new notices as they are posted.
+ *
+ * `onProblem`, when given, is called with one plain sentence if live updates
+ * stop arriving. Showing it is optional but recommended: without it a screen
+ * whose socket has dropped looks exactly like a ministry that posted nothing.
+ */
+export function subscribeToAnnouncements(onNew: AnnouncementListener, onProblem?: AnnouncementProblemListener) {
   if (!hasSupabase) return () => undefined;
-  liveListeners.add(onNew);
+  const subscriber: LiveSubscriber = { onNew, onProblem };
+  liveListeners.add(subscriber);
   if (closeTimer) { clearTimeout(closeTimer); closeTimer = undefined; }
   // Opening the socket costs a token read and a websocket handshake. Doing
   // that in the same frame the Chat tab is mounting is what made the tab feel
@@ -128,7 +200,7 @@ export function subscribeToAnnouncements(onNew: AnnouncementListener) {
   return () => {
     if (stopped) return; // a second cleanup must not tear anything down twice
     stopped = true;
-    liveListeners.delete(onNew);
+    liveListeners.delete(subscriber);
     if (liveListeners.size > 0) return;
     if (closeTimer) clearTimeout(closeTimer);
     // Leaving Chat for one screen and coming straight back is normal, and so

@@ -1,5 +1,34 @@
 import { publicEnv } from './publicEnv';
+import { fetchWithTimeout } from './requestTimeout';
 import { BibleVersion } from '../types/models';
+
+/*
+ * Reading the Bible in the app.
+ *
+ * Two rules hold this file together. First, nothing here may ever leave a
+ * reader stuck: every call is bounded, and every failure falls back to the
+ * offline verses below with a warm sentence, never a technical one. Second,
+ * nothing here names a setting, a key or a supplier — a member reading John 3
+ * should never be shown the plumbing.
+ *
+ * The reading key itself is a known, accepted risk for this release and is
+ * written up in full at the top of lib/publicEnv.ts.
+ */
+
+/** A chapter is a lot of text on a slow signal, so give it more room than a verse. */
+const BIBLE_PASSAGE_TIMEOUT_MS = 12_000;
+
+/** The verse list is a small index; if it is slow, the whole screen is slow. */
+const BIBLE_VERSE_LIST_TIMEOUT_MS = 8_000;
+
+/*
+ * What a reader sees when scripture cannot be fetched. Every one of these is
+ * written to be read by somebody in a pew, not by a developer.
+ */
+const OFFLINE_KJV_NOTICE =
+  'A few favourite verses are saved in the app and ready to read. Full chapters come back as soon as the app can reach the Bible library again.';
+const OFFLINE_OTHER_NOTICE = 'This translation needs a connection. You can keep reading in KJV in the meantime.';
+const UNREACHABLE_NOTICE = 'We could not load that passage just now. Please check your connection and try again.';
 
 export type BibleBook = {
   id: string;
@@ -160,10 +189,12 @@ export async function getBibleVerseNumbers(version: BibleVersion, selection: Bib
 
   try {
     const chapterId = `${normalized.bookId}.${normalized.chapter}`;
-    const response = await fetch(`${baseEndpoint}/v1/bibles/${bibleId}/chapters/${chapterId}/verses`, {
-      headers: { 'api-key': apiKey }
-    });
-    if (!response.ok) throw new Error(`Bible provider returned ${response.status}`);
+    const response = await fetchWithTimeout(
+      `${baseEndpoint}/v1/bibles/${bibleId}/chapters/${chapterId}/verses`,
+      { headers: { 'api-key': apiKey } },
+      BIBLE_VERSE_LIST_TIMEOUT_MS
+    );
+    if (!response.ok) throw new Error(`Bible verse list request failed with ${response.status}`);
     const payload = await response.json();
     const verseRows = Array.isArray(payload.data) ? (payload.data as { id?: string }[]) : [];
     const numbers = verseRows
@@ -189,25 +220,33 @@ export async function getBiblePassage(
   const baseEndpoint = configuredEndpoint.replace(/\/+$/, '').replace(/\/v1$/, '');
   const bibleId = bibleIds[version];
 
-  if (!apiKey || !bibleId) {
-    return {
-      reference,
-      version,
-      mode,
-      verses: version === 'KJV' && fallbackText ? [{ verse: selection.verse, text: fallbackText }] : [],
-      setupMessage:
-        version === 'KJV'
-          ? 'Connect the Bible API key to load every KJV chapter. A small public-domain fallback is available for featured verses.'
-          : `${version} requires a licensed Bible provider ID. Keep copyrighted translation text in the provider, not in app code.`
-    };
-  }
+  // Nothing to read from, so hand back what is saved in the app and say so
+  // kindly. Reaching here is also exactly what happens if the reading key is
+  // ever withdrawn: the Bible tab keeps working, it just reads offline.
+  const offline = (notice: string): BiblePassage => ({
+    reference,
+    version,
+    mode,
+    verses: version === 'KJV' && fallbackText ? [{ verse: selection.verse, text: fallbackText }] : [],
+    setupMessage: notice
+  });
+
+  if (!apiKey || !bibleId) return offline(version === 'KJV' ? OFFLINE_KJV_NOTICE : OFFLINE_OTHER_NOTICE);
 
   try {
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `${baseEndpoint}/v1/bibles/${bibleId}/passages/${passageId}?content-type=text&include-notes=false&include-titles=false&include-chapter-numbers=false&include-verse-numbers=${mode === 'chapter' ? 'true' : 'false'}`,
-      { headers: { 'api-key': apiKey } }
+      { headers: { 'api-key': apiKey } },
+      BIBLE_PASSAGE_TIMEOUT_MS
     );
-    if (!response.ok) throw new Error(`Bible provider returned ${response.status}`);
+    // 401 and 403 mean this app is no longer allowed to read from the library.
+    // That is not something a member can fix and must not look like a fault on
+    // their phone, so it degrades to the saved verses with the same warm line
+    // as never having been connected at all.
+    if (response.status === 401 || response.status === 403) {
+      return offline(version === 'KJV' ? OFFLINE_KJV_NOTICE : OFFLINE_OTHER_NOTICE);
+    }
+    if (!response.ok) throw new Error(`Bible passage request failed with ${response.status}`);
     const payload = await response.json();
     const text = String(payload.data?.content || '').replace(/\s+/g, ' ').trim();
     const providerReference = payload.data?.reference || reference;
@@ -233,14 +272,12 @@ export async function getBiblePassage(
           ? [{ verse: selection.verse, text: fallbackText }]
           : []
     };
-  } catch {
-    return {
-      reference,
-      version,
-      mode,
-      verses: version === 'KJV' && fallbackText ? [{ verse: selection.verse, text: fallbackText }] : [],
-      setupMessage: 'Bible provider is unavailable right now. Check the Bible API key, provider ID, and internet connection.'
-    };
+  } catch (error) {
+    // The saved verses still come back, so a reader is never left with a blank
+    // page — only with a shorter reading and a sentence explaining why.
+    const notice = version === 'KJV' && fallbackText ? OFFLINE_KJV_NOTICE : UNREACHABLE_NOTICE;
+    console.warn('Bible passage could not be loaded:', error instanceof Error ? error.message : 'unknown problem');
+    return offline(notice);
   }
 }
 

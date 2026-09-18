@@ -27,6 +27,13 @@ export type Sermon = {
   speaker: string;
   scriptureReference: string;
   description: string;
+  /**
+   * The cover picture for this message (V4). It is either the one saved on the
+   * sermon row (public.sermons.thumbnail_url, see supabase/schema.sql) or, for
+   * a YouTube message with no saved cover, the video's own picture worked out
+   * from its id. Never a stock photograph and never someone else's artwork.
+   */
+  thumbnailUrl?: string;
   videoUrl?: string;
   audioUrl?: string;
   durationSeconds?: number;

@@ -42,6 +42,15 @@
     },
     "plugins": [
       "./plugins/with-short-app-name",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36
+          }
+        }
+      ],
       "expo-router",
       [
         "expo-location",

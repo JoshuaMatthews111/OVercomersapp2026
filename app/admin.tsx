@@ -48,8 +48,9 @@ import {
 } from '../lib/adminManagementService';
 import { useAccessProfile } from '../lib/accessControl';
 import { ChatProfileSearchResult, searchChatProfiles } from '../lib/chatService';
+import { CoverNeeded, getCoversNeeded, setSermonCover } from '../lib/adminService';
 import { createAdminEvent, createAdminMediaItem, createAdminStory } from '../lib/contentService';
-import { embedUrl, fetchEmbedMetadata, thumbnailFromUrl } from '../lib/embed';
+import { embedUrl, fetchEmbedMetadata, thumbnailFromUrl, youtubeVideoId } from '../lib/embed';
 import { friendlyError } from '../lib/errorMessages';
 import { AppTheme, createThemedStyles } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
@@ -93,6 +94,69 @@ const MEDIA_KINDS: { key: MediaKind; label: string; icon: keyof typeof Ionicons.
 /** The cover a media row can actually show today, derived or stored. */
 function coverFor(item: ManagedMedia): string | null {
   return item.thumbnailUrl || thumbnailFromUrl(item.externalUrl || '') || null;
+}
+
+/**
+ * Clean up whatever actually landed in the Link box.
+ *
+ * On a phone a paste often arrives twice (V2), which used to post a dead link.
+ * We keep the first address, and when it is a video we recognise we rewrite it
+ * to its plain form — so the title lookup, the cover and the player all get an
+ * address they can use instead of a doubled one nothing can open.
+ */
+function tidyLink(raw: string): string {
+  const value = (raw || '').trim();
+  const candidates = [value];
+  const first = value.search(/https?:\/\//);
+  if (first >= 0) {
+    const rest = value.slice(first + 8);
+    const again = rest.search(/https?:\/\//);
+    if (again >= 0) candidates.push(value.slice(0, first + 8 + again));
+  }
+  for (const candidate of candidates) {
+    const id = youtubeVideoId(candidate);
+    if (id) return `https://www.youtube.com/watch?v=${id}`;
+    if (embedUrl(candidate)) return candidate;
+  }
+  return value;
+}
+
+/** Camera-roll names. "IMG_4821" and "PXL_20260918_101010" name nothing. */
+const CAMERA_NAME = /^(img|image|photo|pxl|dsc|dcim|mov|vid|video|screenshot|screen[ -]shot|untitled|download|file|recording|audio)([\s_-]*\d+)*$/i;
+
+/** A direct media file, the only kind of address a name can be read out of. */
+const MEDIA_FILE = /\.(mp3|m4a|aac|wav|ogg|mp4|m4v|mov|webm|pdf)(\?|#|$)/i;
+
+/**
+ * Turn %20 back into a space. A file name with a stray % in it is not worth
+ * failing over, so that one comes back exactly as it was written.
+ */
+function readableName(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * A name worth using, worked out from a file name or a direct file address.
+ * "the-gospel-of-salvation.mp3" becomes "The gospel of salvation".
+ * Returns null when there is nothing sensible in there, so the form can ask.
+ */
+function nameFromFile(source?: string): string | null {
+  const raw = (source || '').trim();
+  if (!raw) return null;
+  // A web page address is not a name: youtube.com/watch would become "Watch".
+  if (/^[a-z]+:\/\//i.test(raw) && !MEDIA_FILE.test(raw)) return null;
+  let base = raw.split('?')[0].split('#')[0];
+  base = base.slice(base.lastIndexOf('/') + 1);
+  base = base.replace(/\.[A-Za-z0-9]{1,5}$/, '');
+  base = readableName(base).replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!base || base.length < 3) return null;
+  if (CAMERA_NAME.test(base) || !/[A-Za-z]{3}/.test(base)) return null;
+  const tidy = base.charAt(0).toUpperCase() + base.slice(1);
+  return tidy.length > 90 ? `${tidy.slice(0, 89).trimEnd()}...` : tidy;
 }
 
 export default function AdminScreen() {
@@ -526,20 +590,38 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   const [lookingUp, setLookingUp] = useState(false);
   const [lookupNote, setLookupNote] = useState('');
   const [autoCover, setAutoCover] = useState('');
+  // The real title as the video provider gave it to us. Kept apart from what
+  // the leader typed so it can stand in as the name without overwriting them.
+  const [videoTitle, setVideoTitle] = useState('');
   const [savedTitle, setSavedTitle] = useState('');
+  const [savedCover, setSavedCover] = useState('');
   const working = saving || Boolean(transfer);
-  const trimmedLink = link.trim();
+  // A pasted link is cleaned up before anything uses it — a double paste is
+  // the owner's V2, and it used to sail through and post a dead video.
+  const trimmedLink = useMemo(() => tidyLink(link), [link]);
   const linkOk = useMemo(
     () => !trimmedLink || Boolean(embedUrl(trimmedLink)) || /\.(mp3|mp4|m4a|m3u8|mov|pdf)(\?|$)/i.test(trimmedLink),
     [trimmedLink]
   );
-  const readyToPost = title.trim().length > 0 && (trimmedLink.length > 0 || fileUrl.length > 0) && linkOk;
+  /**
+   * The owner asked not to have to type a title every time. So we work one out:
+   * the video's own title if we could read it, else the name of the file that
+   * was uploaded, else the name in the link itself. Only when none of those
+   * gives us anything does the form ask for one.
+   */
+  const suggestedTitle = useMemo(
+    () => videoTitle.trim() || nameFromFile(fileName) || nameFromFile(trimmedLink) || '',
+    [videoTitle, fileName, trimmedLink]
+  );
+  const finalTitle = title.trim() || suggestedTitle;
+  const readyToPost = finalTitle.length > 0 && (trimmedLink.length > 0 || fileUrl.length > 0) && linkOk;
 
   // V1: paste a YouTube link and the real title fills itself in. Short budget,
   // off the Post handler, so a slow network never holds up the form.
   useEffect(() => {
     if (!trimmedLink || !embedUrl(trimmedLink)) {
       setAutoCover('');
+      setVideoTitle('');
       setLookupNote('');
       return;
     }
@@ -551,13 +633,17 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         if (!alive) return;
         if (meta.thumbnailUrl) setAutoCover(meta.thumbnailUrl);
         if (meta.title) {
+          setVideoTitle(meta.title);
+          // Fill the box in as well, so the leader can see the name and change
+          // it. Anything already typed is left exactly as it is.
           setTitle((current) => (current.trim() ? current : meta.title || current));
           setLookupNote('');
         } else {
-          setLookupNote('We could not read the title from that link. Type one in and it will post fine.');
+          setVideoTitle('');
+          setLookupNote('We could not read the name of that video. It will still post — give it a title if you want your own.');
         }
       } catch (err) {
-        if (alive) setLookupNote(friendlyError(err, 'We could not read the title from that link. Type one in and it will post fine.'));
+        if (alive) setLookupNote(friendlyError(err, 'We could not read the name of that video. It will still post — give it a title if you want your own.'));
       } finally {
         if (alive) setLookingUp(false);
       }
@@ -622,7 +708,7 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
       // The cover: whatever was uploaded, else the video's own picture (V4).
       const saved = await createAdminMediaItem({
         mediaType: kind,
-        title: title.trim(),
+        title: finalTitle,
         speaker: speaker.trim() || undefined,
         thumbnailUrl: cover || autoCover || undefined,
         fileUrl: fileUrl || undefined,
@@ -630,7 +716,8 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         isDownloadable: Boolean(fileUrl),
         isFeatured: featured,
       });
-      setSavedTitle(saved.title || title.trim());
+      setSavedTitle(saved.title || finalTitle);
+      setSavedCover(saved.thumbnailUrl || '');
       setTitle('');
       setSpeaker('');
       setLink('');
@@ -638,6 +725,7 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
       setFileName('');
       setCover('');
       setAutoCover('');
+      setVideoTitle('');
       await onPosted();
     } catch (err) {
       Alert.alert('Not posted', friendlyError(err, 'Please check your connection and try again.'));
@@ -650,9 +738,13 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
     return (
       <Success
         title="It is live"
-        body={`"${savedTitle}" is in the Media tab now, with its cover picture.`}
+        body={
+          savedCover
+            ? `"${savedTitle}" is in the Media tab now, with its cover picture.`
+            : `"${savedTitle}" is in the Media tab now. You can add a cover for it any time under Library.`
+        }
         actionLabel="Post another"
-        onAction={() => { setSavedTitle(''); onStartOver(); }}
+        onAction={() => { setSavedTitle(''); setSavedCover(''); onStartOver(); }}
       />
     );
   }
@@ -685,15 +777,26 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         keyboardType="url"
         autoCorrect={false}
       />
+      {link.trim() && trimmedLink !== link.trim() ? (
+        <Text style={styles.cardMeta}>That link had extra text in it, so we tidied it up. It will post as {trimmedLink}</Text>
+      ) : null}
       {lookingUp ? (
         <View style={styles.inlineRow}>
           <ActivityIndicator color={theme.colors.accent} />
-          <Text style={styles.cardMeta}>Getting the title...</Text>
+          <Text style={styles.cardMeta}>Reading the name of that video...</Text>
         </View>
       ) : null}
       {lookupNote ? <Text style={styles.cardMeta}>{lookupNote}</Text> : null}
       {!linkOk ? <Text style={styles.warn}>That link will not play. Paste one YouTube, Vimeo or Facebook address, or a direct mp3 / mp4.</Text> : null}
-      <Field label="Title" value={title} onChange={setTitle} placeholder="What is this called?" />
+      <Field
+        label="Title (optional)"
+        value={title}
+        onChange={setTitle}
+        placeholder={suggestedTitle ? suggestedTitle : 'What is this called?'}
+      />
+      {!title.trim() && suggestedTitle ? (
+        <Text style={styles.cardMeta}>It will post as "{suggestedTitle}". Type here to call it something else.</Text>
+      ) : null}
       <Field label="Speaker or artist (optional)" value={speaker} onChange={setSpeaker} placeholder="Who is on it?" />
       <Text style={styles.or}>or</Text>
       <Pressable accessibilityRole="button" accessibilityLabel={`Upload a file. ${fileName ? `${fileName} is ready.` : 'Nothing chosen yet.'}`} disabled={working} onPress={pickFile} style={styles.dropzoneSmall}>
@@ -718,7 +821,11 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
       <Big label={saving ? 'Posting...' : 'Post'} disabled={working || !readyToPost} onPress={post} />
       {!readyToPost && !working ? (
         <Text style={styles.footnote}>
-          {title.trim() ? 'Paste a link or upload a file, then this button turns on.' : 'Give it a title, then this button turns on.'}
+          {!trimmedLink && !fileUrl
+            ? 'Paste a link or upload a file, then this button turns on.'
+            : !linkOk
+              ? 'Check the link, then this button turns on.'
+              : 'Give it a title, then this button turns on.'}
         </Text>
       ) : null}
     </View>
@@ -733,6 +840,7 @@ function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   const [where, setWhere] = useState('');
   const [link, setLink] = useState('');
   const [flyer, setFlyer] = useState('');
+  const [flyerName, setFlyerName] = useState('');
   const [saving, setSaving] = useState(false);
   const [transfer, setTransfer] = useState<{ label: string; fraction: number } | null>(null);
   const [savedTitle, setSavedTitle] = useState('');
@@ -741,7 +849,13 @@ function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
     const value = new Date(when.trim());
     return when.trim() && !Number.isNaN(value.getTime()) ? value : null;
   }, [when]);
-  const readyToPost = title.trim().length > 0 && Boolean(parsedDate);
+  // A flyer saved as "Youth Revival Night.jpg" already says what this is, so
+  // the title can be left blank. A camera-roll name like "IMG_4821" says
+  // nothing, so the form still asks — an event people are asked to turn up to
+  // has to say what it is.
+  const suggestedTitle = useMemo(() => nameFromFile(flyerName) || '', [flyerName]);
+  const finalTitle = title.trim() || suggestedTitle;
+  const readyToPost = finalTitle.length > 0 && Boolean(parsedDate);
 
   async function pickFlyer() {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9 });
@@ -759,6 +873,7 @@ function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         onProgress: (fraction) => setTransfer({ label: name, fraction }),
       });
       setFlyer(upload.publicUrl);
+      setFlyerName(asset.fileName || upload.fileName || '');
     } catch (err) {
       Alert.alert('Upload stopped', friendlyUploadError(err, 'Try another picture.'));
     } finally {
@@ -767,22 +882,23 @@ function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   }
 
   async function post() {
-    if (!parsedDate) return;
+    if (!parsedDate || !finalTitle) return;
     setSaving(true);
     try {
       await createAdminEvent({
-        title: title.trim(),
+        title: finalTitle,
         startsAt: parsedDate.toISOString(),
         location: where.trim() || undefined,
         imageUrl: flyer || undefined,
         registrationUrl: link.trim() || undefined,
       });
-      setSavedTitle(title.trim());
+      setSavedTitle(finalTitle);
       setTitle('');
       setWhen('');
       setWhere('');
       setLink('');
       setFlyer('');
+      setFlyerName('');
       await onPosted();
     } catch (err) {
       Alert.alert('Not posted', friendlyError(err, 'Please check your connection and try again.'));
@@ -815,14 +931,22 @@ function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         )}
       </Pressable>
       {transfer ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
-      <Field label="Event title" value={title} onChange={setTitle} placeholder="What is happening?" />
+      <Field
+        label={suggestedTitle ? 'Event title (optional)' : 'Event title'}
+        value={title}
+        onChange={setTitle}
+        placeholder={suggestedTitle || 'What is happening?'}
+      />
+      {!title.trim() && suggestedTitle ? (
+        <Text style={styles.cardMeta}>It will post as "{suggestedTitle}", taken from your flyer. Type here to call it something else.</Text>
+      ) : null}
       <Field label="When" value={when} onChange={setWhen} placeholder="Like 2026-10-05 7:00 PM" />
       <Field label="Where (optional)" value={where} onChange={setWhere} placeholder="The place" />
       <Field label="Watch or register link (optional)" value={link} onChange={setLink} placeholder="A web address" autoCapitalize="none" keyboardType="url" autoCorrect={false} />
       <Big label={saving ? 'Posting...' : 'Post event'} disabled={working || !readyToPost} onPress={post} />
       {!readyToPost && !working ? (
         <Text style={styles.footnote}>
-          {title.trim() ? 'Type a date and time like 2026-10-05 7:00 PM, then this button turns on.' : 'Give the event a title, then this button turns on.'}
+          {finalTitle ? 'Type a date and time like 2026-10-05 7:00 PM, then this button turns on.' : 'Give the event a title, then this button turns on.'}
         </Text>
       ) : null}
     </View>
@@ -1013,8 +1137,51 @@ function LibraryPage({
   const { theme } = useAppTheme();
   const styles = useStyles(theme);
   const [transfer, setTransfer] = useState<{ id: string; label: string; fraction: number } | null>(null);
-  const live = (workbench?.media || []).filter((m) => m.status === 'published');
-  const missingCover = live.filter((m) => !coverFor(m));
+  const live = useMemo(() => (workbench?.media || []).filter((m) => m.status === 'published'), [workbench]);
+
+  // The covers backlog (V4). The workbench only carries the most recent rows,
+  // so the list is asked for separately — that query is the one the database
+  // index was added for, and it also reaches the sermons table, which the
+  // workbench does not read at all.
+  const [needed, setNeeded] = useState<CoverNeeded[]>([]);
+  const [neededMissing, setNeededMissing] = useState<string[]>([]);
+  const [neededLoading, setNeededLoading] = useState(true);
+  // Covers set in this sitting, so a sermon shows its new picture straight away
+  // instead of waiting for the next read.
+  const [justCovered, setJustCovered] = useState<Record<string, string>>({});
+
+  const loadNeeded = useCallback(async () => {
+    setNeededLoading(true);
+    try {
+      const result = await getCoversNeeded();
+      setNeeded(result.items);
+      setNeededMissing(result.unavailable);
+    } catch {
+      setNeeded([]);
+      setNeededMissing(['the library', 'sermons']);
+    } finally {
+      setNeededLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadNeeded();
+  }, [loadNeeded]);
+
+  // Media with no cover, from both places, each row counted once. A row the
+  // workbench knows about wins, because that one updates on screen at once.
+  const missingCover = useMemo(() => {
+    const byId = new Map<string, ManagedMedia>();
+    for (const item of live) if (!coverFor(item)) byId.set(item.id, item);
+    for (const item of needed) {
+      if (item.source !== 'media' || byId.has(item.id)) continue;
+      byId.set(item.id, { id: item.id, title: item.title, mediaType: item.kind, speaker: item.speaker, status: 'published', publishedAt: item.publishedAt });
+    }
+    return Array.from(byId.values());
+  }, [live, needed]);
+
+  const sermonsMissingCover = useMemo(() => needed.filter((item) => item.source === 'sermon'), [needed]);
+  const coverBacklog = missingCover.length + sermonsMissingCover.length;
 
   // A5 / V4. Pick a picture, watch it go up, and the row shows it at once.
   async function changeCover(item: ManagedMedia) {
@@ -1038,6 +1205,9 @@ function LibraryPage({
         ...w,
         media: w.media.map((m) => (m.id === item.id ? { ...m, thumbnailUrl: upload.publicUrl } : m)),
       }));
+      // Off the waiting list at once, and the new picture is on the row.
+      setJustCovered((current) => ({ ...current, [item.id]: upload.publicUrl }));
+      setNeeded((current) => current.filter((row) => !(row.source === 'media' && row.id === item.id)));
       Alert.alert('Cover changed', `"${item.title}" has its new picture now.`);
     } catch (err) {
       Alert.alert('Cover not changed', friendlyUploadError(err, 'Try another picture.'));
@@ -1046,8 +1216,65 @@ function LibraryPage({
     }
   }
 
+  /** The same job for a sermon row, which lives in its own table. */
+  async function changeSermonCover(item: CoverNeeded) {
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, quality: 0.9 });
+    const asset = result.canceled ? null : result.assets[0];
+    if (!asset) return;
+    const label = asset.fileName || 'Cover picture';
+    setTransfer({ id: item.id, label, fraction: 0 });
+    try {
+      const upload = await uploadPickedAsset({
+        asset,
+        bucketId: 'app-assets',
+        purpose: 'media_thumbnail',
+        pathPrefix: 'sermon-thumbnails',
+        relatedTable: 'sermons',
+        relatedId: item.id,
+        onProgress: (fraction) => setTransfer((current) => (current ? { ...current, fraction } : current)),
+      });
+      await setSermonCover(item.id, upload.publicUrl);
+      setJustCovered((current) => ({ ...current, [item.id]: upload.publicUrl }));
+      Alert.alert('Cover added', `"${item.title}" has its picture now.`);
+    } catch (err) {
+      Alert.alert('Cover not changed', friendlyUploadError(err, 'Try another picture.'));
+    } finally {
+      setTransfer(null);
+    }
+  }
+
+  /** A sermon waiting for a picture, or wearing the one just chosen for it. */
+  function sermonCard(item: CoverNeeded) {
+    const fresh = justCovered[item.id];
+    return (
+      <Card key={`sermon-${item.id}`}>
+        <View style={styles.mediaRow}>
+          {fresh ? (
+            <Image source={{ uri: fresh }} accessibilityLabel={`Cover for ${item.title}`} contentFit="cover" style={styles.mediaCover} />
+          ) : (
+            <View style={[styles.mediaCover, styles.mediaCoverEmpty]}>
+              <Ionicons name="image-outline" size={20} color={theme.colors.accent} />
+            </View>
+          )}
+          <View style={styles.grow}>
+            <Text style={styles.cardTitle}>{item.title}</Text>
+            <Text style={styles.cardMeta}>Message{item.speaker ? ` • ${item.speaker}` : ''}{fresh ? ' • Cover added' : ' • No cover yet'}</Text>
+          </View>
+        </View>
+        {transfer?.id === item.id ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
+        <View style={styles.actions}>
+          <Btn
+            label={fresh ? 'Change cover' : 'Add a cover'}
+            disabled={busy || Boolean(transfer)}
+            onPress={() => changeSermonCover(item)}
+          />
+        </View>
+      </Card>
+    );
+  }
+
   function mediaCard(item: ManagedMedia) {
-    const cover = coverFor(item);
+    const cover = justCovered[item.id] || coverFor(item);
     return (
       <Card key={item.id}>
         <View style={styles.mediaRow}>
@@ -1120,12 +1347,37 @@ function LibraryPage({
 
   return (
     <View style={styles.rows}>
-      {missingCover.length ? (
+      {neededMissing.length ? (
+        <Card>
+          <Text style={styles.cardTitle}>We could not check {neededMissing.join(' or ')} for missing covers</Text>
+          <Text style={styles.cardMeta}>Everything else on this page is fine. Have another go when you are ready.</Text>
+          <View style={styles.actions}>
+            <Btn label={neededLoading ? 'Looking...' : 'Try again'} disabled={neededLoading} onPress={() => void loadNeeded()} />
+          </View>
+        </Card>
+      ) : null}
+
+      {coverBacklog ? (
         <>
-          <Label text={`${missingCover.length} with no cover yet`} />
-          <Text style={styles.cardMeta}>A sermon with a picture gets opened. These are the ones still waiting for one.</Text>
+          <Label text={`Covers needed • ${coverBacklog}`} />
+          <Text style={styles.cardMeta}>
+            A message with a picture gets opened. These are the ones still waiting for one. A video link already brings its own
+            picture, so nothing here is asking you twice.
+          </Text>
           {missingCover.map(mediaCard)}
+          {sermonsMissingCover.map(sermonCard)}
         </>
+      ) : null}
+
+      {neededLoading && !coverBacklog ? (
+        <View style={styles.inlineRow}>
+          <ActivityIndicator color={theme.colors.accent} />
+          <Text style={styles.cardMeta}>Checking which covers are still needed...</Text>
+        </View>
+      ) : null}
+
+      {!coverBacklog && !neededLoading && !neededMissing.length && live.length ? (
+        <Notice tone="good" text="Everything live has a cover picture." />
       ) : null}
 
       {liveStories.length ? <Label text="Live stories" /> : null}
@@ -1162,7 +1414,7 @@ function LibraryPage({
       {workbench !== null && !live.length ? (
         <Empty icon="albums-outline" title="Nothing live yet" body="Post a sermon, video, or song from Post something." />
       ) : null}
-      {live.length && live.length === missingCover.length ? (
+      {live.length && live.length === live.filter((m) => !coverFor(m)).length ? (
         <Text style={styles.cardMeta}>Everything live is in the list above, waiting for a cover.</Text>
       ) : null}
       {live.filter((m) => Boolean(coverFor(m))).map(mediaCard)}

@@ -5,11 +5,14 @@ import { AppState, Platform } from 'react-native';
 import { SUPABASE_ANON_KEY, SUPABASE_URL } from './publicEnv';
 import { fetchWithTimeout, supabaseFetchTimeoutMs } from './requestTimeout';
 
-// A blank address would crash the whole app at launch inside supabase-js.
-// Fall back to a harmless placeholder so the app opens and shows its
-// sign-in screen with a clear error instead of dying on the home screen.
-const url = SUPABASE_URL || 'https://not-configured.supabase.co';
-const anon = SUPABASE_ANON_KEY || 'not-configured';
+// A blank address would crash the whole app at launch. Fall back to a stand-in
+// so the app still opens and shows its sign-in screen with a clear message
+// instead of dying on the home screen. `.invalid` is reserved by the internet
+// standards for exactly this: it can never be registered by anyone, so the
+// stand-in can never accidentally reach a real server. `hasSupabase` is false
+// whenever this is in use, so nothing in the app tries to send anything to it.
+const url = SUPABASE_URL || 'https://ogn-app-not-connected.invalid';
+const anon = SUPABASE_ANON_KEY || 'not-connected';
 
 // Everyday queries keep a short 15 s leash so a dead connection fails fast.
 // Only a real file write gets a longer budget, and that budget is sized to the

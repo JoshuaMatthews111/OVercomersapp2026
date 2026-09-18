@@ -1377,8 +1377,15 @@ const uploadProgress = (ctx, rule, out) => {
     out(rule, body, body.lineOf(m.index), 'The whole file is read into memory before anything is sent. That is the silent five-minute wait, and it cannot report progress.');
   }
   for (const f of ctx.files) {
+    // Only screens can render a bar. A service file under lib/ has no UI, and
+    // flagging it says "add a progress bar" to a file that cannot have one.
+    // Found 2026-09-18: this fired on lib/uploadService.ts line 427, which is
+    // the DECLARATION of uploadPickedAsset — the very function that carries
+    // the onProgress callback. A declaration is not a call site.
+    if (!/\.tsx$/.test(f.rel)) continue;
     for (const m of f.masked.matchAll(/\b(uploadPickedAsset|uploadDocumentAsset|uploadAsset)\s*\(/g)) {
-      const around = f.masked.slice(Math.max(0, m.index - 1500), m.index + 1500);
+      const before = f.masked.slice(Math.max(0, m.index - 40), m.index);
+      if (/\b(function|const|let|var)\s+$|\bexport\s+(async\s+)?function\s+$/.test(before)) continue;
       if (/ActivityIndicator|ProgressBar|progressAnim|<Progress/.test(f.masked)) continue;
       out(rule, f, f.lineOf(m.index), 'An upload starts here and this file never renders a spinner or a progress bar.');
       break;
@@ -1818,17 +1825,42 @@ D['OGN-IOS-010'] = (ctx, rule, out) => {
   }
 };
 
+/**
+ * Source with COMMENTS blanked but STRING LITERALS kept.
+ *
+ * `f.masked` blanks both, which is right for structural questions ("is there
+ * a call here?") and wrong for content questions ("does this call name
+ * 'delete-account'?"). A detector that looks for text INSIDE a string literal
+ * must use this view, or it can never match anything.
+ *
+ * Found 2026-09-18: the account-deletion detector tested f.masked for
+ * /functions\.invoke\(\s*['"][^'"]*delete[^'"]*account/ — a pattern that
+ * requires characters between two quotes. Masked source never has any. So the
+ * gate reported "no way to delete your account" while the call sat in
+ * app/(tabs)/profile.tsx, and it would have blocked the release forever.
+ */
+function codeWithStrings(f) {
+  if (f.__codeWithStrings) return f.__codeWithStrings;
+  const out = f.src.split('');
+  for (const c of f.comments || []) {
+    for (let k = c.start; k < c.end && k < out.length; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  }
+  f.__codeWithStrings = out.join('');
+  return f.__codeWithStrings;
+}
+
 const accountDeletion = (ctx, rule, out) => {
   const all = ctx.files;
   const createsAccounts = all.some((f) => /auth\.signUp\s*\(/.test(f.masked));
   if (!createsAccounts) return;
-  const deletes = all.some((f) => /functions\.invoke\(\s*['"][^'"]*delete[^'"]*account|\.rpc\(\s*['"][^'"]*delete[^'"]*(account|user)|admin\.deleteUser/i.test(f.masked));
+  // codeWithStrings, NOT masked: this pattern looks INSIDE a string literal.
+  const deletes = all.some((f) => /functions\.invoke\(\s*['"][^'"]*delete[^'"]*account|\.rpc\(\s*['"][^'"]*delete[^'"]*(account|user)|admin\.deleteUser/i.test(codeWithStrings(f)));
   if (!deletes) {
     const profile = ctx.byRel['app/(tabs)/profile.tsx'] ?? all[0];
     out(rule, profile, 1, 'The app creates accounts and has no code anywhere that deletes one. Apple requires deletion to start and finish inside the app.');
   }
   for (const f of all) {
-    for (const m of f.masked.matchAll(/mailto:/g)) {
+    for (const m of codeWithStrings(f).matchAll(/mailto:/g)) {
       const around = f.src.slice(Math.max(0, m.index - 400), m.index + 200);
       if (!/delete|remov(e|al)|close (my )?account/i.test(around)) continue;
       out(rule, f, f.lineOf(m.index), 'Deleting an account opens an email draft asking a person to do it by hand. Both stores reject that.');

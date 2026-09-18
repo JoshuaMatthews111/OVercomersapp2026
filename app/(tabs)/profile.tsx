@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { Session } from '@supabase/supabase-js';
+import { FunctionsHttpError, Session } from '@supabase/supabase-js';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
@@ -27,6 +27,26 @@ type SettingsItem = {
 };
 
 type SettingsDetail = 'account' | 'language' | 'saved' | 'downloads' | 'about' | 'delete' | null;
+
+/**
+ * Deleting an account is the one thing in this app that cannot be undone, so
+ * the member has to write this word out before the button will do anything.
+ * A tap alone — even a destructive-red one — is too easy to do by mistake.
+ */
+const DELETE_PHRASE = 'DELETE';
+
+/**
+ * The three stages of a deletion, in the order they happen. The panel shows
+ * all three and ticks them off, so nobody is ever watching a still screen
+ * wondering whether the phone is doing anything.
+ */
+const deleteStages = [
+  { key: 'checking', label: 'Checking your sign-in' },
+  { key: 'removing', label: 'Removing your account and everything saved with it' },
+  { key: 'signout', label: 'Signing this phone out' },
+] as const;
+
+type DeleteStage = (typeof deleteStages)[number]['key'];
 
 /**
  * The giving address is a setting, not a screen constant, so the ministry can
@@ -73,6 +93,15 @@ export default function ProfileScreen() {
   const [cancellingUpload, setCancellingUpload] = useState(false);
   const [uploadFraction, setUploadFraction] = useState(0);
   const uploadAbort = useRef<AbortController | null>(null);
+
+  // Account deletion. `deleteStage` drives the ticked list in the panel,
+  // `deleteSeconds` keeps a real number moving on screen while the ministry's
+  // server works, and `deleteError` holds a sentence the member can act on.
+  const [deleteConfirmText, setDeleteConfirmText] = useState('');
+  const [deleteStage, setDeleteStage] = useState<DeleteStage>('checking');
+  const [deleteSeconds, setDeleteSeconds] = useState(0);
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteUnfinished, setDeleteUnfinished] = useState(false);
 
   const [settingsDetail, setSettingsDetail] = useState<SettingsDetail>(null);
   const [showNotificationSettings, setShowNotificationSettings] = useState(false);
@@ -156,6 +185,28 @@ export default function ProfileScreen() {
     });
     return () => { active = false; };
   }, [loadEverything]));
+
+  // An honest clock. The ministry's server does the removal in one go and
+  // cannot report a percentage back, so rather than draw an invented bar this
+  // counts the real seconds that have passed and the stage list says which
+  // part is running. Nothing on this screen ever waits in silence.
+  useEffect(() => {
+    if (!deleting) return;
+    const startedAt = Date.now();
+    setDeleteSeconds(0);
+    const timer = setInterval(() => {
+      setDeleteSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [deleting]);
+
+  // Leaving the panel clears the typed word, so coming back always starts
+  // from a stop rather than one tap away from a deletion.
+  useEffect(() => {
+    if (settingsDetail === 'delete') return;
+    setDeleteConfirmText('');
+    setDeleteError('');
+  }, [settingsDetail]);
 
   async function onPullToRefresh() {
     setRefreshing(true);
@@ -243,15 +294,20 @@ export default function ProfileScreen() {
   /**
    * Account deletion, in the app, start to finish.
    *
-   * The confirmation says exactly what goes and that it cannot be undone, then
-   * this calls the ministry's delete-account function. Nothing here signs the
-   * member out unless the server actually confirmed the deletion.
+   * Three things have to happen before anything is removed: open this panel,
+   * write DELETE into the box, then answer one last question. That is on
+   * purpose — there is no way back from this, so there must be no way into it
+   * by accident either.
    */
   function confirmAccountDeletion() {
     if (deleting) return;
+    if (deleteConfirmText.trim().toUpperCase() !== DELETE_PHRASE) {
+      Alert.alert('Almost there', 'Write DELETE in the box first, so we know this is really what you want.');
+      return;
+    }
     Alert.alert(
       'Delete your account?',
-      'This removes your profile and photo, your prayer requests, your messages in the chat rooms, and anything you have saved in the app. It cannot be undone.',
+      'Your profile, your photo, your prayer requests and the files you sent will be removed for good. Messages you have written in a shared prayer room stay in the conversation, but they will no longer carry your name. This cannot be undone.',
       [
         { text: 'Keep my account', style: 'cancel' },
         { text: 'Delete it', style: 'destructive', onPress: () => { void deleteAccount(); } },
@@ -263,34 +319,119 @@ export default function ProfileScreen() {
    * Calls the ministry's `delete-account` server function.
    *
    * Apple 5.1.1(v) and Google Play both require deletion to start AND finish
-   * inside the app, so there is no email hand-off here any more. If the server
-   * function has not been deployed yet, this call fails and the member is told
-   * plainly that nothing was deleted — we never sign somebody out and pretend.
+   * inside the app, so there is no email hand-off here any more.
+   *
+   * Two states matter more than the happy path:
+   *
+   *  - The call can be cut off before an answer comes back (a weak signal, or
+   *    the app's own fifteen-second leash on ordinary requests). Losing the
+   *    answer is NOT the same as nothing happening, so instead of guessing we
+   *    ask who this phone is signed in as. If that sign-in no longer exists,
+   *    the removal did finish and we say so.
+   *  - The removal can finish and the sign-in survive it. That is the one
+   *    genuinely half-done state, and the member is told exactly that rather
+   *    than being sent away believing they are gone.
    */
   async function deleteAccount() {
     setDeleting(true);
+    setDeleteStage('checking');
+    setDeleteError('');
+    setDeleteUnfinished(false);
     setNotice('');
     try {
+      const { data: current, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!current.session) {
+        setDeleteError('This phone is not signed in any more, so there was nothing to remove. Sign in again if you still want to delete your account.');
+        return;
+      }
+
+      setDeleteStage('removing');
       // The function name is written out in full here on purpose, so a reader —
       // and the release gate — can see that deletion really is performed in app.
-      const { error } = await supabase.functions.invoke('delete-account', {
+      const { data, error } = await supabase.functions.invoke('delete-account', {
         method: 'POST',
         body: { confirm: true },
       });
-      if (error) throw error;
-      await supabase.auth.signOut({ scope: 'local' });
-      setSession(null);
-      setAvatarUrl(null);
-      setSettingsDetail(null);
-      router.replace('/welcome');
-      Alert.alert('Your account is gone', 'We have removed your account and the things you saved in the app. You are always welcome back.');
+
+      if (error) {
+        const spoken = await serverSentence(error);
+        // The server tells us when it removed the content but could not remove
+        // the sign-in. Never send somebody away believing they are gone.
+        if (spoken.dataRemoved) {
+          setDeleteUnfinished(true);
+          setDeleteError(spoken.message || 'Everything you had saved has been removed, but your sign-in is still here. Please tap Delete my account once more.');
+          return;
+        }
+        if (spoken.message) {
+          setDeleteError(spoken.message);
+          return;
+        }
+        // No answer came back at all. Find out what is actually true before
+        // saying anything to the member.
+        const settled = await accountStillExists();
+        if (settled === 'gone') {
+          await finishDeletedAccount();
+          return;
+        }
+        if (settled === 'unknown') {
+          setDeleteError('We lost the connection before we heard back, so we cannot tell you yet whether it finished. Nothing else on this phone has changed. Check your signal and open this again.');
+          return;
+        }
+        setDeleteError(friendlyError(error, 'We could not remove your account just now, so it is still here exactly as it was. Please try again in a moment.'));
+        return;
+      }
+
+      const warnings = Array.isArray((data as { warnings?: unknown })?.warnings)
+        ? ((data as { warnings: string[] }).warnings)
+        : [];
+      await finishDeletedAccount(warnings[0]);
     } catch (err) {
-      Alert.alert(
-        'Nothing was deleted',
-        friendlyError(err, 'We could not delete your account just now, so it is still here exactly as it was. Please try again in a moment.')
-      );
+      setDeleteError(friendlyError(err, 'We could not remove your account just now, so it is still here exactly as it was. Please try again in a moment.'));
     } finally {
       setDeleting(false);
+    }
+  }
+
+  /** Clears this phone and shows the welcome screen, once the account really is gone. */
+  async function finishDeletedAccount(extraNote?: string) {
+    setDeleteStage('signout');
+    // A local sign-out only clears what is stored on this phone. The sign-in it
+    // would otherwise end no longer exists, and the auth library treats that as
+    // a clean sign-out rather than an error.
+    await supabase.auth.signOut({ scope: 'local' });
+    setSession(null);
+    setAvatarUrl(null);
+    setSettingsDetail(null);
+    setDeleteConfirmText('');
+    router.replace('/welcome');
+    Alert.alert(
+      'Your account is gone',
+      extraNote
+        ? `We have removed your account and the things you saved in the app. ${extraNote} You are always welcome back.`
+        : 'We have removed your account and the things you saved in the app. You are always welcome back.'
+    );
+  }
+
+  /**
+   * Asks who this phone is signed in as.
+   *
+   * 'gone' means the sign-in no longer exists, which is proof the removal
+   * finished. 'here' means it does. 'unknown' means we could not reach anyone
+   * and must say so rather than guess.
+   */
+  async function accountStillExists(): Promise<'gone' | 'here' | 'unknown'> {
+    try {
+      const { data, error } = await supabase.auth.getUser();
+      if (data?.user) return 'here';
+      const status = (error as { status?: number } | null)?.status;
+      if (status === 401 || status === 403 || status === 404) return 'gone';
+      if (!error) return 'gone';
+      return 'unknown';
+    } catch {
+      // Nothing is hidden here: the caller turns 'unknown' into a sentence
+      // that tells the member we cannot say yet, which is the honest answer.
+      return 'unknown';
     }
   }
 
@@ -465,6 +606,14 @@ export default function ProfileScreen() {
         <ScrollView
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
+          // Without this the first tap on a button only puts the keyboard
+          // away, so signing in — and writing DELETE and then pressing the
+          // button under it — took two taps and felt broken.
+          keyboardShouldPersistTaps="handled"
+          // iOS: make room for the keyboard so the field being typed into is
+          // never underneath it. Android already does this through app.json's
+          // softwareKeyboardLayoutMode "resize".
+          automaticallyAdjustKeyboardInsets
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -625,6 +774,12 @@ export default function ProfileScreen() {
                   email={session.user.email || ''}
                   loading={loading}
                   deleting={deleting}
+                  deleteStage={deleteStage}
+                  deleteSeconds={deleteSeconds}
+                  deleteError={deleteError}
+                  deleteUnfinished={deleteUnfinished}
+                  deleteConfirmText={deleteConfirmText}
+                  onChangeDeleteConfirmText={setDeleteConfirmText}
                   onSaveAccount={saveAccountSettings}
                   onDeleteAccount={confirmAccountDeletion}
                   onClose={() => setSettingsDetail(null)}
@@ -794,6 +949,12 @@ function SettingsDetailPanel({
   email,
   loading,
   deleting,
+  deleteStage,
+  deleteSeconds,
+  deleteError,
+  deleteUnfinished,
+  deleteConfirmText,
+  onChangeDeleteConfirmText,
   onSaveAccount,
   onDeleteAccount,
   onClose,
@@ -806,10 +967,17 @@ function SettingsDetailPanel({
   email: string;
   loading: boolean;
   deleting: boolean;
+  deleteStage: DeleteStage;
+  deleteSeconds: number;
+  deleteError: string;
+  deleteUnfinished: boolean;
+  deleteConfirmText: string;
+  onChangeDeleteConfirmText: (value: string) => void;
   onSaveAccount: () => void;
   onDeleteAccount: () => void;
   onClose: () => void;
 }) {
+  const deleteArmed = deleteConfirmText.trim().toUpperCase() === DELETE_PHRASE;
   const titleMap: Record<Exclude<SettingsDetail, null>, string> = {
     account: 'Account Settings',
     language: 'Language',
@@ -907,24 +1075,75 @@ function SettingsDetailPanel({
 
       {detail === 'delete' ? (
         <>
-          <Text style={styles.panelBody}>Deleting your account removes:</Text>
+          <Text style={styles.panelBody}>This happens right here in the app, and it cannot be undone.</Text>
+
+          <Text style={styles.detailLabel}>What is removed for good</Text>
           <View style={styles.bulletList}>
             <BulletLine styles={styles} theme={theme} text="Your profile, your name and your photo" />
-            <BulletLine styles={styles} theme={theme} text="Your prayer requests and your prayer history" />
-            <BulletLine styles={styles} theme={theme} text="Your messages in the chat rooms" />
-            <BulletLine styles={styles} theme={theme} text="Anything you have saved or downloaded in the app" />
+            <BulletLine styles={styles} theme={theme} text="Your private prayer requests, and your name on any prayer you shared openly" />
+            <BulletLine styles={styles} theme={theme} text="The photos, videos and files you sent in chat" />
+            <BulletLine styles={styles} theme={theme} text="Your own stories, your saved items and your downloads" />
+            <BulletLine styles={styles} theme={theme} text="Your sign-in, so this email can no longer open the app" />
           </View>
-          <Text style={styles.dangerNote}>This happens right here in the app, and it cannot be undone.</Text>
+
+          <Text style={styles.detailLabel}>What stays</Text>
+          <View style={styles.bulletList}>
+            <BulletLine styles={styles} theme={theme} text="Messages you wrote in a shared prayer room stay in the conversation, so it still reads — but they no longer carry your name" />
+            <BulletLine styles={styles} theme={theme} text="A prayer other people are praying over stays on the wall with nothing left on it that names you" />
+            <BulletLine styles={styles} theme={theme} text="Anything you posted for the ministry itself, such as a sermon or a notice, stays in the library" />
+            <BulletLine styles={styles} theme={theme} text="Your giving stays in the ministry's own records, as the law requires, without your name on it" />
+          </View>
+
+          {deleting ? (
+            <DeleteProgress styles={styles} theme={theme} stage={deleteStage} seconds={deleteSeconds} />
+          ) : (
+            <>
+              <Text style={styles.detailLabel}>Write DELETE to confirm</Text>
+              <TextInput
+                accessibilityLabel="Write the word DELETE to confirm"
+                value={deleteConfirmText}
+                onChangeText={onChangeDeleteConfirmText}
+                placeholder={DELETE_PHRASE}
+                placeholderTextColor={theme.colors.textMuted}
+                autoCapitalize="characters"
+                autoCorrect={false}
+                spellCheck={false}
+                returnKeyType="done"
+                style={styles.input}
+              />
+            </>
+          )}
+
+          {deleteError ? (
+            <View style={deleteUnfinished ? styles.deleteWarnBox : styles.deleteErrorBox}>
+              <Ionicons
+                name={deleteUnfinished ? 'alert-circle-outline' : 'information-circle-outline'}
+                size={20}
+                color={theme.colors.danger}
+              />
+              <Text style={styles.deleteErrorText}>{deleteError}</Text>
+            </View>
+          ) : null}
+
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Delete my account"
-            disabled={deleting}
+            accessibilityState={{ disabled: deleting || !deleteArmed, busy: deleting }}
+            disabled={deleting || !deleteArmed}
             onPress={onDeleteAccount}
-            style={styles.dangerButton}
+            style={[styles.dangerButton, (deleting || !deleteArmed) && styles.dangerButtonIdle]}
           >
-            {deleting ? <ActivityIndicator size="small" color={theme.colors.textOnBrand} /> : <Ionicons name="trash-outline" size={18} color={theme.colors.textOnBrand} />}
-            <Text style={styles.dangerButtonText}>{deleting ? 'Deleting your account…' : 'Delete my account'}</Text>
+            {deleting
+              ? <ActivityIndicator size="small" color={theme.colors.danger} />
+              : <Ionicons name="trash-outline" size={18} color={theme.colors.danger} />}
+            <Text style={styles.dangerButtonText}>
+              {deleting ? 'Removing your account…' : deleteUnfinished ? 'Finish deleting my account' : 'Delete my account'}
+            </Text>
           </Pressable>
+
+          {!deleting && !deleteArmed ? (
+            <Text style={styles.deleteHint}>Write DELETE above and this button comes to life.</Text>
+          ) : null}
         </>
       ) : null}
     </View>
@@ -936,6 +1155,70 @@ function BulletLine({ styles, theme, text }: { styles: Styles; theme: AppTheme; 
     <View style={styles.bulletRow}>
       <Ionicons name="remove-outline" size={16} color={theme.colors.textMuted} />
       <Text style={styles.bulletText}>{text}</Text>
+    </View>
+  );
+}
+
+/**
+ * What is happening while an account is being removed.
+ *
+ * Every number on here is real. The bar measures stages this phone has
+ * actually finished, the spinner sits on the stage that is running right now,
+ * and the seconds are counted from when the member tapped. Nothing here is a
+ * made-up percentage creeping towards a finish it cannot see.
+ */
+function DeleteProgress({
+  styles,
+  theme,
+  stage,
+  seconds,
+}: {
+  styles: Styles;
+  theme: AppTheme;
+  stage: DeleteStage;
+  seconds: number;
+}) {
+  const current = Math.max(0, deleteStages.findIndex((entry) => entry.key === stage));
+  const remaining = Math.max(0, deleteStages.length - current);
+
+  return (
+    <View
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel={`${deleteStages[current].label}. ${seconds} seconds so far.`}
+      style={styles.deleteProgressBox}
+    >
+      {/* Two flex weights rather than a percentage, so the bar measures
+          finished stages and never has to be told a made-up number. */}
+      <View style={styles.deleteTrack}>
+        <View style={[styles.deleteTrackFill, { flex: current }]} />
+        <View style={{ flex: remaining }} />
+      </View>
+
+      {deleteStages.map((entry, index) => (
+        <View key={entry.key} style={styles.deleteStageRow}>
+          {/* One fixed slot for all three glyphs, so the labels line up
+              whichever stage is running. */}
+          <View style={styles.deleteStageGlyph}>
+            {index < current ? (
+              <Ionicons name="checkmark-circle" size={18} color={theme.colors.success} />
+            ) : index === current ? (
+              <ActivityIndicator size="small" color={theme.colors.accent} />
+            ) : (
+              <Ionicons name="ellipse-outline" size={18} color={theme.colors.textMuted} />
+            )}
+          </View>
+          <Text style={[styles.deleteStageText, index === current && styles.deleteStageTextNow]}>
+            {entry.label}
+          </Text>
+        </View>
+      ))}
+
+      <Text style={styles.deleteElapsed}>
+        {seconds < 1
+          ? 'Starting…'
+          : `${seconds} ${seconds === 1 ? 'second' : 'seconds'} so far. Please keep the app open.`}
+      </Text>
     </View>
   );
 }
@@ -1008,6 +1291,35 @@ function roleLabel(level: 'member' | 'leader' | 'super_admin') {
   if (level === 'super_admin') return 'Super Admin';
   if (level === 'leader') return 'Leader';
   return 'Member';
+}
+
+/**
+ * The sentence the ministry's server wrote, pulled out of a failed call.
+ *
+ * When a function answers with anything other than success, supabase hands
+ * back a `FunctionsHttpError` whose `context` is the untouched reply
+ * (node_modules/@supabase/functions-js/dist/module/types.d.ts:22 — `context:
+ * any`; the documented way to read it is `await error.context.json()`). The
+ * delete-account function always replies with `{ error: '<a plain sentence>' }`
+ * and, when it removed the content but could not remove the sign-in, with
+ * `dataRemoved: true` beside it. Reading that is the difference between
+ * telling somebody the truth and showing them a generic shrug.
+ */
+async function serverSentence(error: unknown): Promise<{ message: string; dataRemoved: boolean }> {
+  const nothing = { message: '', dataRemoved: false };
+  if (!(error instanceof FunctionsHttpError)) return nothing;
+  try {
+    const body = await error.context.json() as { error?: unknown; dataRemoved?: unknown };
+    return {
+      message: typeof body?.error === 'string' ? body.error : '',
+      dataRemoved: body?.dataRemoved === true,
+    };
+  } catch {
+    // The reply was not readable. Returning nothing here is not a swallowed
+    // failure: the caller goes on to check whether the account still exists
+    // and tells the member what it found either way.
+    return nothing;
+  }
 }
 
 /** "grace.adeyemi@…" becomes "Grace Adeyemi" — a real name, never an invented one. */
@@ -1232,18 +1544,79 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   bulletRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
   bulletText: { flex: 1, color: t.colors.textSecondary, lineHeight: 21, fontSize: t.type.body },
   dangerNote: { color: t.colors.danger, fontWeight: '900', lineHeight: 21, fontSize: t.type.body },
+
+  // The fill used to be `danger` with white on top. That reads at 5.58:1 in
+  // light and about 1.6:1 in dark, because dark's danger is the pale #FCA5A5 —
+  // white letters on pink. The tinted plate below is the same shape the sign
+  // out button already uses and the theme measures it at 5.76:1 light and
+  // 8.20:1 dark, so the most serious button in the app is legible in both.
   dangerButton: {
-    minHeight: 52,
+    minHeight: 54,
     paddingHorizontal: 20,
     borderRadius: t.radius.pill,
-    backgroundColor: t.colors.danger,
+    backgroundColor: t.colors.dangerMuted,
+    borderWidth: 1.5,
+    borderColor: t.colors.danger,
     alignItems: 'center',
     justifyContent: 'center',
     flexDirection: 'row',
     gap: 8,
-    marginTop: 4,
+    marginTop: 6,
   },
-  dangerButtonText: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.body },
+  // Not greyed out to the point of vanishing: it stays readable and simply
+  // does not respond until DELETE is written, which is what the hint says.
+  dangerButtonIdle: { opacity: 0.45 },
+  dangerButtonText: { color: t.colors.danger, fontWeight: '900', fontSize: t.type.body },
+  deleteHint: { color: t.colors.textMuted, fontSize: t.type.meta, textAlign: 'center', marginTop: 2 },
+
+  deleteErrorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginTop: 8,
+    padding: 13,
+    borderRadius: t.radius.md,
+    backgroundColor: t.colors.dangerMuted,
+    borderWidth: 1,
+    borderColor: t.colors.danger,
+  },
+  // The half-finished state gets the same plate with a heavier rule, because
+  // it is the one message a member must not skim past.
+  deleteWarnBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginTop: 8,
+    padding: 13,
+    borderRadius: t.radius.md,
+    backgroundColor: t.colors.dangerMuted,
+    borderWidth: 2,
+    borderColor: t.colors.danger,
+  },
+  deleteErrorText: { flex: 1, color: t.colors.danger, fontWeight: '700', lineHeight: 21, fontSize: t.type.body },
+
+  deleteProgressBox: {
+    marginTop: 10,
+    padding: 14,
+    borderRadius: t.radius.md,
+    backgroundColor: t.colors.surfaceSunken,
+    borderWidth: 1,
+    borderColor: t.colors.borderStrong,
+    gap: 10,
+  },
+  deleteTrack: {
+    height: 8,
+    borderRadius: t.radius.pill,
+    backgroundColor: t.colors.border,
+    flexDirection: 'row',
+    overflow: 'hidden',
+  },
+  deleteTrackFill: { backgroundColor: t.colors.accentSolid, borderRadius: t.radius.pill },
+  deleteStageRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 24 },
+  deleteStageGlyph: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
+  deleteStageText: { flex: 1, color: t.colors.textMuted, lineHeight: 20, fontSize: t.type.meta },
+  deleteStageTextNow: { color: t.colors.textPrimary, fontWeight: '800' },
+  deleteElapsed: { color: t.colors.textSecondary, fontSize: t.type.meta, fontWeight: '700' },
 
   goldButton: {
     minHeight: 52,

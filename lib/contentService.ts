@@ -1,4 +1,3 @@
-import { events, givingLinks, prayerRequests, series, sermons } from '../data/mockData';
 import { AppStory, Event, GivingLink, MediaItem, MediaKind, PrayerRequest, Series, Sermon } from '../types/models';
 import { supabase } from './supabase';
 import { youtubeThumbnailUrl } from './embed';
@@ -12,16 +11,34 @@ export { hasSupabase };
  * ---------------------------------------------------------------------------
  * How this file behaves, so every screen can rely on it
  * ---------------------------------------------------------------------------
- * - When the app is not connected to Supabase at all, the sample content in
- *   data/mockData is returned. That is the only time sample content is served.
- * - When the app IS connected and a read fails, the function THROWS. It never
- *   quietly hands back sample people as though they were real members of the
- *   congregation, and it never turns a failure into an empty list. Screens
- *   must catch and show the message from friendlyError().
+ * - NOTHING in here is ever invented. This file used to hand back sample
+ *   sermons, sample events, sample giving links and two sample prayer
+ *   requests attributed to people who do not exist, whenever the app could
+ *   not reach the ministry's database. A build that shipped without its
+ *   database settings served all of it to members as though it were real.
+ *   That is gone. There is no sample content left in this file and it no
+ *   longer imports any.
+ * - When the app cannot reach the database at all, a read THROWS a written-out
+ *   sentence. Screens catch it, say so plainly, and offer another go.
+ * - When a real query fails, the function THROWS too. It never turns a failure
+ *   into an empty list, because "nothing here" and "we could not look" are
+ *   different things and people deserve to know which one they are seeing.
  * - Every read asks for only the columns the screens draw, and carries a
  *   limit, so re-running one on focus or pull-to-refresh is cheap.
  * ---------------------------------------------------------------------------
  */
+
+/**
+ * The app has no database settings, so there is nothing real to show.
+ *
+ * Everything that would put ministry content in front of a person goes through
+ * here instead of making something up. Reads that are private bookkeeping
+ * (a saved verse, a download record) are deliberately gentler — see the note
+ * on each one.
+ */
+function notConnected(): never {
+  throw new FriendlyError('We could not reach Overcomers Global Network just now. Please check your connection and try again.');
+}
 
 /** The signed-in person's id, read from the local session — no network hop. */
 async function currentUserId(): Promise<string | null> {
@@ -105,7 +122,7 @@ const PRAYER_COLUMNS = 'id, name, category, request, is_private, consent_receive
 // ---------------------------------------------------------------------------
 
 export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: Sermon[] }> {
-  if (!hasSupabase) return { series, sermons };
+  if (!hasSupabase) notConnected();
 
   const [{ data: seriesRows, error: seriesError }, { data: sermonRows, error: sermonError }] = await Promise.all([
     supabase
@@ -116,7 +133,10 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
       .limit(40),
     supabase
       .from('sermons')
-      .select('id, series_id, title, speaker, scripture_reference, description, video_url, audio_url, duration_seconds, published_at, is_featured')
+      // thumbnail_url is a real column on public.sermons — see
+      // supabase/schema.sql line 54. Without it in this select every sermon
+      // row drew a blank plate, which is V4.
+      .select('id, series_id, title, speaker, scripture_reference, description, thumbnail_url, video_url, audio_url, duration_seconds, published_at, is_featured')
       .eq('status', 'published')
       .order('published_at', { ascending: false })
       .limit(80)
@@ -132,6 +152,10 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
     speaker: row.speaker || 'Overcomers Global Network',
     scriptureReference: row.scripture_reference || '',
     description: row.description || '',
+    // The cover the ministry saved, or — for a YouTube message — the video's
+    // own picture, worked out from its id with no API key and no extra
+    // request. Never a stock photograph standing in for a real message.
+    thumbnailUrl: row.thumbnail_url || (row.video_url ? youtubeThumbnailUrl(row.video_url) || undefined : undefined),
     videoUrl: row.video_url || undefined,
     audioUrl: row.audio_url || undefined,
     durationSeconds: row.duration_seconds || undefined,
@@ -139,20 +163,25 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
     isFeatured: row.is_featured
   }));
 
-  const mappedSeries: Series[] = (seriesRows || []).map((row) => ({
-    id: row.id,
-    title: row.title,
-    subtitle: row.description || row.speaker || 'Sermon series',
-    messageCount: mappedSermons.filter((sermon) => sermon.seriesId === row.id).length,
-    coverUrl: row.cover_image_url || undefined,
-    progress: 0
-  }));
+  const mappedSeries: Series[] = (seriesRows || []).map((row) => {
+    const inSeries = mappedSermons.filter((sermon) => sermon.seriesId === row.id);
+    return {
+      id: row.id,
+      title: row.title,
+      subtitle: row.description || row.speaker || 'Sermon series',
+      messageCount: inSeries.length,
+      // A series with no artwork of its own borrows the cover of its own first
+      // message — still this ministry's own picture, never a stock photo.
+      coverUrl: row.cover_image_url || inSeries.find((sermon) => sermon.thumbnailUrl)?.thumbnailUrl || undefined,
+      progress: 0
+    };
+  });
 
   return { series: mappedSeries, sermons: mappedSermons };
 }
 
 export async function getEvents(): Promise<Event[]> {
-  if (!hasSupabase) return events;
+  if (!hasSupabase) notConnected();
   const { data, error } = await supabase
     .from('events')
     .select('id, title, description, location, starts_at, image_url, registration_url')
@@ -220,7 +249,9 @@ export async function getMediaItems(options: { limit?: number } = {}): Promise<M
 }
 
 export async function getGivingLinks(): Promise<GivingLink[]> {
-  if (!hasSupabase) return givingLinks;
+  // Never guess at a giving link. An invented one sends somebody's offering
+  // to an address this ministry does not own.
+  if (!hasSupabase) notConnected();
   const { data, error } = await supabase
     .from('giving_links')
     .select('id, label, url, instructions, sort_order')
@@ -283,6 +314,12 @@ export function subscribeToMediaItems(onChange: () => void): Unsubscribe {
 // Giving, favourites, downloads
 // ---------------------------------------------------------------------------
 
+/**
+ * Note this person tapped a giving amount, so the office can see what is being
+ * used. This is bookkeeping about a tap, not content anyone is shown, and the
+ * Give screen deliberately carries on when it fails — nothing should ever stand
+ * between somebody and the giving page. So with no database it stays quiet.
+ */
 export async function recordGivingSelection(input: { amountCents?: number; checkoutUrl?: string }) {
   if (!hasSupabase) return { id: `local-${Date.now()}` };
   const userId = await currentUserId();
@@ -300,6 +337,10 @@ export async function recordGivingSelection(input: { amountCents?: number; check
   return data;
 }
 
+/**
+ * One person's own bookmark. Not content shown to anybody else, so with no
+ * database this stays quiet rather than interrupting a Bible reading.
+ */
 export async function saveFavorite(targetType: string, targetId: string, metadata: Record<string, unknown> = {}) {
   if (!hasSupabase) return { targetType, targetId };
   const userId = await requireUserId('save this');
@@ -348,6 +389,10 @@ function unsignedHex(value: number) {
   return (value >>> 0).toString(16).padStart(8, '0');
 }
 
+/**
+ * Remember that this person saved a message. Private bookkeeping again: the
+ * file itself still opens, and nothing invented is put in front of anybody.
+ */
 export async function recordDownloadIntent(input: { mediaItemId: string; fileUrl?: string }) {
   if (!hasSupabase) return { id: `local-${Date.now()}` };
   const userId = await requireUserId('save downloads');
@@ -398,7 +443,9 @@ export async function getUserDownloads(): Promise<{ id: string; title: string; m
  * already restricts other people's private rows.
  */
 export async function getPrayerRequests(options: { limit?: number; includeMine?: boolean } = {}): Promise<PrayerRequest[]> {
-  if (!hasSupabase) return prayerRequests;
+  // This wall used to show two invented people, "Alicia" and "Michael", to the
+  // congregation whenever it could not read the real ones. Never again.
+  if (!hasSupabase) notConnected();
   const limit = options.limit ?? 30;
 
   let query = supabase.from('prayer_requests').select(PRAYER_COLUMNS);
@@ -415,7 +462,7 @@ export async function getPrayerRequests(options: { limit?: number; includeMine?:
 }
 
 export async function getMyPrayerRequests(options: { limit?: number } = {}): Promise<PrayerRequest[]> {
-  if (!hasSupabase) return prayerRequests;
+  if (!hasSupabase) notConnected();
   const userId = await currentUserId();
   if (!userId) return [];
   const { data, error } = await supabase
@@ -448,18 +495,10 @@ export async function submitPrayerRequest(input: {
   if (!input.request.trim()) {
     throw new FriendlyError('Please write what you would like us to pray for.');
   }
-  if (!hasSupabase) {
-    return {
-      id: `local-${Date.now()}`,
-      name: input.name || 'Anonymous',
-      category: input.category || 'General',
-      request: input.request,
-      isPrivate: input.isPrivate,
-      consentReceived: input.consentReceived,
-      status: 'new',
-      createdAt: new Date().toISOString(),
-    };
-  }
+  // Somebody is trusting this ministry with something they are carrying. If it
+  // cannot actually be saved, say so — never hand back a receipt for a prayer
+  // request that went nowhere.
+  if (!hasSupabase) notConnected();
 
   const userId = await currentUserId();
   const { data, error } = await supabase
@@ -533,17 +572,10 @@ function storyRow(input: StoryInput, userId: string) {
 }
 
 async function insertStory(input: StoryInput, action: string): Promise<AppStoryRow> {
-  if (!hasSupabase) {
-    return {
-      id: `local-story-${Date.now()}`,
-      title: (input.title || '').trim(),
-      body: input.body,
-      region: input.region,
-      imageUrl: input.imageUrl,
-      publishedAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + STORY_LIFETIME_MS).toISOString(),
-    };
-  }
+  // A story that was never saved must not be handed back looking published.
+  // The old version returned a made-up row, so the ring showed a story that
+  // did not exist anywhere but on that one phone.
+  if (!hasSupabase) notConnected();
   const userId = await requireUserId(action);
   const { data, error } = await supabase
     .from('app_stories')
@@ -576,7 +608,9 @@ export async function createMemberStory(input: StoryInput): Promise<AppStoryRow>
  * database refused, the person is told plainly instead of watching a spinner.
  */
 export async function deleteMyStory(id: string): Promise<{ id: string }> {
-  if (!hasSupabase) return { id };
+  // Telling someone their story is gone when nothing was deleted is exactly
+  // the failure the owner hit on his own device (S12).
+  if (!hasSupabase) notConnected();
   const userId = await requireUserId('remove your story');
   const { data, error } = await supabase
     .from('app_stories')
@@ -612,22 +646,7 @@ export async function createAdminMediaItem(input: {
   // one, use the video's own.
   const thumbnailUrl = input.thumbnailUrl || (externalUrl ? youtubeThumbnailUrl(externalUrl) || undefined : undefined);
 
-  if (!hasSupabase) {
-    return {
-      id: `local-media-${Date.now()}`,
-      mediaType: input.mediaType,
-      title: input.title,
-      description: input.description,
-      speaker: input.speaker,
-      scriptureReference: input.scriptureReference,
-      thumbnailUrl,
-      fileUrl: input.fileUrl,
-      externalUrl,
-      isDownloadable: Boolean(input.isDownloadable),
-      isFeatured: Boolean(input.isFeatured),
-      publishedAt: new Date().toISOString(),
-    };
-  }
+  if (!hasSupabase) notConnected();
 
   const userId = await requireUserId('post media');
   const { data, error } = await supabase
@@ -661,7 +680,7 @@ export async function createAdminEvent(input: {
   imageUrl?: string;
   registrationUrl?: string;
 }) {
-  if (!hasSupabase) return { id: `local-event-${Date.now()}` };
+  if (!hasSupabase) notConnected();
   const { data, error } = await supabase
     .from('events')
     .insert({

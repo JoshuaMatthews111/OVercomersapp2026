@@ -1,120 +1,331 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useEffect, useState } from 'react';
-import { Alert, Image, Linking, Pressable, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Linking,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { getGivingLinks, recordGivingSelection } from '../../lib/contentService';
-import { colors, shadows } from '../../lib/theme';
-import { useThemePreference } from '../../lib/themePreference';
+import { friendlyError } from '../../lib/errorMessages';
+import { publicEnv } from '../../lib/publicEnv';
+import { AppTheme, createThemedStyles } from '../../lib/theme';
+import { useAppTheme } from '../../lib/themePreference';
 import { GivingLink } from '../../types/models';
 
 const presetAmounts = [25, 50, 100, 500];
-const givingPageUrl = 'https://overcomersglobalnetwork.com/give/';
+
+/**
+ * Where giving happens. In order: whatever the ministry has published in the
+ * giving table, then the address baked into this build, then the address the
+ * app has always shipped with. The last one stays until the published setting
+ * is confirmed present in every store build — losing it would break the one
+ * thing the owner says already works (DO-NOT-BREAK: Give opens the giving page).
+ */
+const givingPageUrl = publicEnv('EXPO_PUBLIC_GIVING_URL') || 'https://overcomersglobalnetwork.com/give/';
 const customStripeUrl = 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b';
+
 const art = {
+  seal: require('../../assets/images/ogn-logo-transparent.png'),
   hero: require('../../assets/images/ogn-separated-ui/giving/giving-basket-photo-light.png'),
 };
 
 export default function GiveScreen() {
-  const { themePreference } = useThemePreference();
-  const dark = themePreference === 'dark';
+  const { theme, dark } = useAppTheme();
+  const styles = useStyles(theme);
+
   const [links, setLinks] = useState<GivingLink[]>([]);
+  const [loadingLinks, setLoadingLinks] = useState(true);
+  const [linksError, setLinksError] = useState<string | null>(null);
+  const [loadedOnce, setLoadedOnce] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [selectedAmount, setSelectedAmount] = useState(50);
   const [customAmount, setCustomAmount] = useState('');
+  const [opening, setOpening] = useState<'preset' | 'custom' | null>(null);
+  const [historyNote, setHistoryNote] = useState<string | null>(null);
+
+  const firstFocusRef = useRef(true);
+  const requestRef = useRef(0);
+
+  /* ---------------------------------------------------------------- *
+   * The giving links are read again every time the tab is opened and
+   * on pull-to-refresh, so a link the ministry changed this morning is
+   * the link this phone uses this afternoon.
+   * ---------------------------------------------------------------- */
+  const loadLinks = useCallback(async (options?: { keepVisible?: boolean }) => {
+    const ticket = requestRef.current + 1;
+    requestRef.current = ticket;
+    if (!options?.keepVisible) setLoadingLinks(true);
+    setLinksError(null);
+    try {
+      const rows = await getGivingLinks();
+      if (requestRef.current !== ticket) return;
+      setLinks(rows);
+    } catch (err) {
+      if (requestRef.current !== ticket) return;
+      setLinksError(friendlyError(err, 'We could not check the giving options just now.'));
+    } finally {
+      if (requestRef.current === ticket) {
+        setLoadingLinks(false);
+        setLoadedOnce(true);
+      }
+    }
+  }, []);
+
+  const loadRef = useRef(loadLinks);
+  useEffect(() => {
+    loadRef.current = loadLinks;
+  }, [loadLinks]);
 
   useEffect(() => {
-    getGivingLinks().then(setLinks);
-  }, []);
+    void loadLinks();
+  }, [loadLinks]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocusRef.current) {
+        firstFocusRef.current = false;
+        return;
+      }
+      void loadRef.current({ keepVisible: true });
+    }, [])
+  );
+
+  async function onRefresh() {
+    setRefreshing(true);
+    try {
+      await loadLinks({ keepVisible: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   const customLink = links.find((link) => /custom/i.test(link.label))?.url || customStripeUrl;
   const websiteLink = links.find((link) => /online|give/i.test(link.label))?.url || givingPageUrl;
 
   async function openGiving(amount?: number, custom = false) {
+    if (opening) return;
     const parsedCustom = Number(customAmount.replace(/[^0-9.]/g, ''));
     const finalAmount = custom ? (Number.isFinite(parsedCustom) && parsedCustom > 0 ? parsedCustom : undefined) : amount;
     const cleanWebsiteLink = websiteLink.replace(/\/?$/, '/');
     const url = custom ? customLink : `${cleanWebsiteLink}${finalAmount ? `?amount=${encodeURIComponent(String(finalAmount))}` : ''}`;
+
+    setOpening(custom ? 'custom' : 'preset');
+    let historyMissed = false;
     try {
       await recordGivingSelection({ amountCents: finalAmount ? Math.round(finalAmount * 100) : undefined, checkoutUrl: url });
     } catch {
-      // Checkout should still open if analytics recording is blocked or the user is signed out.
+      // Giving must never wait on our own record-keeping. We note it and say so
+      // quietly underneath, rather than stopping the person from giving.
+      historyMissed = true;
     }
+    setHistoryNote(historyMissed ? 'We could not add this to your giving history. Your gift itself is not affected.' : null);
 
-    const canOpen = await Linking.canOpenURL(url);
-    if (!canOpen) return Alert.alert('Giving link unavailable', 'This device could not open the giving page.');
-    await Linking.openURL(url);
+    try {
+      const canOpen = await Linking.canOpenURL(url);
+      if (!canOpen) throw new Error('This phone cannot open the giving page.');
+      await Linking.openURL(url);
+    } catch {
+      Alert.alert(
+        'We could not open the giving page',
+        `Please open this address in your browser and you can still give:\n\n${url}`
+      );
+    } finally {
+      setOpening(null);
+    }
   }
 
+  const noOptionsListed = loadedOnce && !linksError && links.length === 0;
+
   return (
-    <LinearGradient colors={dark ? ['#020817', '#061334', '#071B45'] : ['#FFFFFF', '#FFFCF6', '#F7F3E6']} style={styles.root}>
+    <LinearGradient colors={theme.pageGradient} style={styles.root}>
       <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <SafeAreaView style={styles.safe}>
-        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={theme.colors.accent}
+              colors={[theme.colors.accent]}
+              progressBackgroundColor={theme.colors.surfaceRaised}
+            />
+          }
+        >
           <View style={styles.header}>
-            <Image source={require('../../assets/images/ogn-logo-transparent.png')} style={styles.seal} resizeMode="contain" />
+            <Image
+              source={art.seal}
+              style={styles.seal}
+              resizeMode="contain"
+              accessibilityLabel="Overcomers Global Network crest"
+            />
             <View style={styles.headerCopy}>
-              <Text style={[styles.title, dark && styles.titleDark]}>Give</Text>
-              <Text style={[styles.subtitle, dark && styles.subtitleDark]}>Partner with the global mission.</Text>
+              <Text style={styles.title}>Give</Text>
+              <Text style={styles.subtitle}>Partner with the global mission.</Text>
             </View>
           </View>
 
-          <View style={[styles.heroCard, dark && styles.heroCardDark]}>
-            <View style={styles.heroImageFrame}><Image source={art.hero} resizeMode="cover" style={styles.heroImage} /></View>
-            <View style={styles.heroCopy}><Text style={[styles.heroTitle, dark && styles.heroTitleDark]}>Generosity that reaches further</Text><Text style={[styles.heroBody, dark && styles.heroBodyDark]}>Help bring teaching, prayer and practical care to communities around the world.</Text></View>
-          </View>
-          <View style={styles.securityRow}>
-            <Ionicons name="lock-closed" size={16} color={colors.gold} />
-            <Text style={[styles.securityText, dark && styles.securityTextDark]}>Secure checkout through Stripe and OGN web giving</Text>
+          <View style={styles.heroCard}>
+            <View style={styles.heroImageFrame}>
+              <Image
+                source={art.hero}
+                resizeMode="cover"
+                style={styles.heroImage}
+                accessibilityLabel="Two hands holding an Overcomers Global Network offering basket"
+              />
+            </View>
+            <View style={styles.heroCopy}>
+              <Text style={styles.heroTitle}>Generosity that reaches further</Text>
+              <Text style={styles.heroBody}>
+                Help bring teaching, prayer and practical care to communities around the world.
+              </Text>
+            </View>
           </View>
 
-          <Text style={[styles.sectionTitle, dark && styles.sectionTitleDark]}>Choose Amount</Text>
+          <View style={styles.securityRow}>
+            <Ionicons name="lock-closed" size={16} color={theme.colors.accent} />
+            <Text style={styles.securityText}>Secure checkout on the ministry giving page</Text>
+          </View>
+
+          {loadingLinks && !loadedOnce ? (
+            <View style={styles.statusRow}>
+              <ActivityIndicator color={theme.colors.accent} />
+              <Text style={styles.statusText}>Getting the giving options ready...</Text>
+            </View>
+          ) : null}
+
+          {linksError ? (
+            <View style={styles.statusCard}>
+              <Ionicons name="cloud-offline-outline" size={20} color={theme.colors.accent} />
+              <Text style={styles.statusCardText}>
+                {linksError} The buttons below still open the ministry giving page.
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Check the giving options again"
+                onPress={() => loadLinks()}
+                style={styles.retryButton}
+              >
+                <Text style={styles.retryText}>Try again</Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          {noOptionsListed ? (
+            <View style={styles.statusRow}>
+              <Ionicons name="information-circle-outline" size={18} color={theme.colors.accent} />
+              <Text style={styles.statusText}>
+                No extra giving options are listed yet. The buttons below open the ministry giving page.
+              </Text>
+            </View>
+          ) : null}
+
+          <Text style={styles.sectionTitle}>Choose an amount</Text>
           <View style={styles.amountGrid}>
             {presetAmounts.map((amount) => (
               <Pressable
                 key={amount}
                 accessibilityRole="button"
+                accessibilityLabel={`Give ${amount} dollars`}
                 accessibilityState={{ selected: selectedAmount === amount }}
                 onPress={() => setSelectedAmount(amount)}
-                style={[styles.amountCard, dark && styles.amountCardDark, selectedAmount === amount && styles.amountCardActive, selectedAmount === amount && dark && styles.amountCardActiveDark]}
+                style={[styles.amountCard, selectedAmount === amount && styles.amountCardActive]}
               >
-                <Text style={[styles.amountText, dark && styles.amountTextDark, selectedAmount === amount && styles.amountTextActive]}>${amount}</Text>
+                <Text style={[styles.amountText, selectedAmount === amount && styles.amountTextActive]}>${amount}</Text>
               </Pressable>
             ))}
           </View>
-          <Text style={[styles.handoffNote, dark && styles.handoffNoteDark]}>
-            Your selected amount is sent to the secure OGN giving page. Payment is completed outside the app through OGN/Stripe.
+
+          <Text style={styles.handoffNote}>
+            The amount you choose is carried over to the ministry giving page, where the gift is completed securely.
           </Text>
 
-          <Pressable onPress={() => openGiving(selectedAmount)} style={styles.primaryGiveButton}>
-            <Ionicons name="heart" size={22} color="#071231" />
-            <Text style={styles.primaryGiveText}>Give ${selectedAmount}</Text>
-            <Ionicons name="open-outline" size={19} color="#071231" />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Give ${selectedAmount} dollars on the ministry giving page`}
+            accessibilityState={{ busy: opening === 'preset' }}
+            onPress={() => openGiving(selectedAmount)}
+            disabled={opening !== null}
+            style={[styles.primaryGiveButton, opening !== null && styles.primaryGiveButtonBusy]}
+          >
+            {opening === 'preset' ? (
+              <ActivityIndicator color={theme.colors.textOnAccent} />
+            ) : (
+              <Ionicons name="heart" size={22} color={theme.colors.textOnAccent} />
+            )}
+            <Text style={styles.primaryGiveText}>
+              {opening === 'preset' ? 'Opening giving page' : `Give $${selectedAmount}`}
+            </Text>
+            <Ionicons name="open-outline" size={19} color={theme.colors.textOnAccent} />
           </Pressable>
 
-          <View style={[styles.customButton, dark && styles.customButtonDark]}>
-            <Ionicons name="card-outline" size={22} color={dark ? colors.gold : colors.royalBlue} />
-            <View style={{ flex: 1 }}>
-              <Text style={[styles.customTitle, dark && styles.customTitleDark]}>Custom Amount</Text>
+          {historyNote ? <Text style={styles.historyNote}>{historyNote}</Text> : null}
+
+          <View style={styles.customButton}>
+            <Ionicons name="card-outline" size={22} color={theme.colors.accent} />
+            <View style={styles.customCopy}>
+              <Text style={styles.customTitle}>Another amount</Text>
               <TextInput
                 value={customAmount}
                 onChangeText={setCustomAmount}
                 keyboardType="decimal-pad"
+                accessibilityLabel="Type the amount you would like to give"
                 placeholder="Enter amount"
-                placeholderTextColor={dark ? 'rgba(255,255,255,0.5)' : colors.muted}
-                style={[styles.customInput, dark && styles.customInputDark]}
+                placeholderTextColor={theme.colors.textMuted}
+                style={styles.customInput}
               />
-              <Text style={[styles.customBody, dark && styles.customBodyDark]}>Enter your preferred amount again on the secure checkout page.</Text>
+              <Text style={styles.customBody}>Confirm this amount again on the secure checkout page.</Text>
             </View>
-            <Pressable accessibilityRole="button" accessibilityLabel="Open custom giving" onPress={() => openGiving(undefined, true)} style={styles.customOpenButton}>
-              <Ionicons name="chevron-forward" size={20} color="#071231" />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Give another amount"
+              accessibilityState={{ busy: opening === 'custom' }}
+              onPress={() => openGiving(undefined, true)}
+              disabled={opening !== null}
+              style={[styles.customOpenButton, opening !== null && styles.primaryGiveButtonBusy]}
+            >
+              {opening === 'custom' ? (
+                <ActivityIndicator color={theme.colors.textOnAccent} />
+              ) : (
+                <Ionicons name="chevron-forward" size={20} color={theme.colors.textOnAccent} />
+              )}
             </Pressable>
           </View>
 
-          <View style={[styles.impactCard, dark && styles.impactCardDark]}>
-            <Text style={[styles.impactTitle, dark && styles.impactTitleDark]}>What Your Giving Supports</Text>
-            <ImpactRow icon="radio-outline" title="Global Broadcasts" body="Live teaching, prayer, sermons, and worship media." dark={dark} />
-            <ImpactRow icon="people-outline" title="Discipleship & Outreach" body="Follow-up, leaders, territories, and evangelism work." dark={dark} />
-            <ImpactRow icon="book-outline" title="Bible & Prayer Tools" body="Scripture access, prayer requests, saved media, and member care." dark={dark} />
+          <View style={styles.impactCard}>
+            <Text style={styles.impactTitle}>What your giving supports</Text>
+            <ImpactRow
+              icon="radio-outline"
+              theme={theme}
+              title="Global broadcasts"
+              body="Live teaching, prayer, sermons and worship media."
+            />
+            <ImpactRow
+              icon="people-outline"
+              theme={theme}
+              title="Discipleship and outreach"
+              body="Follow-up, leaders, territories and evangelism work."
+            />
+            <ImpactRow
+              icon="book-outline"
+              theme={theme}
+              title="Bible and prayer tools"
+              body="Scripture, prayer requests, saved media and member care."
+            />
           </View>
         </ScrollView>
       </SafeAreaView>
@@ -122,75 +333,184 @@ export default function GiveScreen() {
   );
 }
 
-function ImpactRow({ icon, title, body, dark }: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string; dark: boolean }) {
+function ImpactRow({ icon, title, body, theme }: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string; theme: AppTheme }) {
+  const styles = useStyles(theme);
   return (
     <View style={styles.impactRow}>
-      <View style={[styles.impactIcon, dark && styles.impactIconDark]}>
-        <Ionicons name={icon} size={21} color={colors.gold} />
+      <View style={styles.impactIcon}>
+        <Ionicons name={icon} size={21} color={theme.colors.textOnBrand} />
       </View>
-      <View style={{ flex: 1 }}>
-        <Text style={[styles.impactRowTitle, dark && styles.impactRowTitleDark]}>{title}</Text>
-        <Text style={[styles.impactRowBody, dark && styles.impactRowBodyDark]}>{body}</Text>
+      <View style={styles.impactCopy}>
+        <Text style={styles.impactRowTitle}>{title}</Text>
+        <Text style={styles.impactRowBody}>{body}</Text>
       </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1 },
-  safe: { flex: 1 },
-  scroll: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 112 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 18 },
-  seal: { width: 102, height: 82 },
-  headerCopy: { flex: 1 },
-  title: { color: colors.royalBlue, fontWeight: '900', fontSize: 38 },
-  titleDark: { color: colors.white },
-  subtitle: { color: colors.deepGold, fontWeight: '800', marginTop: 2 },
-  subtitleDark: { color: colors.gold },
-  heroCard: { borderRadius: 18, borderWidth: 1, borderColor: 'rgba(212,175,55,0.34)', overflow: 'hidden', backgroundColor: colors.white, ...shadows.lift },
-  heroCardDark: { backgroundColor: '#071B45', borderColor: 'rgba(212,175,55,0.62)' },
-  heroImageFrame: { width: '100%', aspectRatio: 1.7, overflow: 'hidden' },
-  heroImage: { width: '100%', height: '100%' },
-  heroCopy: { padding: 20 },
-  heroTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 25, marginTop: 0 },
-  heroTitleDark: { color: colors.gold },
-  heroBody: { color: colors.slate, lineHeight: 21, marginTop: 8 },
-  heroBodyDark: { color: 'rgba(255,255,255,0.82)' },
-  securityRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 16, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: 'rgba(212,175,55,0.12)' },
-  securityText: { flex: 1, color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
-  securityTextDark: { color: colors.gold },
-  sectionTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 21, marginTop: 22, marginBottom: 12 },
-  sectionTitleDark: { color: colors.white },
-  amountGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
-  amountCard: { flexBasis: '45%', flexGrow: 1, minHeight: 78, borderRadius: 16, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
-  amountCardDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.22)' },
-  amountCardActive: { backgroundColor: colors.royalBlue, borderColor: colors.gold },
-  amountCardActiveDark: { backgroundColor: 'rgba(212,175,55,0.16)' },
-  amountText: { color: colors.royalBlue, fontWeight: '900', fontSize: 27 },
-  amountTextDark: { color: colors.white },
-  amountTextActive: { color: colors.gold },
-  handoffNote: { color: colors.slate, lineHeight: 20, marginTop: 12, fontWeight: '700' },
-  handoffNoteDark: { color: 'rgba(255,255,255,0.72)' },
-  primaryGiveButton: { marginTop: 18, minHeight: 58, borderRadius: 15, backgroundColor: colors.gold, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, ...shadows.lift },
-  primaryGiveText: { color: '#071231', fontWeight: '900', fontSize: 20 },
-  customButton: { marginTop: 13, minHeight: 80, borderRadius: 15, backgroundColor: colors.white, borderWidth: 1, borderColor: 'rgba(212,175,55,0.32)', paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 13, ...shadows.soft },
-  customButtonDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.24)' },
-  customTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 17 },
-  customTitleDark: { color: colors.white },
-  customBody: { color: colors.slate, marginTop: 3 },
-  customBodyDark: { color: 'rgba(255,255,255,0.7)' },
-  customInput: { marginTop: 8, minHeight: 42, borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: '#F8FAFC', color: colors.textBody, paddingHorizontal: 12, fontWeight: '800' },
-  customInputDark: { backgroundColor: 'rgba(2,8,23,0.42)', borderColor: 'rgba(212,175,55,0.2)', color: colors.white },
-  customOpenButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center' },
-  impactCard: { marginTop: 20, borderRadius: 17, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, padding: 15, ...shadows.soft },
-  impactCardDark: { backgroundColor: 'rgba(255,255,255,0.06)', borderColor: 'rgba(212,175,55,0.22)' },
-  impactTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 19, marginBottom: 12 },
-  impactTitleDark: { color: colors.gold },
-  impactRow: { flexDirection: 'row', gap: 12, paddingVertical: 11, borderTopWidth: 1, borderTopColor: 'rgba(148,163,184,0.15)' },
-  impactIcon: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.royalBlue, alignItems: 'center', justifyContent: 'center' },
-  impactIconDark: { backgroundColor: 'rgba(2,8,23,0.42)' },
-  impactRowTitle: { color: colors.royalBlue, fontWeight: '900' },
-  impactRowTitleDark: { color: colors.white },
-  impactRowBody: { color: colors.slate, lineHeight: 19, marginTop: 3 },
-  impactRowBodyDark: { color: 'rgba(255,255,255,0.7)' },
-});
+/* --------------------------------------------------------------------------
+ * One style sheet for both themes, built from the shared tokens. The basket
+ * and two-hands photograph stays exactly where it is (DO-NOT-BREAK item 11);
+ * the frame is a little taller than before so the hands are not cut off.
+ * ----------------------------------------------------------------------- */
+const useStyles = createThemedStyles((t: AppTheme) =>
+  StyleSheet.create({
+    root: { flex: 1 },
+    safe: { flex: 1 },
+    scroll: { paddingHorizontal: t.spacing.lg, paddingTop: 10, paddingBottom: 112 },
+
+    header: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 18 },
+    seal: { width: 102, height: 82 },
+    headerCopy: { flex: 1 },
+    title: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 38 },
+    subtitle: { color: t.colors.accent, fontWeight: '800', marginTop: 2 },
+
+    heroCard: {
+      borderRadius: t.radius.xl,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      overflow: 'hidden',
+      backgroundColor: t.colors.surface,
+      ...t.elevation.high,
+    },
+    heroImageFrame: { width: '100%', aspectRatio: 1.25, overflow: 'hidden' },
+    heroImage: { width: '100%', height: '100%' },
+    heroCopy: { padding: 20 },
+    heroTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 25 },
+    heroBody: { color: t.colors.textSecondary, lineHeight: 22, marginTop: 8, fontSize: t.type.body },
+
+    securityRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 7,
+      marginTop: t.spacing.lg,
+      borderRadius: t.radius.pill,
+      paddingHorizontal: 12,
+      paddingVertical: 9,
+      backgroundColor: t.colors.accentMuted,
+    },
+    securityText: { flex: 1, color: t.colors.textSecondary, fontWeight: '800', fontSize: 12 },
+
+    statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 14 },
+    statusText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 20 },
+    statusCard: {
+      marginTop: 14,
+      alignItems: 'center',
+      gap: 10,
+      padding: t.spacing.lg,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      ...t.elevation.low,
+    },
+    statusCardText: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 22, textAlign: 'center' },
+    retryButton: {
+      minHeight: 48,
+      paddingHorizontal: 26,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.low,
+    },
+    retryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+
+    sectionTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 21, marginTop: 22, marginBottom: 12 },
+    amountGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+    amountCard: {
+      flexBasis: '45%',
+      flexGrow: 1,
+      minHeight: 80,
+      borderRadius: t.radius.lg,
+      borderWidth: 2,
+      borderColor: t.colors.border,
+      backgroundColor: t.colors.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.medium,
+    },
+    amountCardActive: { backgroundColor: t.colors.accentMuted, borderColor: t.colors.accentBorder },
+    amountText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 27 },
+    amountTextActive: { color: t.colors.accent },
+
+    handoffNote: { color: t.colors.textSecondary, lineHeight: 21, marginTop: 12, fontWeight: '700' },
+
+    primaryGiveButton: {
+      marginTop: 18,
+      minHeight: 60,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.accentSolid,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 10,
+      paddingHorizontal: t.spacing.lg,
+      ...t.elevation.high,
+    },
+    primaryGiveButtonBusy: { opacity: 0.7 },
+    primaryGiveText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: 20 },
+    historyNote: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 20, marginTop: 10 },
+
+    customButton: {
+      marginTop: 13,
+      minHeight: 84,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 13,
+      ...t.elevation.medium,
+    },
+    customCopy: { flex: 1 },
+    customTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 17 },
+    customBody: { color: t.colors.textSecondary, marginTop: 4, lineHeight: 19 },
+    customInput: {
+      marginTop: 8,
+      minHeight: 46,
+      borderRadius: t.radius.md,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      backgroundColor: t.colors.surfaceSunken,
+      color: t.colors.textPrimary,
+      paddingHorizontal: 12,
+      fontWeight: '800',
+    },
+    customOpenButton: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: t.colors.accentSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.low,
+    },
+
+    impactCard: {
+      marginTop: 20,
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      padding: t.spacing.lg,
+      ...t.elevation.medium,
+    },
+    impactTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 19, marginBottom: 12 },
+    impactRow: { flexDirection: 'row', gap: 12, paddingVertical: 12, borderTopWidth: 1, borderTopColor: t.colors.border },
+    impactIcon: {
+      width: 44,
+      height: 44,
+      borderRadius: 22,
+      backgroundColor: t.colors.brandSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    impactCopy: { flex: 1 },
+    impactRowTitle: { color: t.colors.textPrimary, fontWeight: '900' },
+    impactRowBody: { color: t.colors.textSecondary, lineHeight: 20, marginTop: 3 },
+  })
+);

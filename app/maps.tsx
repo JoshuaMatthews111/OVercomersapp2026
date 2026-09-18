@@ -1,9 +1,19 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { router } from 'expo-router';
+// Evangelism map — browser view.
+//
+// The phone app draws real outlines on a live map (app/maps.native.tsx). This
+// is the browser companion: the same regions, the same honest status, the same
+// outreach records and follow-ups, laid out for a wide screen.
+//
+// Two rules this file lives by:
+//   1. Both themes are designed, not one themed and one left over. Every colour
+//      comes from the token set in lib/theme.ts.
+//   2. A region is never painted as busy because of a stored label. The status
+//      shown is the one derived from what really happened there.
 import { Ionicons } from '@expo/vector-icons';
+import { router, useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { AppHeader } from '../components/AppHeader';
-import { Card } from '../components/Card';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { Screen } from '../components/Screen';
 import { useAccessProfile } from '../lib/accessControl';
@@ -21,8 +31,9 @@ import {
   type VisitPin,
 } from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
-import { colors } from '../lib/theme';
-import { OutreachContact, Territory } from '../types/models';
+import { colors, createThemedStyles, getTheme, type AppTheme } from '../lib/theme';
+import { useAppTheme } from '../lib/themePreference';
+import { Territory } from '../types/models';
 
 const statusColor: Record<Territory['status'], string> = {
   untapped: colors.red,
@@ -34,15 +45,62 @@ const statusColor: Record<Territory['status'], string> = {
 };
 /** A region nothing has happened in is grey, not amber. Honest beats busy. */
 const NO_ACTIVITY_COLOR = colors.muted;
-/** The colour a region is painted, given what really happened there. */
+
+/**
+ * The same six statuses, weighted for a dark surface. The dot a region is
+ * marked with keeps its map colour in both themes; the WORDS beside it have to
+ * change, because #1F9D55 green on deep navy is not a colour anybody can read.
+ * These are the dark-theme weights of the same six meanings.
+ */
+const darkInk = getTheme('dark').colors;
+const statusInkDark: Record<Territory['status'], string> = {
+  untapped: darkInk.danger,
+  in_progress: darkInk.warning,
+  covered: darkInk.success,
+  // The theme has no purple or blue token, so these two are the only weights
+  // written here — the same hues as the map dots, lifted to read on navy.
+  follow_up_due: '#C4B2FF',
+  new_believer: '#93B4FF',
+  discipled: darkInk.accent,
+};
+
+/** The colour a region is marked with, given what really happened there. */
 function shadeFor(derived: DerivedStatus): string {
   return derived.basis === 'no-data' || derived.basis === 'dormant' ? NO_ACTIVITY_COLOR : statusColor[derived.status];
 }
 
+/** The same meaning, in ink that reads on this theme's own surface. */
+function inkFor(derived: DerivedStatus, theme: AppTheme): string {
+  if (derived.basis === 'no-data' || derived.basis === 'dormant') return theme.colors.textMuted;
+  return theme.dark ? statusInkDark[derived.status] : statusColor[derived.status];
+}
+
+/** Warm, short "when was this". */
+function timeAgo(iso?: string): string {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const minutes = Math.round((Date.now() - then) / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return 'yesterday';
+  return `${days} days ago`;
+}
+
 export default function MapsWebScreen() {
   const { access, loadingAccess } = useAccessProfile();
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingMap, setLoadingMap] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [recordsNote, setRecordsNote] = useState<string | null>(null);
+  const [visitsNote, setVisitsNote] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [territoryList, setTerritoryList] = useState<TerritoryWithActivity[]>([]);
   const [contactList, setContactList] = useState<OutreachRecord[]>([]);
   const [visits, setVisits] = useState<VisitPin[]>([]);
@@ -56,19 +114,63 @@ export default function MapsWebScreen() {
     else router.replace('/(tabs)/profile' as any);
   }
 
+  /**
+   * One load. Regions are what the screen is for, so only they can fail it;
+   * records and visits each fall back on their own and say so in plain words,
+   * rather than emptying the page.
+   */
+  const loadAll = useCallback(async () => {
+    const [territories, contactResult, visitResult] = await Promise.all([
+      getTerritories(),
+      getOutreachContacts().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as OutreachRecord[] })),
+      getVisits().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
+    ]);
+    setTerritoryList(territories);
+    setContactList(contactResult.rows);
+    setRecordsNote(contactResult.ok ? null : 'The outreach records could not load just now. Pull down to try again.');
+    if (visitResult.ready) {
+      setVisits(visitResult.visits);
+      setVisitsNote(null);
+    } else {
+      setVisits([]);
+      setVisitsNote(visitResult.reason === 'not-switched-on'
+        ? 'Visit pins are not switched on yet. Once your ministry turns them on, every visit the team logs will show here.'
+        : 'The visits could not load just now. Pull down to try again.');
+    }
+    setSelected((current) => (current ? territories.find((t) => t.id === current.id) || current : territories.find((t) => t.level !== 'global') || territories[0] || null));
+  }, []);
+
   useEffect(() => {
     if (loadingAccess || !access.canUseEvangelism) return;
-    Promise.all([
-      getTerritories(),
-      getOutreachContacts(),
-      getVisits().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
-    ]).then(([territories, contacts, visitResult]) => {
-      setTerritoryList(territories);
-      setContactList(contacts);
-      setVisits(visitResult.ready ? visitResult.visits : []);
-      setSelected(territories[0] || null);
-    }).catch((err) => setLoadError(friendlyError(err, 'Outreach regions could not load. Please reopen this screen to try again.'))).finally(() => setLoadingMap(false));
-  }, [loadingAccess, access.canUseEvangelism]);
+    let cancelled = false;
+    loadAll()
+      .then(() => { if (!cancelled) setLoadError(null); })
+      .catch((err) => { if (!cancelled) setLoadError(friendlyError(err, 'The outreach regions could not load. Please try again.')); })
+      .finally(() => { if (!cancelled) setLoadingMap(false); });
+    return () => { cancelled = true; };
+  }, [loadingAccess, access.canUseEvangelism, loadAll]);
+
+  // Come back to this screen and it catches up quietly — a pin another worker
+  // dropped appears without a reload. The first focus is skipped because the
+  // load above is already running, and nothing here blocks what is on screen.
+  const firstFocus = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) { firstFocus.current = false; return; }
+      if (loadingAccess || !access.canUseEvangelism) return;
+      loadAll()
+        .then(() => setLoadError(null))
+        .catch((err) => setLoadError(friendlyError(err, 'The outreach regions could not refresh just now. Pull down to try again.')));
+    }, [loadingAccess, access.canUseEvangelism, loadAll])
+  );
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    loadAll()
+      .then(() => setLoadError(null))
+      .catch((err) => setLoadError(friendlyError(err, 'The outreach regions could not load. Please try again.')))
+      .finally(() => setRefreshing(false));
+  }, [loadAll]);
 
   // What actually happened in each region, so a stored label can never claim
   // progress nobody made. Recomputed only when the underlying records change.
@@ -87,6 +189,10 @@ export default function MapsWebScreen() {
     if (!selected) return [];
     return contactList.filter((contact) => contact.territoryId === selected.id || children.some((territory) => territory.id === contact.territoryId));
   }, [children, contactList, selected]);
+  const relatedVisits = useMemo(() => {
+    if (!selected) return [];
+    return visits.filter((visit) => visit.territoryId === selected.id || children.some((territory) => territory.id === visit.territoryId));
+  }, [children, visits, selected]);
   const dueToday = contactList.filter((contact) => contact.nextFollowUpAt && isTodayOrOverdue(contact.nextFollowUpAt));
   const overdue = contactList.filter((contact) => contact.nextFollowUpAt && new Date(contact.nextFollowUpAt) < startOfToday());
 
@@ -102,13 +208,15 @@ export default function MapsWebScreen() {
       territory.streetNames?.some((street) => street.toLowerCase().includes(needle))
     );
     if (found) focusTerritory(found);
-    else Alert.alert('No territory found', 'Try a country, city, neighborhood, street, or landmark name.');
+    else Alert.alert('No region found', 'Try a country, city, neighborhood, street, or landmark name.');
   }
 
   async function addRecord() {
-    if (!selected) return;
+    if (!selected || saving) return;
     if (!record.name.trim()) return Alert.alert('Name needed', 'Add a person or household name before saving.');
+    setSaving(true);
     try {
+      const status = record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made';
       const saved = await saveOutreachContact({
         territoryId: selected.id,
         name: record.name,
@@ -126,7 +234,7 @@ export default function MapsWebScreen() {
         assignedTo: record.assignedTo,
         nextFollowUpAt: record.nextFollowUpAt,
         notes: record.notes,
-        status: record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made'
+        status
       });
       setContactList((current) => [
         {
@@ -147,21 +255,25 @@ export default function MapsWebScreen() {
           assignedTo: record.assignedTo,
           nextFollowUpAt: record.nextFollowUpAt,
           notes: record.notes,
-          status: record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made',
+          status,
           createdBy: 'You',
+          createdAt: new Date().toISOString(),
           statusHistory: [{ status: 'contact_made', at: new Date().toISOString(), by: 'You' }]
         },
         ...current
       ]);
       setRecord((current) => ({ ...current, name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', notes: '' }));
-      Alert.alert('Outreach record saved', 'The follow-up record is now attached to this territory.');
+      Alert.alert('Saved', 'The follow-up record is now attached to this region.');
     } catch (err) {
-      Alert.alert('Record not saved', friendlyError(err, 'Your account may need evangelism permission before saving outreach records.'));
+      Alert.alert('Not saved', friendlyError(err, 'Your account may need evangelism permission before saving outreach records.'));
+    } finally {
+      setSaving(false);
     }
   }
 
   async function saveMetricOverrides() {
-    if (!selected) return;
+    if (!selected || saving) return;
+    setSaving(true);
     try {
       await updateTerritoryMetrics(selected.id, {
         reached: metricEdits.reached ? Number(metricEdits.reached) : undefined,
@@ -180,170 +292,322 @@ export default function MapsWebScreen() {
         }
       } : current);
       setMetricEdits({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
-      Alert.alert('Territory data updated', 'Super admin changes were saved to Supabase.');
+      Alert.alert('Numbers updated', `The corrected numbers for ${selected.name} are saved, and everyone on the team sees them.`);
     } catch (err) {
-      Alert.alert('Metrics not updated', friendlyError(err, 'Only approved admins can update territory metrics.'));
+      Alert.alert('Not updated', friendlyError(err, 'Only approved admins can change region numbers.'));
+    } finally {
+      setSaving(false);
     }
+  }
+
+  if (loadingAccess) {
+    return (
+      <Screen scroll={false} style={styles.page}>
+        <View style={styles.center}><ActivityIndicator color={theme.colors.accent} /></View>
+      </Screen>
+    );
   }
 
   if (!access.canUseEvangelism) {
     return (
-      <Screen>
-        <EvangelismBackButton onPress={goBack} />
-        <AppHeader title="Evangelism" subtitle="Leader access required." showMenu />
-        <Card>
-          <Text style={styles.title}>Leader Area</Text>
-          <Text style={styles.body}>Evangelism maps, follow-up records, and territory reports are visible to leaders and super admins only.</Text>
-        </Card>
+      <Screen scroll={false} style={styles.page}>
+        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+          <BackRow theme={theme} onPress={goBack} />
+          <AppHeader title="Evangelism Map" subtitle="Leader access required." />
+          <View style={styles.card}>
+            <Text style={styles.title}>Leaders only</Text>
+            <Text style={styles.body}>The evangelism map, follow-up records and region reports are for outreach leaders. Ask an admin to switch it on for you.</Text>
+          </View>
+        </ScrollView>
       </Screen>
     );
   }
 
   if (!selected) {
-    return <Screen><EvangelismBackButton onPress={goBack} /><AppHeader title="Evangelism Map" /><Card><Text style={styles.body}>{loadingMap ? 'Loading territories…' : loadError || 'No outreach regions are available yet.'}</Text></Card></Screen>;
+    return (
+      <Screen scroll={false} style={styles.page}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          showsVerticalScrollIndicator={false}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.colors.accent} colors={[theme.colors.accent]} progressBackgroundColor={theme.dark ? theme.colors.pageBottom : theme.colors.surfaceRaised} />}
+        >
+          <BackRow theme={theme} onPress={goBack} />
+          <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." />
+          <View style={styles.card}>
+            <View style={styles.quietRow}>
+              {loadingMap ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name="map-outline" size={22} color={theme.colors.accent} />}
+              <Text style={styles.body}>
+                {loadingMap
+                  ? 'Finding your outreach regions…'
+                  : loadError || 'No outreach regions are set up yet. Once a leader adds one, it will show here.'}
+              </Text>
+            </View>
+            {!loadingMap ? <PrimaryButton label="Try again" onPress={onRefresh} /> : null}
+          </View>
+        </ScrollView>
+      </Screen>
+    );
   }
 
+  const selectedStatus = statusOf(selected);
+  const selectedShade = shadeFor(selectedStatus);
+  const selectedInk = inkFor(selectedStatus, theme);
+
   return (
-    <Screen>
-      <EvangelismBackButton onPress={goBack} />
-      <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." showMenu />
-      <View style={styles.searchRow}>
-        <TextInput value={query} onChangeText={setQuery} placeholder="Search address, city, neighborhood, street, landmark" placeholderTextColor={colors.slate} style={styles.searchInput} onSubmitEditing={runSearch} />
-        <PrimaryButton label="Search" onPress={runSearch} variant="outline" />
-      </View>
+    <Screen scroll={false} style={styles.page}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={theme.colors.accent} colors={[theme.colors.accent]} progressBackgroundColor={theme.dark ? theme.colors.pageBottom : theme.colors.surfaceRaised} />}
+      >
+        <BackRow theme={theme} onPress={goBack} />
+        <AppHeader title="Evangelism Map" subtitle="Go. Preach. Disciple. Repeat." />
 
-      <View style={styles.layout}>
-        <Card style={styles.mapCard}>
-          <Text style={styles.kicker}>TERRITORY VIEW</Text>
-          <Text style={styles.mapTitle}>{selected.name}</Text>
-          <Text style={styles.mapSub}>{selected.level} • {statusOf(selected).label}</Text>
-          <View style={styles.mapCanvas}>
-            {[selected, ...children].slice(0, 8).map((territory, index) => (
+        {loadError ? (
+          <View style={[styles.card, styles.noticeCard]}>
+            <Ionicons name="alert-circle-outline" size={20} color={theme.colors.warning} />
+            <Text style={styles.noticeText}>{loadError}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.searchRow}>
+          <View style={styles.searchField}>
+            <Ionicons name="search" size={16} color={theme.colors.textMuted} />
+            <TextInput
+              accessibilityLabel="Find a region or street"
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Find a region, street or landmark"
+              placeholderTextColor={theme.colors.textMuted}
+              style={styles.searchInput}
+              onSubmitEditing={runSearch}
+              returnKeyType="search"
+            />
+          </View>
+          <PrimaryButton label="Search" variant="outline" onPress={runSearch} />
+        </View>
+
+        <View style={styles.layout}>
+          <View style={[styles.card, styles.mapCard]}>
+            <Text style={styles.kicker}>REGION VIEW</Text>
+            <Text style={styles.mapTitle}>{selected.name}</Text>
+            <View style={styles.statusRow}>
+              <View style={[styles.statusChip, { borderColor: selectedInk }]}>
+                <View style={[styles.dot, { backgroundColor: selectedShade }]} />
+                <Text style={[styles.statusChipText, { color: selectedInk }]}>{selectedStatus.label}</Text>
+              </View>
+              <Text style={styles.levelText}>{selected.level}</Text>
+            </View>
+            <View style={styles.mapCanvas}>
+              {[selected, ...children].slice(0, 8).map((territory, index) => {
+                const shade = shadeFor(statusOf(territory));
+                const active = territory.id === selected.id;
+                return (
+                  <Pressable
+                    key={territory.id}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${territory.name} — ${statusOf(territory).label}`}
+                    accessibilityState={{ selected: active }}
+                    onPress={() => focusTerritory(territory)}
+                    style={[
+                      styles.mapMarker,
+                      active && styles.mapMarkerOn,
+                      {
+                        borderColor: shade,
+                        left: `${10 + ((index * 29) % 66)}%`,
+                        top: `${14 + ((index * 23) % 58)}%`
+                      }
+                    ]}
+                  >
+                    <View style={[styles.dot, { backgroundColor: shade }]} />
+                    <Text numberOfLines={1} style={styles.markerText}>{territory.name}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <Text style={styles.webNote}>The live map with real outlines, my-location and visit pins is in the phone app. This browser view keeps your regions, records and follow-ups in front of you on a big screen.</Text>
+          </View>
+
+          <View style={styles.side}>
+            <View style={styles.card}>
+              <Text style={styles.kicker}>{selected.level.toUpperCase()}</Text>
+              <Text style={styles.title}>{selected.name}</Text>
+              <View style={styles.stats}>
+                <Stat theme={theme} label="Reached" value={selected.metrics.peopleReached} />
+                <Stat theme={theme} label="Saved" value={selected.metrics.soulsSaved} tone={theme.colors.success} />
+                <Stat theme={theme} label="Prayer" value={selected.metrics.prayerRequests} />
+                <Stat theme={theme} label="Due" value={selected.metrics.followUpsDue} tone={theme.colors.warning} />
+              </View>
+              <View style={styles.stats}>
+                <Stat theme={theme} label="Studies" value={selected.metrics.bibleStudiesActive} />
+                <Stat theme={theme} label="Discipleship" value={selected.metrics.discipleshipProgress} suffix="%" />
+                <Stat theme={theme} label="Covered" value={selected.metrics.coveredStreets} />
+                <Stat theme={theme} label="Untapped" value={selected.metrics.untappedTerritory} />
+              </View>
+              {selectedStatus.lastActivityAt
+                ? <Text style={styles.metaLine}>Last activity {timeAgo(selectedStatus.lastActivityAt)}</Text>
+                : <Text style={styles.metaLine}>Nothing has been logged here yet, so this region is shown as quiet rather than in progress.</Text>}
+            </View>
+
+            {children.length ? (
+              <>
+                <Text style={styles.section}>Inside {selected.name}</Text>
+                <View style={styles.chips}>
+                  {children.map((territory) => {
+                    const shade = shadeFor(statusOf(territory));
+                    return (
+                      <Pressable
+                        key={territory.id}
+                        accessibilityRole="button"
+                        accessibilityLabel={`${territory.name} — ${statusOf(territory).label}`}
+                        onPress={() => focusTerritory(territory)}
+                        style={[styles.chip, { borderColor: inkFor(statusOf(territory), theme) }]}
+                      >
+                        <View style={[styles.dot, { backgroundColor: shade }]} />
+                        <View style={styles.chipTextBlock}>
+                          <Text style={styles.chipText}>{territory.name}</Text>
+                          <Text style={styles.chipSub}>{territory.level} • {statusOf(territory).label}</Text>
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            ) : null}
+
+            {selected.parentId ? (
               <Pressable
-                key={territory.id}
-                onPress={() => focusTerritory(territory)}
-                style={[
-                  styles.mapMarker,
-                  {
-                    borderColor: shadeFor(statusOf(territory)),
-                    left: `${12 + ((index * 29) % 70)}%`,
-                    top: `${18 + ((index * 23) % 58)}%`
-                  }
-                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Zoom out to the region above"
+                onPress={() => { const parent = territoryList.find((t) => t.id === selected.parentId); if (parent) focusTerritory(parent); }}
+                style={styles.upLink}
               >
-                <View style={[styles.markerDot, { backgroundColor: shadeFor(statusOf(territory)) }]} />
-                <Text style={styles.markerText}>{territory.name}</Text>
+                <Ionicons name="arrow-up-circle-outline" size={18} color={theme.colors.accent} />
+                <Text style={styles.upLinkText}>Zoom out to {territoryList.find((t) => t.id === selected.parentId)?.name || 'the region above'}</Text>
               </Pressable>
-            ))}
+            ) : null}
+
+            {selected.streetNames?.length ? (
+              <View style={styles.streetList}>
+                {selected.streetNames.map((street) => <Text key={street} style={styles.streetName}>{street}</Text>)}
+              </View>
+            ) : null}
           </View>
-          <Text style={styles.webNote}>Interactive native maps are available in the iOS and Android app. This browser view keeps outreach records, drill-down, and follow-up tools working on localhost.</Text>
-        </Card>
+        </View>
 
-        <View style={styles.side}>
-          <Card>
-            <Text style={styles.kicker}>{selected.level.toUpperCase()}</Text>
-            <Text style={styles.title}>{selected.name}</Text>
-            <View style={styles.stats}>
-              <Stat label="Reached" value={selected.metrics.peopleReached} />
-              <Stat label="Saved" value={selected.metrics.soulsSaved} />
-              <Stat label="Prayer" value={selected.metrics.prayerRequests} />
-              <Stat label="Due" value={selected.metrics.followUpsDue} />
-            </View>
-            <View style={styles.stats}>
-              <Stat label="Studies" value={selected.metrics.bibleStudiesActive} />
-              <Stat label="Discipleship" value={selected.metrics.discipleshipProgress} suffix="%" />
-              <Stat label="Covered" value={selected.metrics.coveredStreets} />
-              <Stat label="Untapped" value={selected.metrics.untappedTerritory} />
-            </View>
-          </Card>
+        <Text style={styles.section}>Follow-ups at a glance</Text>
+        <View style={styles.stats}>
+          <Stat theme={theme} label="All" value={contactList.length} />
+          <Stat theme={theme} label="Today" value={dueToday.length} />
+          <Stat theme={theme} label="Overdue" value={overdue.length} tone={theme.colors.danger} />
+          <Stat theme={theme} label="Done" value={contactList.filter((contact) => !contact.followUpNeeded).length} tone={theme.colors.success} />
+        </View>
 
-          <Text style={styles.section}>{children.length ? 'Drill Down' : 'Street-Level Territory'}</Text>
-          <View style={styles.chips}>
-            {children.map((territory) => (
-              <Pressable key={territory.id} onPress={() => focusTerritory(territory)} style={[styles.chip, { borderColor: shadeFor(statusOf(territory)) }]}>
-                <Text style={styles.chipText}>{territory.name}</Text>
-                <Text style={styles.chipSub}>{territory.level} • {statusOf(territory).label}</Text>
+        <Text style={styles.section}>Visits logged here</Text>
+        {visitsNote ? <Text style={styles.empty}>{visitsNote}</Text> : null}
+        {!visitsNote && !relatedVisits.length ? <Text style={styles.empty}>No visits logged here yet. The team drops these from the phone app while they are out.</Text> : null}
+        {relatedVisits.slice(0, 12).map((visit) => (
+          <View key={visit.id} style={[styles.card, styles.rowCard]}>
+            <View style={styles.visitIcon}><Ionicons name="home" size={13} color={theme.colors.textOnBrand} /></View>
+            <View style={styles.rowBody}>
+              <Text style={styles.rowTitle}>{visit.placeLabel}</Text>
+              <Text style={styles.rowSub}>{visit.unitNumber ? `Unit ${visit.unitNumber} • ` : ''}{visit.authorName} • {timeAgo(visit.visitedAt)}</Text>
+              {visit.notes ? <Text style={styles.body}>{visit.notes}</Text> : null}
+            </View>
+          </View>
+        ))}
+
+        {access.canOverrideLeaderData ? (
+          <>
+            <Text style={styles.section}>Correct the numbers</Text>
+            <View style={[styles.card, styles.form]}>
+              <Text style={styles.body}>Fix the numbers leaders entered for {selected.name}. Leave a box empty to keep what is there.</Text>
+              <TextInput accessibilityLabel="People reached" style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((current) => ({ ...current, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={theme.colors.textMuted} />
+              <TextInput accessibilityLabel="Souls saved" style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((current) => ({ ...current, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={theme.colors.textMuted} />
+              <TextInput accessibilityLabel="Prayer requests" style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((current) => ({ ...current, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={theme.colors.textMuted} />
+              <TextInput accessibilityLabel="Follow-ups due" style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((current) => ({ ...current, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={theme.colors.textMuted} />
+              <Pressable accessibilityRole="button" accessibilityLabel="Save these corrections" disabled={saving} onPress={saveMetricOverrides} style={[styles.goldButton, saving && styles.buttonBusy]}>
+                {saving ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
+                <Text style={styles.goldButtonText}>{saving ? 'Saving…' : 'Save these corrections'}</Text>
               </Pressable>
-            ))}
-          </View>
-          {selected.streetNames?.length ? (
-            <View style={styles.streetList}>
-              {selected.streetNames.map((street) => <Text key={street} style={styles.streetName}>{street}</Text>)}
             </View>
-          ) : null}
+          </>
+        ) : null}
+
+        <Text style={styles.section}>Outreach records</Text>
+        {recordsNote ? <Text style={styles.empty}>{recordsNote}</Text> : null}
+        {!recordsNote && !relatedContacts.length ? <Text style={styles.empty}>No records here yet. Add the first one below.</Text> : null}
+        {relatedContacts.map((contact) => (
+          <View key={contact.id} style={[styles.card, styles.rowCard]}>
+            <View style={[styles.dot, styles.rowDot, { backgroundColor: contact.followUpNeeded ? colors.purple : colors.green }]} />
+            <View style={styles.rowBody}>
+              <Text style={styles.rowTitle}>{contact.name}</Text>
+              <Text style={styles.rowSub}>{contact.status.replace('_', ' ')} • {contact.nextFollowUpAt ? `Next follow-up ${contact.nextFollowUpAt}` : 'No follow-up set'}</Text>
+              <Text style={styles.body}>{contact.prayerRequest || 'No prayer request written down.'}</Text>
+            </View>
+          </View>
+        ))}
+
+        <Text style={styles.section}>Add an outreach record</Text>
+        <View style={[styles.card, styles.form]}>
+          <TextInput accessibilityLabel="Person or household name" style={styles.input} value={record.name} onChangeText={(name) => setRecord((current) => ({ ...current, name }))} placeholder="Person or household name" placeholderTextColor={theme.colors.textMuted} />
+          <TextInput accessibilityLabel="Phone number" style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((current) => ({ ...current, phone }))} placeholder="Phone" placeholderTextColor={theme.colors.textMuted} keyboardType="phone-pad" />
+          <TextInput accessibilityLabel="WhatsApp number" style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((current) => ({ ...current, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={theme.colors.textMuted} keyboardType="phone-pad" />
+          <TextInput accessibilityLabel="Email address, optional" style={styles.input} value={record.email} onChangeText={(email) => setRecord((current) => ({ ...current, email }))} placeholder="Email (optional)" placeholderTextColor={theme.colors.textMuted} autoCapitalize="none" />
+          <TextInput accessibilityLabel="Prayer request" style={[styles.input, styles.textArea]} value={record.prayerRequest} onChangeText={(prayerRequest) => setRecord((current) => ({ ...current, prayerRequest }))} placeholder="Prayer request" placeholderTextColor={theme.colors.textMuted} multiline />
+          <View style={styles.flagRow}>
+            <Flag theme={theme} label="Gospel shared" value={record.gospelShared} onPress={() => setRecord((current) => ({ ...current, gospelShared: !current.gospelShared }))} />
+            <Flag theme={theme} label="Invited" value={record.invitedToChurch} onPress={() => setRecord((current) => ({ ...current, invitedToChurch: !current.invitedToChurch }))} />
+            <Flag theme={theme} label="Bible study" value={record.bibleStudyStarted} onPress={() => setRecord((current) => ({ ...current, bibleStudyStarted: !current.bibleStudyStarted }))} />
+            <Flag theme={theme} label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((current) => ({ ...current, savedAcceptedChrist: !current.savedAcceptedChrist }))} />
+            <Flag theme={theme} label="Follow up" value={record.followUpNeeded} onPress={() => setRecord((current) => ({ ...current, followUpNeeded: !current.followUpNeeded }))} />
+          </View>
+          <TextInput accessibilityLabel="Assigned leader" style={styles.input} value={record.assignedTo} onChangeText={(assignedTo) => setRecord((current) => ({ ...current, assignedTo }))} placeholder="Assigned leader" placeholderTextColor={theme.colors.textMuted} />
+          <TextInput accessibilityLabel="Next follow-up date, year month day" style={styles.input} value={record.nextFollowUpAt} onChangeText={(nextFollowUpAt) => setRecord((current) => ({ ...current, nextFollowUpAt }))} placeholder="Next follow-up date YYYY-MM-DD" placeholderTextColor={theme.colors.textMuted} />
+          <TextInput accessibilityLabel="Notes" style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((current) => ({ ...current, notes }))} placeholder="Notes" placeholderTextColor={theme.colors.textMuted} multiline />
+          <Pressable accessibilityRole="button" accessibilityLabel="Save this record" disabled={saving} onPress={addRecord} style={[styles.goldButton, saving && styles.buttonBusy]}>
+            {saving ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
+            <Text style={styles.goldButtonText}>{saving ? 'Saving…' : 'Save this record'}</Text>
+          </Pressable>
         </View>
-      </View>
-
-      <Text style={styles.section}>Leader Follow-Up Dashboard</Text>
-      <View style={styles.stats}>
-        <Stat label="All" value={contactList.length} />
-        <Stat label="Today" value={dueToday.length} />
-        <Stat label="Overdue" value={overdue.length} />
-        <Stat label="Completed" value={contactList.filter((contact) => !contact.followUpNeeded).length} />
-      </View>
-
-      {access.canOverrideLeaderData ? (
-        <>
-          <Text style={styles.section}>Super Admin Data Override</Text>
-          <Card style={styles.form}>
-            <Text style={styles.body}>Correct territory data entered by leaders for {selected.name}.</Text>
-            <TextInput style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((current) => ({ ...current, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={colors.slate} />
-            <TextInput style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((current) => ({ ...current, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={colors.slate} />
-            <TextInput style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((current) => ({ ...current, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={colors.slate} />
-            <TextInput style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((current) => ({ ...current, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={colors.slate} />
-            <PrimaryButton label="Save Super Admin Corrections" variant="gold" onPress={saveMetricOverrides} />
-          </Card>
-        </>
-      ) : null}
-
-      <Text style={styles.section}>Outreach Records</Text>
-      {relatedContacts.map((contact) => (
-        <Card key={contact.id} style={styles.contact}>
-          <Text style={styles.contactName}>{contact.name}</Text>
-          <Text style={styles.contactSub}>{contact.status.replace('_', ' ')} • {contact.nextFollowUpAt ? `Next follow-up ${contact.nextFollowUpAt}` : 'No follow-up scheduled'}</Text>
-          <Text style={styles.body}>{contact.prayerRequest || 'No prayer request recorded.'}</Text>
-        </Card>
-      ))}
-
-      <Text style={styles.section}>Add Outreach Record</Text>
-      <Card style={styles.form}>
-        <TextInput style={styles.input} value={record.name} onChangeText={(name) => setRecord((current) => ({ ...current, name }))} placeholder="Person or household name" placeholderTextColor={colors.slate} />
-        <TextInput style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((current) => ({ ...current, phone }))} placeholder="Phone" placeholderTextColor={colors.slate} />
-        <TextInput style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((current) => ({ ...current, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={colors.slate} />
-        <TextInput style={styles.input} value={record.email} onChangeText={(email) => setRecord((current) => ({ ...current, email }))} placeholder="Email optional" placeholderTextColor={colors.slate} />
-        <TextInput style={[styles.input, styles.textArea]} value={record.prayerRequest} onChangeText={(prayerRequest) => setRecord((current) => ({ ...current, prayerRequest }))} placeholder="Prayer request" placeholderTextColor={colors.slate} multiline />
-        <View style={styles.flagRow}>
-          <Flag label="Gospel" value={record.gospelShared} onPress={() => setRecord((current) => ({ ...current, gospelShared: !current.gospelShared }))} />
-          <Flag label="Invited" value={record.invitedToChurch} onPress={() => setRecord((current) => ({ ...current, invitedToChurch: !current.invitedToChurch }))} />
-          <Flag label="Bible Study" value={record.bibleStudyStarted} onPress={() => setRecord((current) => ({ ...current, bibleStudyStarted: !current.bibleStudyStarted }))} />
-          <Flag label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((current) => ({ ...current, savedAcceptedChrist: !current.savedAcceptedChrist }))} />
-        </View>
-        <TextInput style={styles.input} value={record.assignedTo} onChangeText={(assignedTo) => setRecord((current) => ({ ...current, assignedTo }))} placeholder="Assigned leader" placeholderTextColor={colors.slate} />
-        <TextInput style={styles.input} value={record.nextFollowUpAt} onChangeText={(nextFollowUpAt) => setRecord((current) => ({ ...current, nextFollowUpAt }))} placeholder="Next follow-up date YYYY-MM-DD" placeholderTextColor={colors.slate} />
-        <TextInput style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((current) => ({ ...current, notes }))} placeholder="Notes" placeholderTextColor={colors.slate} multiline />
-        <PrimaryButton label="Save Outreach Record" variant="gold" onPress={addRecord} />
-      </Card>
+      </ScrollView>
     </Screen>
   );
 }
 
-function Stat({ label, value, suffix = '' }: { label: string; value: number; suffix?: string }) {
-  return <View style={styles.stat}><Text style={styles.statValue}>{value.toLocaleString()}{suffix}</Text><Text style={styles.statLabel}>{label}</Text></View>;
-}
-
-function Flag({ label, value, onPress }: { label: string; value: boolean; onPress: () => void }) {
+function BackRow({ theme, onPress }: { theme: AppTheme; onPress: () => void }) {
+  const styles = useStyles(theme);
   return (
-    <Pressable onPress={onPress} style={[styles.flag, value && styles.flagActive]}>
-      <Text style={[styles.flagText, value && styles.flagTextActive]}>{label}</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={onPress} style={styles.backButton}>
+      <Ionicons name="chevron-back" size={22} color={theme.colors.textPrimary} />
+      <Text style={styles.backText}>Back</Text>
     </Pressable>
   );
 }
 
-function EvangelismBackButton({ onPress }: { onPress: () => void }) {
+function Stat({ theme, label, value, suffix = '', tone }: { theme: AppTheme; label: string; value: number; suffix?: string; tone?: string }) {
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel="Back to More" onPress={onPress} style={styles.backButton}>
-      <Ionicons name="chevron-back" size={22} color={colors.royalBlue} />
-      <Text style={styles.backText}>Back</Text>
+    <View style={styles.stat}>
+      <Text style={[styles.statValue, tone ? { color: tone } : null]}>{value.toLocaleString()}{suffix}</Text>
+      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function Flag({ theme, label, value, onPress }: { theme: AppTheme; label: string; value: boolean; onPress: () => void }) {
+  const styles = useStyles(theme);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ selected: value }}
+      onPress={onPress}
+      style={[styles.flag, value && styles.flagActive]}
+    >
+      <Ionicons name={value ? 'checkmark-circle' : 'ellipse-outline'} size={16} color={value ? theme.colors.textOnAccent : theme.colors.textMuted} />
+      <Text style={[styles.flagText, value && styles.flagTextActive]}>{label}</Text>
     </Pressable>
   );
 }
@@ -361,44 +625,82 @@ function isTodayOrOverdue(value: string) {
   return date < tomorrow;
 }
 
-const styles = StyleSheet.create({
-  backButton: { alignSelf: 'flex-start', minHeight: 42, borderRadius: 999, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 13, marginBottom: 10, flexDirection: 'row', alignItems: 'center', gap: 4 },
-  backText: { color: colors.royalBlue, fontWeight: '900' },
-  searchRow: { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  searchInput: { flex: 1, borderWidth: 1, borderColor: colors.line, borderRadius: 8, paddingHorizontal: 12, color: '#111827', minHeight: 44 },
-  layout: { flexDirection: 'row', gap: 12, alignItems: 'stretch' },
-  mapCard: { flex: 1.2, minHeight: 420 },
-  side: { flex: 1, gap: 8 },
-  kicker: { color: colors.gold, fontWeight: '800', fontSize: 12 },
-  title: { color: colors.royalBlue, fontSize: 22, fontWeight: '800' },
-  mapTitle: { color: colors.royalBlue, fontSize: 26, fontWeight: '900', marginTop: 6 },
-  mapSub: { color: colors.slate, marginTop: 4, fontWeight: '700' },
-  mapCanvas: { flex: 1, minHeight: 295, marginTop: 14, borderRadius: 8, overflow: 'hidden', backgroundColor: '#EAF2FF', borderWidth: 1, borderColor: colors.line, position: 'relative' },
-  mapMarker: { position: 'absolute', maxWidth: 155, borderWidth: 1.5, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 7, backgroundColor: colors.white, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  markerDot: { width: 10, height: 10, borderRadius: 999 },
-  markerText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
-  webNote: { color: colors.slate, fontSize: 12, lineHeight: 18, marginTop: 10 },
+const useStyles = createThemedStyles((t) => StyleSheet.create({
+  page: { backgroundColor: t.colors.page },
+  scroll: { padding: 18, paddingBottom: 104, gap: 4 },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
+  backButton: { alignSelf: 'flex-start', minHeight: 48, borderRadius: t.radius.pill, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.borderStrong, paddingHorizontal: 16, marginBottom: 12, flexDirection: 'row', alignItems: 'center', gap: 4, ...t.elevation.low },
+  backText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+
+  card: { backgroundColor: t.colors.surface, borderColor: t.colors.border, borderWidth: 1, borderRadius: t.radius.lg, padding: 16, ...t.elevation.medium },
+  noticeCard: { flexDirection: 'row', alignItems: 'center', gap: 10, borderColor: t.colors.warning, backgroundColor: t.colors.warningMuted, marginBottom: 12 },
+  noticeText: { flex: 1, color: t.colors.textPrimary, fontWeight: '700', fontSize: t.type.meta },
+  quietRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
+
+  searchRow: { flexDirection: 'row', gap: 8, marginBottom: 14, alignItems: 'center' },
+  searchField: { flex: 1, minHeight: 48, borderRadius: t.radius.pill, backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.border, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14 },
+  searchInput: { flex: 1, color: t.colors.textPrimary, fontWeight: '700', fontSize: t.type.body, minHeight: 48 },
+
+  layout: { flexDirection: 'row', gap: 12, alignItems: 'stretch', flexWrap: 'wrap' },
+  mapCard: { flex: 1.2, minWidth: 320, minHeight: 420 },
+  side: { flex: 1, minWidth: 280, gap: 10 },
+
+  kicker: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.overline, letterSpacing: 0.8 },
+  title: { color: t.colors.textPrimary, fontSize: t.type.sectionTitle, fontWeight: '900', marginTop: 4 },
+  mapTitle: { color: t.colors.textPrimary, fontSize: 26, fontWeight: '900', marginTop: 6 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 8 },
+  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 6, borderRadius: t.radius.pill, borderWidth: 1.5, flexShrink: 1 },
+  statusChipText: { fontWeight: '900', fontSize: t.type.meta },
+  levelText: { color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6 },
+
+  mapCanvas: { flex: 1, minHeight: 295, marginTop: 14, borderRadius: t.radius.md, overflow: 'hidden', backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.border, position: 'relative' },
+  mapMarker: { position: 'absolute', maxWidth: 170, minHeight: 48, borderWidth: 1.5, borderRadius: t.radius.md, paddingHorizontal: 16, backgroundColor: t.colors.surfaceRaised, flexDirection: 'row', alignItems: 'center', gap: 8, ...t.elevation.low },
+  mapMarkerOn: { borderWidth: 2.5 },
+  markerText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta, maxWidth: 120 },
+  webNote: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 19, marginTop: 12 },
+
+  dot: { width: 10, height: 10, borderRadius: 5 },
   stats: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  stat: { flex: 1, backgroundColor: '#F8FAFC', borderRadius: 8, padding: 8, alignItems: 'center', minWidth: 72 },
-  statValue: { color: colors.royalBlue, fontWeight: '800' },
-  statLabel: { color: colors.slate, fontSize: 10, textAlign: 'center' },
-  section: { color: colors.royalBlue, fontWeight: '800', marginBottom: 8, marginTop: 16 },
+  stat: { flex: 1, backgroundColor: t.colors.surfaceSunken, borderRadius: t.radius.md, paddingVertical: 10, paddingHorizontal: 6, alignItems: 'center', minWidth: 72 },
+  statValue: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 18 },
+  statLabel: { color: t.colors.textMuted, fontSize: t.type.overline, fontWeight: '800', textAlign: 'center', marginTop: 2 },
+  metaLine: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 10, lineHeight: 18 },
+
+  section: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle, marginBottom: 8, marginTop: 20 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
-  chip: { borderWidth: 1.5, borderRadius: 999, paddingHorizontal: 12, paddingVertical: 8 },
-  chipText: { color: colors.royalBlue, fontWeight: '700' },
-  chipSub: { color: colors.slate, fontSize: 10 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, borderWidth: 1.5, borderRadius: t.radius.lg, paddingHorizontal: 16, backgroundColor: t.colors.surface, ...t.elevation.low },
+  chipTextBlock: { gap: 1 },
+  chipText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+  chipSub: { color: t.colors.textMuted, fontSize: t.type.overline },
+
+  upLink: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, paddingHorizontal: 16 },
+  upLinkText: { color: t.colors.accent, fontWeight: '800', fontSize: t.type.meta },
+
   streetList: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  streetName: { backgroundColor: colors.cream, color: colors.royalBlue, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6, fontWeight: '700' },
-  contact: { padding: 10, marginBottom: 8 },
-  contactName: { color: colors.royalBlue, fontWeight: '800' },
-  contactSub: { color: colors.slate, marginTop: 3, marginBottom: 6 },
-  body: { color: '#111827', lineHeight: 21 },
+  streetName: { backgroundColor: t.colors.accentMuted, color: t.colors.accent, borderRadius: t.radius.pill, paddingHorizontal: 12, paddingVertical: 7, fontWeight: '800', fontSize: t.type.meta, overflow: 'hidden' },
+
+  rowCard: { flexDirection: 'row', gap: 12, padding: 14, marginBottom: 8, alignItems: 'flex-start' },
+  rowDot: { marginTop: 6 },
+  rowBody: { flex: 1, gap: 3 },
+  rowTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+  rowSub: { color: t.colors.textMuted, fontSize: t.type.meta },
+  visitIcon: { width: 26, height: 26, borderRadius: 13, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center' },
+
+  body: { color: t.colors.textSecondary, lineHeight: 21, fontSize: t.type.body },
+  empty: { color: t.colors.textMuted, paddingVertical: 8, lineHeight: 20, fontSize: t.type.body },
+
   form: { gap: 10, marginBottom: 36 },
-  input: { borderWidth: 1, borderColor: colors.line, borderRadius: 8, padding: 12, color: '#111827' },
-  textArea: { minHeight: 76, textAlignVertical: 'top' },
+  input: { minHeight: 48, borderWidth: 1, borderColor: t.colors.border, borderRadius: t.radius.md, paddingHorizontal: 12, color: t.colors.textPrimary, backgroundColor: t.colors.surfaceSunken, fontSize: t.type.body },
+  textArea: { minHeight: 80, paddingTop: 12, textAlignVertical: 'top' },
+
   flagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  flag: { borderWidth: 1, borderColor: colors.line, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 8 },
-  flagActive: { backgroundColor: colors.royalBlue, borderColor: colors.royalBlue },
-  flagText: { color: colors.royalBlue, fontWeight: '700', fontSize: 12 },
-  flagTextActive: { color: colors.white }
-});
+  flag: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, borderWidth: 1, borderColor: t.colors.border, borderRadius: t.radius.pill, paddingHorizontal: 16, backgroundColor: t.colors.surfaceSunken },
+  flagActive: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+  flagText: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.meta },
+  flagTextActive: { color: t.colors.textOnAccent },
+
+  goldButton: { flexDirection: 'row', gap: 8, minHeight: 48, borderRadius: t.radius.md, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 },
+  goldButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+  buttonBusy: { opacity: 0.75 },
+}));

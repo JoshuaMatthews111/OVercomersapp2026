@@ -938,3 +938,69 @@ test('a baseline written for the whole repository can be read back', () => {
     assert.ok(w.file && typeof w.allow === 'number' && w.allow > 0);
   }
 });
+
+// ── Regression tests, added 2026-09-18 ───────────────────────────────────────
+//
+// Both of these detectors were WRONG in a way that blocked a release for work
+// that was already done. A gate that cries wolf gets switched off, so each
+// bug gets a test that fails if it ever comes back.
+
+test('a real in-app account deletion is SEEN — the name lives inside a string', () => {
+  // The first version of this detector searched `masked` source, where the
+  // inside of every string literal is blanked. The pattern it used needs
+  // characters BETWEEN two quotes, so it could never match. The gate said
+  // "no way to delete your account" while the call sat in the file.
+  const g = gate({
+    'app/(tabs)/welcome.tsx': `${SCREEN_HEAD}
+export default function W() { const go = () => supabase.auth.signUp({ email: 'a', password: 'b' }); return <Pressable accessibilityLabel="Join" onPress={go}><Text>Join</Text></Pressable>; }
+`,
+    'app/(tabs)/profile.tsx': `${SCREEN_HEAD}
+export default function P() {
+  const remove = async () => { await supabase.functions.invoke('delete-account', { body: {} }); };
+  return <Pressable accessibilityLabel="Delete my account" onPress={remove}><Text>Delete my account</Text></Pressable>;
+}
+`,
+  });
+  assert.equal(g.fires('OGN-IOS-011'), false, 'deletion IS in the app and the gate must see it');
+  assert.equal(g.fires('AND-PLAY-02'), false, 'the Play rule uses the same detector');
+});
+
+test('an app with no deletion anywhere is still caught', () => {
+  const g = gate({
+    'app/(tabs)/welcome.tsx': `${SCREEN_HEAD}
+export default function W() { const go = () => supabase.auth.signUp({ email: 'a', password: 'b' }); return <Pressable accessibilityLabel="Join" onPress={go}><Text>Join</Text></Pressable>; }
+`,
+  });
+  assert.equal(g.fires('OGN-IOS-011'), true, 'no deletion path at all must still fail');
+});
+
+test('declaring the upload function is not the same as calling it', () => {
+  // The first version flagged lib/uploadService.ts itself, because the regex
+  // matched `export async function uploadPickedAsset(` — the DECLARATION of
+  // the very function that carries the onProgress callback. A service file
+  // has no UI, so "add a progress bar here" was impossible advice.
+  const g = gate({
+    'lib/uploadService.ts': `
+export type UploadProgressHandler = (fraction: number) => void;
+export async function uploadPickedAsset(input: { onProgress?: UploadProgressHandler }) {
+  input.onProgress?.(0);
+  return { id: '1' };
+}
+`,
+  });
+  assert.equal(g.fires('UPLOAD-PROGRESS'), false, 'the declaration site is not a call site');
+});
+
+test('a screen that starts an upload and shows nothing is still caught', () => {
+  const g = gate({
+    'lib/uploadService.ts': "export async function uploadPickedAsset(i: { onProgress?: (n: number) => void }) { return { id: '1' }; }\n",
+    'app/(tabs)/post.tsx': `${SCREEN_HEAD}
+import { uploadPickedAsset } from '../../lib/uploadService';
+export default function Post() {
+  const send = async () => { await uploadPickedAsset({ asset: {} as any, bucketId: 'x', purpose: 'story' } as any); };
+  return <Pressable accessibilityLabel="Post" onPress={send}><Text>Post</Text></Pressable>;
+}
+`,
+  });
+  assert.equal(g.fires('UPLOAD-PROGRESS'), true, 'a screen with no bar must still fail');
+});

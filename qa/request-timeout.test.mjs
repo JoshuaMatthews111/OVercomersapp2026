@@ -6,7 +6,7 @@ import ts from 'typescript';
 // Compile the pure helper so this suite also runs on the cloud's Node 20.
 const source = readFileSync(new URL('../lib/requestTimeout.ts', import.meta.url), 'utf8');
 const js = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText;
-const { fetchWithTimeout } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
+const { fetchWithTimeout, supabaseFetchTimeoutMs, DEFAULT_TIMEOUT_MS } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
 
 test('successful requests preserve headers and response', async (t) => {
   const response = new Response('ok');
@@ -43,4 +43,19 @@ test('an already cancelled Request stays cancelled', async (t) => {
     throw new Error('cancelled');
   });
   await assert.rejects(fetchWithTimeout(new Request('https://example.com', { signal: caller.signal })), /cancelled/);
+});
+
+// Added 2026-09-18. An edge function does real work before it answers.
+// Account deletion walks about twenty tables and then removes the person's
+// files; at the everyday 15-second budget the call was aborted mid-way, which
+// leaves somebody half-deleted. That is the worst possible outcome.
+test('an edge function gets room to finish, with or without a body', () => {
+  const url = 'https://ljmzujrzdhwmvvapajlr.supabase.co/functions/v1/delete-account';
+  assert.ok(supabaseFetchTimeoutMs(url, { method: 'POST', body: '{}' }) >= 60_000);
+  assert.ok(supabaseFetchTimeoutMs(url, { method: 'POST' }) >= 60_000);
+});
+
+test('an ordinary table read still gets the short budget', () => {
+  const url = 'https://ljmzujrzdhwmvvapajlr.supabase.co/rest/v1/app_stories?select=id';
+  assert.equal(supabaseFetchTimeoutMs(url, { method: 'GET' }), DEFAULT_TIMEOUT_MS);
 });

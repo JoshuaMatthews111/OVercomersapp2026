@@ -1,4 +1,5 @@
 import { OutreachContact, Territory } from '../types/models';
+import { fetchWithTimeout } from './requestTimeout';
 import { supabase } from './supabase';
 
 import { hasSupabase } from './publicEnv';
@@ -11,7 +12,28 @@ export type LatLng = { latitude: number; longitude: number };
  * column when it exists; when it does not, it is simply undefined and the map
  * falls back to the activity it can see for itself (records and check-ins).
  */
-export type TerritoryWithActivity = Territory & { lastActivityAt?: string };
+export type TerritoryWithActivity = Territory & {
+  lastActivityAt?: string;
+  /**
+   * What the database itself worked out about this region, when it is able to
+   * tell us. It arrives as `derived_status` from the
+   * `territory_activity_status` view (or from `territories_geo()` once that
+   * function returns the column). Until that migration is applied the field is
+   * simply absent, and the app works out the status for itself from the
+   * records, visits and check-ins it can see. It is never used to claim
+   * progress on its own — see deriveTerritoryStatus.
+   */
+  serverStatus?: Territory['status'];
+};
+
+/** The six statuses a region can hold. Anything else from the server is ignored. */
+const KNOWN_STATUSES: Territory['status'][] = ['untapped', 'in_progress', 'covered', 'follow_up_due', 'new_believer', 'discipled'];
+
+function asKnownStatus(value: any): Territory['status'] | undefined {
+  return typeof value === 'string' && KNOWN_STATUSES.indexOf(value as Territory['status']) !== -1
+    ? (value as Territory['status'])
+    : undefined;
+}
 
 /**
  * An outreach record plus its timestamp. The timestamp is what lets the map
@@ -34,10 +56,11 @@ function mapTerritoryRow(row: any): TerritoryWithActivity {
     parentId: row.parent_id || undefined,
     name: row.name,
     level: row.level,
-    status: row.status,
+    status: asKnownStatus(row.status) || asKnownStatus(row.stored_status) || 'untapped',
     center: typeof row.center_lat === 'number' ? { latitude: row.center_lat, longitude: row.center_lng } : (extractPoint(row.center) || { latitude: 20, longitude: 0 }),
     boundary: ringsFromGeoJson(row.boundary),
     lastActivityAt: row.last_activity_at || undefined,
+    serverStatus: asKnownStatus(row.derived_status),
     reached: row.reached_count || 0,
     followUps: row.follow_up_count || 0,
     soulsSaved: row.souls_saved_count || 0,
@@ -83,7 +106,8 @@ export async function setTerritoryBoundary(territoryId: string, ring: LatLng[]) 
 // inside their fair-use rules for an app used by a few leaders.
 export async function fetchOutlineFromOpenStreetMap(name: string): Promise<LatLng[] | null> {
   const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&polygon_geojson=1&limit=1&q=${encodeURIComponent(name)}`;
-  const response = await fetch(url, { headers: { 'User-Agent': 'OvercomersGlobalNetworkApp/1.0 (evangelism map)', Accept: 'application/json' } });
+  // Bounded: a stalled outline lookup must never hold the button down forever.
+  const response = await fetchWithTimeout(url, { headers: { 'User-Agent': 'OvercomersGlobalNetworkApp/1.0 (evangelism map)', Accept: 'application/json' } }, 12_000);
   if (!response.ok) return null;
   const rows = await response.json();
   const geo = rows?.[0]?.geojson;
@@ -377,7 +401,7 @@ export type SaveVisitResult =
   | { ok: false; reason: 'not-switched-on' };
 
 export async function saveVisit(input: SaveVisitInput): Promise<SaveVisitResult> {
-  if (!hasSupabase) throw new Error('This app is not connected to its backend yet.');
+  if (!hasSupabase) throw new Error('This app cannot reach the ministry records right now. Please try again in a moment.');
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) throw new Error('Sign in before saving a visit.');
   const visitedAt = new Date().toISOString();
@@ -480,7 +504,15 @@ export function deriveTerritoryStatus(territory: TerritoryWithActivity, activity
     return { status: 'follow_up_due', basis: 'activity', label: BASE_LABEL.follow_up_due, lastActivityAt };
   }
   if (withinDays(lastActivityAt, ACTIVITY_WINDOW_DAYS)) {
+    // The database's own reading of this region is used here and ONLY here —
+    // where there is a dated piece of activity standing behind it. So it can
+    // sharpen "in progress" into "follow-up due", but it can never be the
+    // reason a region claims progress nobody made.
+    const fromServer = territory.serverStatus && territory.serverStatus !== 'untapped' ? territory.serverStatus : undefined;
     const fromChildrenOnly = !signals.ownActivity && (signals.activeChildCount || 0) > 0;
+    if (fromServer && fromServer !== 'in_progress') {
+      return { status: fromServer, basis: 'activity', label: BASE_LABEL[fromServer], lastActivityAt };
+    }
     const label = fromChildrenOnly
       ? `Active in ${signals.activeChildCount} ${signals.activeChildCount === 1 ? 'area' : 'areas'}`
       : BASE_LABEL.in_progress;
@@ -489,6 +521,9 @@ export function deriveTerritoryStatus(territory: TerritoryWithActivity, activity
   if (lastActivityAt) {
     return { status: stored, basis: 'dormant', label: `Quiet since ${monthYear(lastActivityAt)}`, lastActivityAt };
   }
+  // Nothing has happened here that we can see, and nothing dated says otherwise.
+  // A stored label alone never paints a whole state as busy: the map shows this
+  // one in neutral grey and says so plainly.
   return { status: stored, basis: 'no-data', label: 'No activity yet', lastActivityAt: undefined };
 }
 

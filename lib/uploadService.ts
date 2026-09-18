@@ -6,6 +6,7 @@ import { Platform } from 'react-native';
 import { hasSupabase, SUPABASE_ANON_KEY, SUPABASE_URL } from './publicEnv';
 import { supabase } from './supabase';
 import { UploadPurpose, recordUploadedFile } from './uploadAnalysis';
+import type { PreparedUpload } from './uploadBody';
 import {
   AVATAR_IMAGE_MAX_EDGE,
   CONTENT_IMAGE_MAX_EDGE,
@@ -54,13 +55,26 @@ export type AppUpload = {
   /** Pixel size of the image that was sent, when the file is an image. */
   width?: number;
   height?: number;
+  /**
+   * A plain sentence worth showing QUIETLY beside a SUCCESSFUL upload — the
+   * photo could not be made smaller, or the phone is short of memory. Usually
+   * undefined. Never an alert, and never an error: the file did go up.
+   */
+  notice?: string;
 };
 
 /** How hard to shrink a picked image before sending it. */
 export type ResizeMode = 'content' | 'avatar' | 'none';
 
-/** Beyond this size we never fall back to the in-memory path; it would stall the phone. */
-const IN_MEMORY_FALLBACK_LIMIT = 6 * 1024 * 1024;
+/**
+ * One quiet retry before giving up.
+ *
+ * A first attempt that fails for a reason we did not anticipate is usually a
+ * handshake that went wrong, not a file that cannot be sent. Retrying the
+ * STREAM is the right answer; the old code retried by loading the whole file
+ * into memory instead, which is the exact five-minute silence we removed.
+ */
+const STREAM_ATTEMPTS = 2;
 
 type ResolvedSession = { userId: string; accessToken: string };
 
@@ -159,7 +173,16 @@ export async function uploadFileToBucket(input: {
   assertWithinBucketLimit(input.bucketId, knownSize);
 
   if (Platform.OS === 'web') {
-    return uploadThroughSupabaseClient({ ...input, upsert, maxBytes: bucketSizeLimit(input.bucketId) });
+    return uploadFromBrowser({
+      uri: input.uri,
+      bucketId: input.bucketId,
+      objectPath: input.objectPath,
+      mimeType: input.mimeType,
+      upsert,
+      onProgress: input.onProgress,
+      signal: input.signal,
+      accessToken: input.accessToken,
+    });
   }
 
   const file = new File(input.uri);
@@ -168,80 +191,227 @@ export async function uploadFileToBucket(input: {
   assertWithinBucketLimit(input.bucketId, sizeBytes);
 
   const accessToken = input.accessToken || (await resolveSession()).accessToken;
-  const watchdog = createTransferWatchdog({ overallMs: uploadTimeoutMs(sizeBytes), signal: input.signal });
+
+  for (let attempt = 1; attempt <= STREAM_ATTEMPTS; attempt += 1) {
+    try {
+      return await streamFileOnce({
+        file,
+        bucketId: input.bucketId,
+        objectPath: input.objectPath,
+        mimeType: input.mimeType,
+        sizeBytes,
+        accessToken,
+        upsert,
+        onProgress: input.onProgress,
+        signal: input.signal,
+      });
+    } catch (error) {
+      // A message the person can read has already been chosen — a file too
+      // large, a session that expired, a connection that stalled. Repeating it
+      // would only make them wait twice for the same answer.
+      if (error instanceof UploadError) throw error;
+      if (attempt < STREAM_ATTEMPTS) {
+        // Message only — never the error object, which could echo request headers.
+        console.warn('Upload attempt did not complete, trying once more:', error instanceof Error ? error.message : 'unknown problem');
+        // Take the progress bar back to the start so it is honest about
+        // what is happening rather than sitting at a number it has left.
+        input.onProgress?.(0);
+        continue;
+      }
+      console.warn('Upload could not be completed:', error instanceof Error ? error.message : 'unknown problem');
+      throw new UploadError('That upload did not go through. Please check your connection and try again.', 'network');
+    }
+  }
+
+  throw new UploadError('That upload did not go through. Please check your connection and try again.', 'network');
+}
+
+/**
+ * One streamed attempt.
+ *
+ * expo-file-system hands the file URL to the native HTTP stack, which reads it
+ * off disk as it sends. Nothing enters the JavaScript heap, and the progress
+ * ticks are real bytes on the wire rather than a guess.
+ */
+async function streamFileOnce(input: {
+  file: File;
+  bucketId: string;
+  objectPath: string;
+  mimeType: string;
+  sizeBytes: number;
+  accessToken: string;
+  upsert: boolean;
+  onProgress?: UploadProgressHandler;
+  signal?: AbortSignal;
+}): Promise<{ objectPath: string; sizeBytes: number }> {
+  const watchdog = createTransferWatchdog({ overallMs: uploadTimeoutMs(input.sizeBytes), signal: input.signal });
   input.onProgress?.(0);
 
   try {
-    const result = await file.upload(storageObjectUrl(input.bucketId, input.objectPath), {
+    const result = await input.file.upload(storageObjectUrl(input.bucketId, input.objectPath), {
       httpMethod: 'POST',
       uploadType: UploadType.BINARY_CONTENT,
       // For a binary upload the native side sets no content type of its own,
       // so this header is the only thing telling Storage what it is receiving.
       headers: {
-        authorization: `Bearer ${accessToken}`,
+        authorization: `Bearer ${input.accessToken}`,
         apikey: SUPABASE_ANON_KEY,
         'content-type': input.mimeType,
         'cache-control': 'max-age=3600',
-        'x-upsert': String(upsert),
+        'x-upsert': String(input.upsert),
       },
       signal: watchdog.signal,
       onProgress: ({ bytesSent, totalBytes }) => {
         watchdog.touch();
-        const total = totalBytes > 0 ? totalBytes : sizeBytes;
+        const total = totalBytes > 0 ? totalBytes : input.sizeBytes;
         if (total > 0) input.onProgress?.(clampFraction(bytesSent / total));
       },
     });
 
     if (result.status < 200 || result.status >= 300) throw messageForStatus(result.status, input.bucketId, result.body);
     input.onProgress?.(1);
-    return { objectPath: input.objectPath, sizeBytes };
+    return { objectPath: input.objectPath, sizeBytes: input.sizeBytes };
   } catch (error) {
-    const fired = watchdog.firedAs();
-    if (fired === 'stall') {
-      throw new UploadError('That upload stopped partway — the connection dropped out. Please try again, ideally on Wi-Fi.', 'timeout');
-    }
-    if (fired === 'overall') {
-      throw new UploadError('That file is taking too long on this connection. Please try again on Wi-Fi.', 'timeout');
-    }
-    if (input.signal?.aborted) throw new UploadError('Upload cancelled.', 'cancelled');
-    if (error instanceof UploadError) throw error;
-    if (isAbortError(error)) throw new UploadError('That upload was stopped before it finished. You can start it again whenever you are ready.', 'cancelled');
-
-    // A small file can safely go the old in-memory way if streaming fails for
-    // a reason we did not anticipate on this device. A large one cannot — that
-    // is the base64 path that made this slow in the first place.
-    // Message only — never the error object, which could echo request headers.
-    console.warn('Streaming upload failed:', error instanceof Error ? error.message : 'unknown error');
-    if (sizeBytes > 0 && sizeBytes <= IN_MEMORY_FALLBACK_LIMIT) {
-      return uploadThroughSupabaseClient({ ...input, upsert, maxBytes: IN_MEMORY_FALLBACK_LIMIT });
-    }
-    throw new UploadError('That upload did not go through. Please check your connection and try again.', 'network');
+    throw asReadableTransferError(error, watchdog.firedAs(), input.signal);
   } finally {
     watchdog.stop();
   }
 }
 
-/** The original buffer-and-post path. Web uses it always; phones only as a safety net. */
-async function uploadThroughSupabaseClient(input: {
+/**
+ * Turn whatever a transfer threw into either wording a person can read, or the
+ * original error so the caller can decide whether one more try is worth it.
+ */
+function asReadableTransferError(error: unknown, fired: 'stall' | 'overall' | null, signal?: AbortSignal): unknown {
+  if (fired === 'stall') {
+    return new UploadError('That upload stopped partway — the connection dropped out. Please try again, ideally on Wi-Fi.', 'timeout');
+  }
+  if (fired === 'overall') {
+    return new UploadError('That file is taking too long on this connection. Please try again on Wi-Fi.', 'timeout');
+  }
+  if (signal?.aborted) return new UploadError('Upload cancelled.', 'cancelled');
+  if (error instanceof UploadError) return error;
+  if (isAbortError(error)) {
+    return new UploadError('That upload was stopped before it finished. You can start it again whenever you are ready.', 'cancelled');
+  }
+  return error;
+}
+
+/**
+ * The browser path.
+ *
+ * A picked file in a browser is a Blob the browser already holds, so handing it
+ * over copies nothing. It goes to the same storage address and with the same
+ * headers the phones use, through XMLHttpRequest — the one browser API that
+ * reports how many bytes have actually gone out, so the web build gets the same
+ * moving bar as the phones instead of a frozen spinner.
+ */
+async function uploadFromBrowser(input: {
   uri: string;
   bucketId: string;
   objectPath: string;
   mimeType: string;
-  maxBytes: number;
-  upsert?: boolean;
+  upsert: boolean;
   onProgress?: UploadProgressHandler;
+  signal?: AbortSignal;
+  accessToken?: string;
 }): Promise<{ objectPath: string; sizeBytes: number }> {
   input.onProgress?.(0);
-  const body = await readUploadBody(input.uri, input.maxBytes);
+  const { body, size } = await readUploadBody(input.uri, bucketSizeLimit(input.bucketId));
+  assertWithinBucketLimit(input.bucketId, size);
+  const accessToken = input.accessToken || (await resolveSession()).accessToken;
+
+  if (typeof XMLHttpRequest !== 'undefined') {
+    try {
+      await sendBlobWithProgress({
+        blob: body,
+        bucketId: input.bucketId,
+        objectPath: input.objectPath,
+        mimeType: input.mimeType,
+        sizeBytes: size,
+        upsert: input.upsert,
+        accessToken,
+        onProgress: input.onProgress,
+        signal: input.signal,
+      });
+      input.onProgress?.(1);
+      return { objectPath: input.objectPath, sizeBytes: size };
+    } catch (error) {
+      // A real answer from the server — too large, not allowed, signed out —
+      // is the end of the road, and repeating it through another route would
+      // only get the same answer more slowly.
+      if (error instanceof UploadError) throw error;
+      console.warn('Direct browser upload did not complete, using the standard path:', error instanceof Error ? error.message : 'unknown problem');
+    }
+  }
+
+  // Older browsers, and anything that stopped the direct send for a reason we
+  // did not anticipate. No progress ticks are possible here, so the bar stays
+  // where it is rather than pretending to move.
   const { error } = await supabase.storage
     .from(input.bucketId)
-    .upload(input.objectPath, body.body, { contentType: input.mimeType, upsert: input.upsert !== false });
+    .upload(input.objectPath, body, { contentType: input.mimeType, upsert: input.upsert });
   if (error) {
     const status = Number((error as { statusCode?: unknown; status?: unknown }).statusCode ?? (error as { status?: unknown }).status ?? 0);
     throw status ? messageForStatus(status, input.bucketId, '') : error;
   }
   input.onProgress?.(1);
-  return { objectPath: input.objectPath, sizeBytes: body.size };
+  return { objectPath: input.objectPath, sizeBytes: size };
+}
+
+/** Send one Blob and report the bytes as they leave. Browser only. */
+function sendBlobWithProgress(input: {
+  blob: Blob;
+  bucketId: string;
+  objectPath: string;
+  mimeType: string;
+  sizeBytes: number;
+  upsert: boolean;
+  accessToken: string;
+  onProgress?: UploadProgressHandler;
+  signal?: AbortSignal;
+}): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const watchdog = createTransferWatchdog({ overallMs: uploadTimeoutMs(input.sizeBytes), signal: input.signal });
+    const request = new XMLHttpRequest();
+    let settled = false;
+
+    const finish = (outcome: () => void) => {
+      if (settled) return;
+      settled = true;
+      watchdog.signal.removeEventListener('abort', onAbort);
+      watchdog.stop();
+      outcome();
+    };
+
+    function onAbort() {
+      request.abort();
+      finish(() => reject(asReadableTransferError(new Error('aborted'), watchdog.firedAs(), input.signal)));
+    }
+
+    request.open('POST', storageObjectUrl(input.bucketId, input.objectPath), true);
+    request.setRequestHeader('authorization', `Bearer ${input.accessToken}`);
+    request.setRequestHeader('apikey', SUPABASE_ANON_KEY);
+    request.setRequestHeader('content-type', input.mimeType);
+    request.setRequestHeader('cache-control', 'max-age=3600');
+    request.setRequestHeader('x-upsert', String(input.upsert));
+
+    request.upload.onprogress = (event) => {
+      watchdog.touch();
+      const total = event.lengthComputable && event.total > 0 ? event.total : input.sizeBytes;
+      if (total > 0) input.onProgress?.(clampFraction(event.loaded / total));
+    };
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) return finish(resolve);
+      finish(() => reject(messageForStatus(request.status, input.bucketId, request.responseText || '')));
+    };
+    request.onerror = () => finish(() => reject(asReadableTransferError(new Error('The connection failed'), watchdog.firedAs(), input.signal)));
+    request.onabort = () => finish(() => reject(asReadableTransferError(new Error('aborted'), watchdog.firedAs(), input.signal)));
+
+    if (watchdog.signal.aborted) return onAbort();
+    watchdog.signal.addEventListener('abort', onAbort, { once: true });
+    request.send(input.blob);
+  });
 }
 
 function resizeModeFor(purpose: UploadPurpose, requested?: ResizeMode): ResizeMode {
@@ -284,7 +454,7 @@ export async function uploadPickedAsset(input: {
           height: input.asset.height,
           maxEdge,
         })
-      : Promise.resolve({
+      : Promise.resolve<PreparedUpload>({
           uri: input.asset.uri,
           mimeType: declaredMime,
           sizeBytes: localFileSize(input.asset.uri),
@@ -332,6 +502,7 @@ export async function uploadPickedAsset(input: {
     sizeBytes: stored.sizeBytes,
     width: prepared.width,
     height: prepared.height,
+    notice: prepared.notice,
   };
 }
 
@@ -355,7 +526,7 @@ export async function uploadDocumentAsset(input: {
     resolveSession(),
     maxEdge && isImageMime(declaredMime)
       ? prepareImageForUpload({ uri: input.asset.uri, mimeType: declaredMime, maxEdge })
-      : Promise.resolve({
+      : Promise.resolve<PreparedUpload>({
           uri: input.asset.uri,
           mimeType: declaredMime,
           sizeBytes: input.asset.size || localFileSize(input.asset.uri),
@@ -403,6 +574,7 @@ export async function uploadDocumentAsset(input: {
     sizeBytes: stored.sizeBytes,
     width: prepared.width,
     height: prepared.height,
+    notice: prepared.notice,
   };
 }
 

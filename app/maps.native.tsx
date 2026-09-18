@@ -15,9 +15,9 @@
 //      at the MapLibre boundary, through toLngLat().
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View, type NativeSyntheticEvent } from 'react-native';
+import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View, type NativeSyntheticEvent } from 'react-native';
 import { Camera, type CameraRef, GeoJSONSource, Layer, Map, type MapRef, Marker, type PressEvent, type StyleSpecification, UserLocation } from '@maplibre/maplibre-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -79,8 +79,6 @@ function timeAgo(iso?: string): string {
   const when = new Date(iso);
   return `${when.getDate()} ${MONTH_SHORT[when.getMonth()]}`;
 }
-import { PrimaryButton } from '../components/PrimaryButton';
-import { Screen } from '../components/Screen';
 import { useAccessProfile } from '../lib/accessControl';
 import {
   buildActivityIndex,
@@ -106,7 +104,8 @@ import {
   type VisitPin,
 } from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
-import { colors } from '../lib/theme';
+import { type AppTheme, colors, createThemedStyles, getTheme } from '../lib/theme';
+import { useAppTheme } from '../lib/themePreference';
 import { OutreachContact, Territory } from '../types/models';
 
 const statusColor: Record<Territory['status'], string> = {
@@ -127,11 +126,46 @@ const statusLabel: Record<Territory['status'], string> = {
 };
 /** A region nothing has happened in is grey, not amber. Honest beats busy. */
 const NO_ACTIVITY_COLOR = colors.muted;
+
+/**
+ * The same six statuses again, weighted for the app's own panels.
+ *
+ * The map tiles are always the light street style, so the colours a region is
+ * PAINTED with (statusColor above) never change — that is the outline colour
+ * DO-NOT-BREAK protects. But the sheet, the chips and the legend sit on the
+ * app's own surface, which is deep navy in the dark theme, and #1F9D55 green
+ * on navy is not a colour anybody can read. These are the dark-theme weights
+ * of exactly the same six meanings, taken from the theme's own success /
+ * warning / danger tokens.
+ */
+const darkInk = getTheme('dark').colors;
+const statusInkDark: Record<Territory['status'], string> = {
+  untapped: darkInk.danger,
+  in_progress: darkInk.warning,
+  covered: darkInk.success,
+  // The theme has no purple or blue token, so these two are the only weights
+  // written here — the same hues as the map dots, lifted to read on navy.
+  follow_up_due: '#C4B2FF',
+  new_believer: '#93B4FF',
+  discipled: darkInk.accent,
+};
+
 const levelDelta: Record<Territory['level'], number> = { global: 110, country: 18, region: 5, city: 0.28, neighborhood: 0.045, street: 0.015 };
 
-/** The colour a region is painted, given what really happened there. */
+/** The colour a region is painted on the map, given what really happened there. */
 function shadeFor(derived: DerivedStatus): string {
   return derived.basis === 'no-data' || derived.basis === 'dormant' ? NO_ACTIVITY_COLOR : statusColor[derived.status];
+}
+
+/** The same meaning, in ink that reads on the app's own surface in this theme. */
+function inkFor(derived: DerivedStatus, theme: AppTheme): string {
+  if (derived.basis === 'no-data' || derived.basis === 'dormant') return theme.colors.textMuted;
+  return theme.dark ? statusInkDark[derived.status] : statusColor[derived.status];
+}
+
+/** The same, for a bare status (the legend, which has no derivation behind it). */
+function inkForStatus(status: Territory['status'], theme: AppTheme): string {
+  return theme.dark ? statusInkDark[status] : statusColor[status];
 }
 
 function withAlpha(hex: string, alpha: number) {
@@ -145,6 +179,8 @@ const BLANK_VISIT = { placeLabel: '', unitNumber: '', notes: '' };
 export default function MapsScreen() {
   // ---- every hook lives here, above every return ----
   const { access, loadingAccess } = useAccessProfile();
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
   const insets = useSafeAreaInsets();
   const { height: windowHeight } = useWindowDimensions();
   const mapRef = useRef<MapRef | null>(null);
@@ -160,6 +196,9 @@ export default function MapsScreen() {
   const [contactList, setContactList] = useState<OutreachRecord[]>([]);
   const [visits, setVisits] = useState<VisitPin[]>([]);
   const [visitsReady, setVisitsReady] = useState(true);
+  // Why the visits are not here: not switched on yet, or a load that failed.
+  // Those are two different sentences and a person deserves the right one.
+  const [visitsNote, setVisitsNote] = useState<string | null>(null);
   const [recordsFailed, setRecordsFailed] = useState(false);
   const [selected, setSelected] = useState<TerritoryWithActivity | null>(null);
   const selectedRef = useRef<TerritoryWithActivity | null>(null);
@@ -170,6 +209,12 @@ export default function MapsScreen() {
   const [controlsHeight, setControlsHeight] = useState(196);
   const [loadingMap, setLoadingMap] = useState(true);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  // Honest, quiet lines. Nothing here is an error dialog — they sit in the
+  // sheet and say what the map is doing instead of what it could not do.
+  const [locationNote, setLocationNote] = useState<string | null>(null);
+  const [liveNote, setLiveNote] = useState<string | null>(null);
   const [satellite, setSatellite] = useState(false);
   const searchResults = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -206,9 +251,26 @@ export default function MapsScreen() {
     setContactList(contactResult.rows);
     setRecordsFailed(!contactResult.ok);
     setWorkers(live);
-    if (visitResult.ready) { setVisits(visitResult.visits); setVisitsReady(true); }
-    else { setVisits([]); setVisitsReady(visitResult.reason !== 'not-switched-on'); }
+    if (visitResult.ready) {
+      setVisits(visitResult.visits);
+      setVisitsReady(true);
+      setVisitsNote(null);
+    } else {
+      setVisits([]);
+      setVisitsReady(false);
+      setVisitsNote(visitResult.reason === 'not-switched-on'
+        ? 'Visit pins are not switched on yet. Once your ministry turns them on, every visit the team logs will show here and on the map.'
+        : 'The visits could not load just now. Pull down on this panel to try again.');
+    }
     setSelected((current) => (current ? territories.find((t) => t.id === current.id) || current : territories.find((t) => t.level !== 'global') || territories[0] || null));
+  }, []);
+
+  /** Who is on the field, refreshed on its own. A failure here says so quietly
+   *  and leaves the rest of the map working. */
+  const refreshWorkers = useCallback(() => {
+    getLiveWorkers()
+      .then((live) => { setWorkers(live); setLiveNote(null); })
+      .catch(() => setLiveNote('We could not check who is on the field just now. Everything else on this map is up to date.'));
   }, []);
 
   useEffect(() => {
@@ -219,34 +281,76 @@ export default function MapsScreen() {
     // regions at the same time, so neither waits on the other. The last known
     // fix comes back instantly; the precise one follows a moment later and we
     // never hang on it. If location is refused the map simply opens on the
-    // region view — no alert, no blocked screen.
+    // region view — no alert, no blocked screen, and a line in the sheet says
+    // what it is doing instead.
     (async () => {
       try {
         const permission = await Location.requestForegroundPermissionsAsync();
-        if (cancelled || permission.status !== 'granted') return;
+        if (cancelled) return;
+        if (permission.status !== 'granted') {
+          setLocationNote('Location is off, so the map is opening on your outreach regions instead. Tap the location button whenever you want it to find you.');
+          return;
+        }
         const known = await Location.getLastKnownPositionAsync({ maxAge: 5 * 60 * 1000 }).catch(() => null);
         if (cancelled) return;
         if (known) {
           const here = { latitude: known.coords.latitude, longitude: known.coords.longitude };
           setMyLocation(here);
           setOpenedOnMe(here);
+          setLocationNote(null);
         }
         const fresh = await withTimeout(Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }), 9000);
-        if (cancelled || !fresh) return;
+        if (cancelled) return;
+        if (!fresh) {
+          if (!known) setLocationNote('We could not work out where you are just now, so the map is showing your outreach regions instead.');
+          return;
+        }
         const here = { latitude: fresh.coords.latitude, longitude: fresh.coords.longitude };
         setMyLocation(here);
+        setLocationNote(null);
         if (!known) setOpenedOnMe(here);
-      } catch { /* stay on the region view */ }
+      } catch {
+        if (!cancelled) setLocationNote('We could not work out where you are just now, so the map is showing your outreach regions instead.');
+      }
     })();
 
     loadAll()
-      .catch((err) => setMapError(friendlyError(err, 'Regions could not load. Please try again.')))
+      .catch((err) => setMapError(friendlyError(err, 'Your regions could not load just now. Please try again.')))
       .finally(() => { if (!cancelled) setLoadingMap(false); });
 
-    const unsubscribe = subscribeLiveWorkers(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); });
-    const poll = setInterval(() => { getLiveWorkers().then(setWorkers).catch(() => undefined); }, 60 * 1000);
+    const unsubscribe = subscribeLiveWorkers(refreshWorkers);
+    const poll = setInterval(refreshWorkers, 60 * 1000);
     return () => { cancelled = true; unsubscribe(); clearInterval(poll); };
-  }, [loadingAccess, access.canUseEvangelism, loadAll]);
+  }, [loadingAccess, access.canUseEvangelism, loadAll, refreshWorkers]);
+
+  /**
+   * Come back to the map and it catches up — a pin another worker dropped, a
+   * region someone outlined. It never blocks what is already on screen: the
+   * map keeps its camera and its pins while the new data arrives, and a small
+   * "Updating" chip says the work is happening. The first focus is skipped
+   * because the load above is already running.
+   */
+  const refreshQuietly = useCallback(async () => {
+    setUpdating(true);
+    try {
+      await loadAll();
+      setMapError(null);
+    } catch (err) {
+      setMapError(friendlyError(err, 'Your regions could not refresh just now. Pull down on the panel to try again.'));
+    } finally {
+      setUpdating(false);
+    }
+  }, [loadAll]);
+
+  const firstFocus = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocus.current) { firstFocus.current = false; return; }
+      if (loadingAccess || !access.canUseEvangelism) return;
+      refreshQuietly();
+      refreshWorkers();
+    }, [loadingAccess, access.canUseEvangelism, refreshQuietly, refreshWorkers])
+  );
 
   // While checked in, tell the server we are still here once a minute.
   useEffect(() => {
@@ -257,8 +361,13 @@ export default function MapsScreen() {
         const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
         here = { latitude: position.coords.latitude, longitude: position.coords.longitude };
         setMyLocation(here);
-      } catch { /* keep last known */ }
-      heartbeatCheckin(checkinId, here).catch(() => undefined);
+        setLocationNote(null);
+      } catch {
+        setLocationNote('We could not update where you are just now, so the team may still see your last spot.');
+      }
+      heartbeatCheckin(checkinId, here).catch(() => {
+        setLiveNote('Your check-in could not reach the team just now. We will keep trying while you are out.');
+      });
     }, 60 * 1000);
     return () => clearInterval(beat);
   }, [checkinId]);
@@ -427,13 +536,15 @@ export default function MapsScreen() {
   async function locateMe(): Promise<LatLng | null> {
     const permission = await Location.requestForegroundPermissionsAsync();
     if (permission.status !== 'granted') {
-      if (permission.canAskAgain) Alert.alert('Location is off', 'Turn on location so the map can show where you are.');
-      else Alert.alert('Location is off', 'The map needs location to show where you are. You can switch it on in Settings.', [
+      setLocationNote('Location is off, so the map is staying on your outreach regions. Turn it on and the map will find you.');
+      if (permission.canAskAgain) Alert.alert('Location is off', 'Turn on location so the map can show where you are. Until then it stays on your outreach regions.');
+      else Alert.alert('Location is off', 'The map needs location to show where you are. You can switch it on in Settings — until then it stays on your outreach regions.', [
         { text: 'Not now', style: 'cancel' },
-        { text: 'Open Settings', onPress: () => { Linking.openSettings().catch(() => undefined); } },
+        { text: 'Open Settings', onPress: () => { Linking.openSettings().catch(() => Alert.alert('Settings did not open', 'Open your phone Settings, find Overcomers Global Network, and turn Location on.')); } },
       ]);
       return null;
     }
+    setLocationNote(null);
     // Show something immediately, then refine.
     const known = await Location.getLastKnownPositionAsync({ maxAge: 2 * 60 * 1000 }).catch(() => null);
     if (known) {
@@ -465,8 +576,14 @@ export default function MapsScreen() {
 
   async function retryMap() {
     setLoadingMap(true); setMapError(null);
-    try { await loadAll(); } catch (err) { setMapError(friendlyError(err, 'Regions could not load. Please try again.')); }
+    try { await loadAll(); } catch (err) { setMapError(friendlyError(err, 'Your regions could not load just now. Please try again.')); }
     finally { setLoadingMap(false); }
+  }
+
+  /** Pull down on the panel: everything reloads, and the panel says so. */
+  function onPullRefresh() {
+    setRefreshing(true);
+    Promise.all([refreshQuietly(), Promise.resolve(refreshWorkers())]).finally(() => setRefreshing(false));
   }
 
   async function toggleCheckin() {
@@ -486,7 +603,8 @@ export default function MapsScreen() {
       const here = await locateMe();
       const id = await startCheckin({ territoryId: selected?.id, location: here || undefined });
       setCheckinId(id);
-      setWorkers(await getLiveWorkers());
+      setLiveNote(null);
+      refreshWorkers();
     } catch (err) {
       Alert.alert('Could not check in', friendlyError(err, 'Your account may need outreach permission.'));
     } finally {
@@ -598,6 +716,7 @@ export default function MapsScreen() {
       if (!result.ok) {
         setVisits((current) => current.filter((v) => v.id !== temporaryId));
         setVisitsReady(false);
+        setVisitsNote('Visit pins are not switched on yet. Once your ministry turns them on, every visit the team logs will show here and on the map.');
         Alert.alert('Visit pins are not switched on yet', 'The visit log for your ministry is still being set up. Nothing was lost — please try this again a little later.');
         return;
       }
@@ -652,22 +771,36 @@ export default function MapsScreen() {
 
   // ---- returns start here. No hook below this line. ----
 
-  if (loadingAccess) return <Screen><ActivityIndicator color={colors.gold} /></Screen>;
-
-  if (!access.canUseEvangelism) {
+  if (loadingAccess) {
     return (
-      <Screen>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={goBack} style={styles.backInline}><Ionicons name="chevron-back" size={22} color={colors.royalBlue} /><Text style={styles.backText}>Back</Text></Pressable>
-        <View style={styles.gate}>
-          <Ionicons name="map-outline" size={40} color={colors.gold} />
-          <Text style={styles.gateTitle}>Leaders only</Text>
-          <Text style={styles.gateBody}>The evangelism map is for outreach leaders. Ask an admin to switch it on for you.</Text>
-        </View>
-      </Screen>
+      <View style={styles.root}>
+        <View style={styles.center}><ActivityIndicator color={theme.colors.accent} /></View>
+      </View>
     );
   }
 
-  const accent = selectedStatus ? shadeFor(selectedStatus) : colors.slate;
+  if (!access.canUseEvangelism) {
+    return (
+      <View style={[styles.root, { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 8 }]}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={goBack} style={styles.backInline}>
+          <Ionicons name="chevron-back" size={22} color={theme.colors.textPrimary} />
+          <Text style={styles.backText}>Back</Text>
+        </Pressable>
+        <View style={styles.gate}>
+          <Ionicons name="map-outline" size={40} color={theme.colors.accent} />
+          <Text style={styles.gateTitle}>Leaders only</Text>
+          <Text style={styles.gateBody}>The evangelism map is for outreach leaders. Ask an admin to switch it on for you.</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // Two colours, on purpose: `accent` is the ink that reads on the sheet in
+  // this theme, `accentDot` is the colour the region is actually painted on
+  // the map, so the dot in the sheet matches the shape on the map.
+  const accent = selectedStatus ? inkFor(selectedStatus, theme) : theme.colors.textSecondary;
+  const accentDot = selectedStatus ? shadeFor(selectedStatus) : NO_ACTIVITY_COLOR;
+  const notes = [locationNote, liveNote].filter(Boolean) as string[];
 
   return (
     <View style={styles.root}>
@@ -714,7 +847,7 @@ export default function MapsScreen() {
           const shade = shadeFor(statusOf(t));
           return (
             <Marker key={t.id} id={t.id} lngLat={toLngLat(t.center)} anchor="center">
-              <Pressable onPress={() => focusTerritory(t)} style={[styles.pin, { borderColor: shade }]}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`${t.name} — ${statusOf(t).label}`} onPress={() => focusTerritory(t)} hitSlop={10} style={[styles.pin, { borderColor: shade }]}>
                 <View style={[styles.pinDot, { backgroundColor: shade }]} />
                 <Text numberOfLines={1} style={styles.pinText}>{t.name}</Text>
               </Pressable>
@@ -723,12 +856,12 @@ export default function MapsScreen() {
         })}
         {relatedContacts.map((c) => c.location ? (
           <Marker key={c.id} id={c.id} lngLat={toLngLat(c.location)} anchor="center">
-            <View style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.brightBlue }]} />
+            <View accessibilityLabel={c.followUpNeeded ? `${c.name} — follow-up needed` : `${c.name} — no follow-up due`} style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.brightBlue }]} />
           </Marker>
         ) : null)}
         {visits.map((v) => v.location ? (
           <Marker key={v.id} id={`visit-${v.id}`} lngLat={toLngLat(v.location)} anchor="bottom">
-            <Pressable accessibilityRole="button" accessibilityLabel={`Visit: ${v.placeLabel}`} onPress={() => setVisitFocus(v)} style={styles.visitPin}>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Visit: ${v.placeLabel}`} onPress={() => setVisitFocus(v)} style={styles.visitPin} hitSlop={20}>
               <View style={styles.visitPinHead}><Ionicons name="home" size={13} color={colors.white} /></View>
               <View style={styles.visitPinTail} />
             </Pressable>
@@ -737,7 +870,7 @@ export default function MapsScreen() {
         {visitDraft ? (
           <Marker id="visit-draft" lngLat={toLngLat(visitDraft)} anchor="bottom">
             <View style={styles.visitPin}>
-              <View style={[styles.visitPinHead, styles.visitPinHeadDraft]}><Ionicons name="add" size={15} color="#071231" /></View>
+              <View style={[styles.visitPinHead, styles.visitPinHeadDraft]}><Ionicons name="add" size={15} color={colors.navyGradientBottom} /></View>
               <View style={[styles.visitPinTail, styles.visitPinTailDraft]} />
             </View>
           </Marker>
@@ -762,25 +895,34 @@ export default function MapsScreen() {
 
       {/* Top bar */}
       <View style={[styles.topBar, { top: insets.top + 8 }]}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={goBack} style={styles.roundButton}><Ionicons name="chevron-back" size={22} color={colors.royalBlue} /></Pressable>
+        <Pressable accessibilityRole="button" accessibilityLabel="Back" onPress={goBack} style={styles.roundButton}><Ionicons name="chevron-back" size={22} color={theme.colors.textPrimary} /></Pressable>
         <View style={styles.search}>
-          <Ionicons name="search" size={16} color={colors.slate} />
-          <TextInput value={query} onChangeText={setQuery} onSubmitEditing={runSearch} placeholder="Find a region or street" placeholderTextColor={colors.slate} style={styles.searchInput} returnKeyType="search" />
+          <Ionicons name="search" size={16} color={theme.colors.textMuted} />
+          <TextInput
+            accessibilityLabel="Find a region or street"
+            value={query}
+            onChangeText={setQuery}
+            onSubmitEditing={runSearch}
+            placeholder="Find a region or street"
+            placeholderTextColor={theme.colors.textMuted}
+            style={styles.searchInput}
+            returnKeyType="search"
+          />
         </View>
       </View>
 
       {query.trim() ? (
-        <ScrollView keyboardShouldPersistTaps="handled" style={[styles.searchResults, { top: insets.top + 58 }]}>
+        <ScrollView keyboardShouldPersistTaps="handled" style={[styles.searchResults, { top: insets.top + 60 }]}>
           {searchResults.length ? searchResults.map((territory) => {
             const derived = statusOf(territory);
             return (
-              <Pressable key={territory.id} accessibilityRole="button" onPress={() => focusTerritory(territory)} style={styles.searchResult}>
+              <Pressable key={territory.id} accessibilityRole="button" accessibilityLabel={`${territory.name} — ${derived.label}`} onPress={() => focusTerritory(territory)} style={styles.searchResult}>
                 <Text style={styles.contactName}>{territory.name}</Text>
                 <Text style={styles.contactSub}>{territory.level} • {derived.label}</Text>
               </Pressable>
             );
           }) : <Text style={styles.empty}>No matching regions. Try a nearby city or street.</Text>}
-          <Pressable accessibilityRole="button" onPress={() => { setQuery(''); Keyboard.dismiss(); }} style={styles.searchResult}><Text style={styles.backText}>Clear search</Text></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Clear search" onPress={() => { setQuery(''); Keyboard.dismiss(); }} style={styles.searchResult}><Text style={styles.backText}>Clear search</Text></Pressable>
         </ScrollView>
       ) : null}
 
@@ -790,33 +932,42 @@ export default function MapsScreen() {
         onLayout={(event) => setControlsHeight(Math.round(event.nativeEvent.layout.height))}
       >
         {selected ? (
-          <Pressable accessibilityRole="button" accessibilityLabel="Fit selected region" onPress={() => focusTerritory(selected)} style={styles.roundButton}><Ionicons name="scan-outline" size={22} color={colors.royalBlue} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Fit selected region" onPress={() => focusTerritory(selected)} style={styles.roundButton}><Ionicons name="scan-outline" size={22} color={theme.colors.textPrimary} /></Pressable>
         ) : null}
         {MAP_STYLES.satellite ? (
-          <Pressable accessibilityRole="button" accessibilityLabel={satellite ? 'Street view' : 'Satellite view'} accessibilityState={{ selected: satellite }} onPress={toggleSatellite} style={[styles.roundButton, satellite && styles.roundButtonOn]}><Ionicons name={satellite ? 'map' : 'globe-outline'} size={21} color={satellite ? colors.white : colors.royalBlue} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel={satellite ? 'Street view' : 'Satellite view'} accessibilityState={{ selected: satellite }} onPress={toggleSatellite} style={[styles.roundButton, satellite && styles.roundButtonOn]}>
+            <Ionicons name={satellite ? 'map' : 'globe-outline'} size={21} color={satellite ? theme.colors.textOnBrand : theme.colors.textPrimary} />
+          </Pressable>
         ) : null}
         <View style={styles.zoomStack}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Zoom in" onPress={() => zoom(1)} style={styles.zoomButton}><Ionicons name="add" size={24} color={colors.royalBlue} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Zoom in" onPress={() => zoom(1)} style={styles.zoomButton}><Ionicons name="add" size={24} color={theme.colors.textPrimary} /></Pressable>
           <View style={styles.zoomDivider} />
-          <Pressable accessibilityRole="button" accessibilityLabel="Zoom out" onPress={() => zoom(-1)} style={styles.zoomButton}><Ionicons name="remove" size={24} color={colors.royalBlue} /></Pressable>
+          <Pressable accessibilityRole="button" accessibilityLabel="Zoom out" onPress={() => zoom(-1)} style={styles.zoomButton}><Ionicons name="remove" size={24} color={theme.colors.textPrimary} /></Pressable>
         </View>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="My location"
-          onPress={() => { locateMe().catch((err) => Alert.alert('Location unavailable', friendlyError(err, 'Please try again.'))); }}
+          accessibilityState={{ selected: !!myLocation }}
+          onPress={() => { locateMe().catch((err) => Alert.alert('Location unavailable', friendlyError(err, 'Please try again in a moment.'))); }}
           style={[styles.roundButton, myLocation ? styles.roundButtonOn : null]}
         >
-          <Ionicons name="locate" size={20} color={myLocation ? colors.white : colors.royalBlue} />
+          <Ionicons name="locate" size={20} color={myLocation ? theme.colors.textOnBrand : theme.colors.textPrimary} />
         </Pressable>
       </View>
 
       {/* Legend + live count */}
-      <View pointerEvents="none" style={[styles.legend, { top: insets.top + 62, opacity: query.trim() ? 0 : 1 }]}>
+      <View pointerEvents="none" style={[styles.legend, { top: insets.top + 64, opacity: query.trim() ? 0 : 1 }]}>
         {(['covered', 'in_progress', 'follow_up_due'] as Territory['status'][]).map((s) => (
-          <View key={s} style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: statusColor[s] }]} /><Text style={styles.legendText}>{statusLabel[s]}</Text></View>
+          <View key={s} style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: statusColor[s] }]} /><Text style={[styles.legendText, { color: inkForStatus(s, theme) }]}>{statusLabel[s]}</Text></View>
         ))}
         <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: NO_ACTIVITY_COLOR }]} /><Text style={styles.legendText}>No activity yet</Text></View>
         <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.brightBlue }]} /><Text style={styles.legendText}>{workers.length} live</Text></View>
+        {updating ? (
+          <View style={styles.legendItem}>
+            <ActivityIndicator size="small" color={theme.colors.accent} />
+            <Text style={styles.legendText}>Updating</Text>
+          </View>
+        ) : null}
       </View>
 
       {/* A visit someone tapped on the map */}
@@ -828,7 +979,7 @@ export default function MapsScreen() {
               <Text style={styles.calloutTitle}>{visitFocus.placeLabel}</Text>
               <Text style={styles.calloutMeta}>{visitFocus.unitNumber ? `Unit ${visitFocus.unitNumber} • ` : ''}{visitFocus.authorName} • {timeAgo(visitFocus.visitedAt)}</Text>
             </View>
-            <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={() => setVisitFocus(null)} hitSlop={10}><Ionicons name="close" size={18} color={colors.slate} /></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={() => setVisitFocus(null)} hitSlop={16}><Ionicons name="close" size={18} color={theme.colors.textMuted} /></Pressable>
           </View>
           {visitFocus.notes ? <Text style={styles.calloutNotes}>{visitFocus.notes}</Text> : null}
         </View>
@@ -839,9 +990,9 @@ export default function MapsScreen() {
         <View style={[styles.drawBar, { bottom: insets.bottom + 16 }]} onLayout={(event) => setDrawBarHeight(Math.round(event.nativeEvent.layout.height + insets.bottom + 16))}>
           <Text style={styles.drawText}>Tap the corners of {selected?.name || 'this region'}. {drawing.length} so far.</Text>
           <View style={styles.drawActions}>
-            <Pressable accessibilityRole="button" onPress={() => setDrawing(drawing.slice(0, -1))} style={styles.drawBtn}><Text style={styles.drawBtnText}>Undo</Text></Pressable>
-            <Pressable accessibilityRole="button" onPress={() => setDrawing(null)} style={styles.drawBtn}><Text style={styles.drawBtnText}>Cancel</Text></Pressable>
-            <Pressable accessibilityRole="button" onPress={saveDrawing} style={[styles.drawBtn, styles.drawBtnGold]}><Text style={[styles.drawBtnText, { color: '#071231' }]}>Save outline</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Undo the last corner" onPress={() => setDrawing(drawing.slice(0, -1))} style={styles.drawBtn}><Text style={styles.drawBtnText}>Undo</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Cancel drawing" onPress={() => setDrawing(null)} style={styles.drawBtn}><Text style={styles.drawBtnText}>Cancel</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Save this outline" disabled={busy} onPress={saveDrawing} style={[styles.drawBtn, styles.drawBtnGold]}><Text style={[styles.drawBtnText, styles.drawBtnTextGold]}>{busy ? 'Saving…' : 'Save outline'}</Text></Pressable>
           </View>
         </View>
       ) : !selected ? (
@@ -849,66 +1000,87 @@ export default function MapsScreen() {
         <View style={[styles.sheet, styles.sheetQuiet, { paddingBottom: insets.bottom + 12 }]} onLayout={(event) => setSheetHeight(Math.round(event.nativeEvent.layout.height))}>
           <View style={styles.grabber} />
           <View style={styles.quietRow}>
-            {loadingMap ? <ActivityIndicator color={colors.gold} /> : <Ionicons name="map-outline" size={22} color={colors.gold} />}
+            {loadingMap ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name="map-outline" size={22} color={theme.colors.accent} />}
             <Text style={styles.quietText}>{loadingMap ? 'Finding your outreach regions…' : mapError || 'No outreach regions are set up yet. Once a leader adds one, it will show here.'}</Text>
           </View>
-          {!loadingMap ? <PrimaryButton label="Try again" onPress={retryMap} /> : null}
+          {notes.map((note) => <Text key={note} style={styles.quietLine}>{note}</Text>)}
+          {!loadingMap ? (
+            <Pressable accessibilityRole="button" accessibilityLabel="Try again" onPress={retryMap} style={styles.primaryButton}>
+              <Text style={styles.primaryButtonText}>Try again</Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : (
         /* Bottom sheet */
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]} onLayout={(event) => setSheetHeight(Math.round(event.nativeEvent.layout.height))}>
-          <Pressable accessibilityRole="button" accessibilityLabel={collapsed ? 'Expand region details' : 'Collapse region details'} accessibilityState={{ expanded: !collapsed }} onPress={() => setCollapsed((value) => !value)} style={styles.sheetToggle}><View style={styles.grabber} /><Text style={styles.backText}>{collapsed ? 'Show details' : 'Show more map'} <Ionicons name={collapsed ? 'chevron-up' : 'chevron-down'} size={16} /></Text></Pressable>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]} onLayout={(event) => setSheetHeight(Math.round(event.nativeEvent.layout.height))}>
+          <Pressable accessibilityRole="button" accessibilityLabel={collapsed ? 'Expand region details' : 'Collapse region details'} accessibilityState={{ expanded: !collapsed }} onPress={() => setCollapsed((value) => !value)} style={styles.sheetToggle}>
+            <View style={styles.grabber} />
+            <Text style={styles.backText}>{collapsed ? 'Show details' : 'Show more map'} <Ionicons name={collapsed ? 'chevron-up' : 'chevron-down'} size={16} /></Text>
+          </Pressable>
           <View style={styles.sheetHeader}>
-            <View style={[styles.statusChip, { backgroundColor: withAlpha(accent, 0.16) }]}><View style={[styles.legendDot, { backgroundColor: accent }]} /><Text numberOfLines={1} style={[styles.statusChipText, { color: accent }]}>{selectedStatus?.label || 'No activity yet'}</Text></View>
-            <Text style={styles.levelText}>{selected.level}</Text>
+            <View style={[styles.statusChip, { backgroundColor: withAlpha(theme.dark ? theme.colors.textPrimary : accent, theme.dark ? 0.10 : 0.14), borderColor: accent }]}>
+              <View style={[styles.legendDot, { backgroundColor: accentDot }]} />
+              <Text style={[styles.statusChipText, { color: accent }]}>{selectedStatus?.label || 'No activity yet'}</Text>
+            </View>
+            <View style={styles.sheetHeaderRight}>
+              {updating ? <ActivityIndicator size="small" color={theme.colors.accent} /> : null}
+              <Text style={styles.levelText}>{selected.level}</Text>
+            </View>
           </View>
           <Text style={styles.sheetTitle}>{selected.name}</Text>
           {workersHere.length
             ? <Text style={styles.liveLine}>{workersHere.map((w) => w.displayName).join(', ')} on the field now</Text>
             : selectedStatus?.lastActivityAt ? <Text style={styles.quietLine}>Last activity {timeAgo(selectedStatus.lastActivityAt)}</Text> : null}
+          {notes.map((note) => <Text key={note} style={styles.quietLine}>{note}</Text>)}
+          {mapError ? <Text style={styles.warnLine}>{mapError}</Text> : null}
 
           {!collapsed ? <>
           <View style={styles.tabs}>
             {([['summary', 'Region'], ['visits', `Visits${relatedVisits.length ? ` (${relatedVisits.length})` : ''}`], ['people', 'Records'], ['record', 'Add record'], ...(access.canOverrideLeaderData ? [['admin', 'Fix numbers']] : [])] as [typeof sheet, string][]).map(([key, label]) => (
-              <Pressable key={key} accessibilityRole="button" accessibilityState={{ selected: sheet === key }} onPress={() => setSheet(key)} style={[styles.tab, sheet === key && styles.tabOn]}>
+              <Pressable key={key} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: sheet === key }} onPress={() => setSheet(key)} style={[styles.tab, sheet === key && styles.tabOn]}>
                 <Text style={[styles.tabText, sheet === key && styles.tabTextOn]}>{label}</Text>
               </Pressable>
             ))}
           </View>
 
-          <ScrollView style={styles.sheetBody} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <ScrollView
+            style={styles.sheetBody}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onPullRefresh} tintColor={theme.colors.accent} colors={[theme.colors.accent]} progressBackgroundColor={theme.dark ? theme.colors.pageBottom : theme.colors.surfaceRaised} />}
+          >
             {sheet === 'summary' ? (
               <>
                 <View style={styles.stats}>
-                  <Stat label="Reached" value={selected.metrics.peopleReached} />
-                  <Stat label="Saved" value={selected.metrics.soulsSaved} tone={colors.green} />
-                  <Stat label="Prayer" value={selected.metrics.prayerRequests} tone={colors.purple} />
-                  <Stat label="Due" value={selected.metrics.followUpsDue} tone={colors.amber} />
+                  <Stat styles={styles} label="Reached" value={selected.metrics.peopleReached} tone={theme.colors.textPrimary} />
+                  <Stat styles={styles} label="Saved" value={selected.metrics.soulsSaved} tone={theme.colors.success} />
+                  <Stat styles={styles} label="Prayer" value={selected.metrics.prayerRequests} tone={theme.dark ? statusInkDark.follow_up_due : colors.purple} />
+                  <Stat styles={styles} label="Due" value={selected.metrics.followUpsDue} tone={theme.colors.warning} />
                 </View>
                 <View style={styles.actionRow}>
-                  <Pressable accessibilityRole="button" disabled={busy} onPress={toggleCheckin} style={[styles.bigButton, checkinId ? styles.bigButtonLive : null]}>
-                    <Ionicons name={checkinId ? 'radio' : 'walk'} size={18} color={checkinId ? colors.white : '#071231'} />
-                    <Text style={[styles.bigButtonText, checkinId && { color: colors.white }]}>{checkinId ? "I'm done" : "I'm out here"}</Text>
+                  <Pressable accessibilityRole="button" accessibilityLabel={checkinId ? 'End my check-in' : 'Check in — I am out here'} accessibilityState={{ selected: !!checkinId }} disabled={busy} onPress={toggleCheckin} style={[styles.bigButton, checkinId ? styles.bigButtonLive : null]}>
+                    <Ionicons name={checkinId ? 'radio' : 'walk'} size={18} color={checkinId ? colors.white : theme.colors.textOnAccent} />
+                    <Text style={[styles.bigButtonText, checkinId && styles.bigButtonTextLive]}>{checkinId ? "I'm done" : "I'm out here"}</Text>
                   </Pressable>
                   <Pressable accessibilityRole="button" accessibilityLabel="Log a visit" disabled={busy} onPress={() => beginVisit()} style={styles.outlineButton}>
-                    <Ionicons name="location-outline" size={18} color={colors.royalBlue} />
+                    <Ionicons name="location-outline" size={18} color={theme.colors.textPrimary} />
                     <Text style={styles.outlineButtonText}>Log a visit</Text>
                   </Pressable>
                 </View>
                 <Text style={styles.hint}>Press and hold anywhere on the map to drop a visit pin right on that spot. Everyone on the outreach team will see it.</Text>
                 <View style={styles.actionRow}>
                   {!selected.boundary?.length ? (
-                    <Pressable accessibilityRole="button" disabled={busy} onPress={() => Alert.alert('Outline this region', 'Pull the shape from OpenStreetMap, or tap the corners yourself.', [
+                    <Pressable accessibilityRole="button" accessibilityLabel="Outline this region" disabled={busy} onPress={() => Alert.alert('Outline this region', 'Pull the shape from the free public map data, or tap the corners yourself.', [
                       { text: 'From map data', onPress: autoOutline },
                       { text: 'Draw by hand', onPress: () => setDrawing([]) },
                       { text: 'Cancel', style: 'cancel' },
                     ])} style={styles.outlineButton}>
-                      {busy ? <ActivityIndicator color={colors.royalBlue} /> : <Ionicons name="shapes-outline" size={18} color={colors.royalBlue} />}
-                      <Text style={styles.outlineButtonText}>Outline</Text>
+                      {busy ? <ActivityIndicator color={theme.colors.textPrimary} /> : <Ionicons name="shapes-outline" size={18} color={theme.colors.textPrimary} />}
+                      <Text style={styles.outlineButtonText}>{busy ? 'Working…' : 'Outline'}</Text>
                     </Pressable>
                   ) : (
-                    <Pressable accessibilityRole="button" onPress={() => setDrawing([])} style={styles.outlineButton}>
-                      <Ionicons name="create-outline" size={18} color={colors.royalBlue} />
+                    <Pressable accessibilityRole="button" accessibilityLabel="Redraw this outline" onPress={() => setDrawing([])} style={styles.outlineButton}>
+                      <Ionicons name="create-outline" size={18} color={theme.colors.textPrimary} />
                       <Text style={styles.outlineButtonText}>Redraw</Text>
                     </Pressable>
                   )}
@@ -918,10 +1090,10 @@ export default function MapsScreen() {
                     <Text style={styles.section}>Inside {selected.name}</Text>
                     <View style={styles.chips}>
                       {children.map((t) => {
-                        const shade = shadeFor(statusOf(t));
+                        const derived = statusOf(t);
                         return (
-                          <Pressable key={t.id} accessibilityRole="button" onPress={() => focusTerritory(t)} style={[styles.chip, { borderColor: shade }]}>
-                            <View style={[styles.legendDot, { backgroundColor: shade }]} />
+                          <Pressable key={t.id} accessibilityRole="button" accessibilityLabel={`${t.name} — ${derived.label}`} onPress={() => focusTerritory(t)} style={[styles.chip, { borderColor: inkFor(derived, theme) }]}>
+                            <View style={[styles.legendDot, { backgroundColor: shadeFor(derived) }]} />
                             <Text style={styles.chipText}>{t.name}</Text>
                           </Pressable>
                         );
@@ -930,9 +1102,9 @@ export default function MapsScreen() {
                   </>
                 ) : null}
                 {selected.parentId ? (
-                  <Pressable accessibilityRole="button" onPress={() => { const parent = territoryList.find((t) => t.id === selected.parentId); if (parent) focusTerritory(parent); }} style={styles.upLink}>
-                    <Ionicons name="arrow-up-circle-outline" size={16} color={colors.royalBlue} />
-                    <Text style={styles.upLinkText}>Zoom out to {territoryList.find((t) => t.id === selected.parentId)?.name || 'parent'}</Text>
+                  <Pressable accessibilityRole="button" accessibilityLabel="Zoom out to the region above" onPress={() => { const parent = territoryList.find((t) => t.id === selected.parentId); if (parent) focusTerritory(parent); }} style={styles.upLink}>
+                    <Ionicons name="arrow-up-circle-outline" size={18} color={theme.colors.accent} />
+                    <Text style={styles.upLinkText}>Zoom out to {territoryList.find((t) => t.id === selected.parentId)?.name || 'the region above'}</Text>
                   </Pressable>
                 ) : null}
               </>
@@ -940,10 +1112,10 @@ export default function MapsScreen() {
 
             {sheet === 'visits' ? (
               <>
-                {!visitsReady ? <Text style={styles.empty}>Visit pins are not switched on yet. Once your ministry turns them on, every visit the team logs will show here and on the map.</Text> : null}
+                {!visitsReady && visitsNote ? <Text style={styles.empty}>{visitsNote}</Text> : null}
                 {visitsReady && !relatedVisits.length ? <Text style={styles.empty}>No visits logged here yet. Press and hold on the map, or use Log a visit.</Text> : null}
                 {relatedVisits.map((v) => (
-                  <Pressable key={v.id} accessibilityRole="button" onPress={() => { setVisitFocus(v); if (v.location) flyTo(v.location, Math.max(zoomRef.current, 15), 500); }} style={styles.contactRow}>
+                  <Pressable key={v.id} accessibilityRole="button" accessibilityLabel={`${v.placeLabel}, ${timeAgo(v.visitedAt)}`} onPress={() => { setVisitFocus(v); if (v.location) flyTo(v.location, Math.max(zoomRef.current, 15), 500); }} style={styles.contactRow}>
                     <View style={styles.visitRowIcon}><Ionicons name="home" size={13} color={colors.white} /></View>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.contactName}>{v.placeLabel}</Text>
@@ -953,18 +1125,23 @@ export default function MapsScreen() {
                   </Pressable>
                 ))}
                 <View style={{ height: 10 }} />
-                <PrimaryButton label="Log a visit" variant="gold" onPress={() => beginVisit()} />
+                <Pressable accessibilityRole="button" accessibilityLabel="Log a visit" onPress={() => beginVisit()} style={styles.goldButton}>
+                  <Text style={styles.goldButtonText}>Log a visit</Text>
+                </Pressable>
               </>
             ) : null}
 
             {sheet === 'visit' ? (
               <View style={styles.form}>
                 <Text style={styles.empty}>{visitDraft ? 'Saving this visit at the pin on the map.' : 'Saving this visit at this region.'} Everyone on the outreach team will see it.</Text>
-                <TextInput style={styles.input} value={visitForm.placeLabel} onChangeText={(placeLabel) => setVisitForm((c) => ({ ...c, placeLabel }))} placeholder="Place — a building, a shop, a corner" placeholderTextColor={colors.slate} />
-                <TextInput style={styles.input} value={visitForm.unitNumber} onChangeText={(unitNumber) => setVisitForm((c) => ({ ...c, unitNumber }))} placeholder="Apartment or unit number" placeholderTextColor={colors.slate} />
-                <TextInput style={[styles.input, styles.textArea]} value={visitForm.notes} onChangeText={(notes) => setVisitForm((c) => ({ ...c, notes }))} placeholder="What happened while you were there?" placeholderTextColor={colors.slate} multiline />
-                <PrimaryButton label={busy ? 'Saving…' : 'Save this visit'} variant="gold" onPress={saveVisitRecord} />
-                <Pressable accessibilityRole="button" onPress={() => { setVisitDraft(null); setSheet('summary'); }} style={styles.upLink}><Text style={styles.backText}>Cancel</Text></Pressable>
+                <TextInput accessibilityLabel="Place — a building, a shop, a corner" style={styles.input} value={visitForm.placeLabel} onChangeText={(placeLabel) => setVisitForm((c) => ({ ...c, placeLabel }))} placeholder="Place — a building, a shop, a corner" placeholderTextColor={theme.colors.textMuted} />
+                <TextInput accessibilityLabel="Apartment or unit number" style={styles.input} value={visitForm.unitNumber} onChangeText={(unitNumber) => setVisitForm((c) => ({ ...c, unitNumber }))} placeholder="Apartment or unit number" placeholderTextColor={theme.colors.textMuted} />
+                <TextInput accessibilityLabel="What happened while you were there" style={[styles.input, styles.textArea]} value={visitForm.notes} onChangeText={(notes) => setVisitForm((c) => ({ ...c, notes }))} placeholder="What happened while you were there?" placeholderTextColor={theme.colors.textMuted} multiline />
+                <Pressable accessibilityRole="button" accessibilityLabel="Save this visit" disabled={busy} onPress={saveVisitRecord} style={[styles.goldButton, busy && styles.buttonBusy]}>
+                  {busy ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
+                  <Text style={styles.goldButtonText}>{busy ? 'Saving…' : 'Save this visit'}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel="Cancel this visit" onPress={() => { setVisitDraft(null); setSheet('summary'); }} style={styles.upLink}><Text style={styles.backText}>Cancel</Text></Pressable>
               </View>
             ) : null}
 
@@ -978,35 +1155,41 @@ export default function MapsScreen() {
                     {c.prayerRequest ? <Text style={styles.contactPrayer}>{c.prayerRequest}</Text> : null}
                   </View>
                 </View>
-              )) : <Text style={styles.empty}>{recordsFailed ? 'Records could not load just now. Tap Try again, or reopen this screen in a moment.' : 'No records here yet. Add the first one.'}</Text>
+              )) : <Text style={styles.empty}>{recordsFailed ? 'The records could not load just now. Pull down to try again, or reopen this screen in a moment.' : 'No records here yet. Add the first one.'}</Text>
             ) : null}
 
             {sheet === 'record' ? (
               <View style={styles.form}>
-                <TextInput style={styles.input} value={record.name} onChangeText={(name) => setRecord((c) => ({ ...c, name }))} placeholder="Person or household name" placeholderTextColor={colors.slate} />
-                <TextInput style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((c) => ({ ...c, phone }))} placeholder="Phone" placeholderTextColor={colors.slate} keyboardType="phone-pad" />
-                <TextInput style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((c) => ({ ...c, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={colors.slate} keyboardType="phone-pad" />
-                <TextInput style={[styles.input, styles.textArea]} value={record.prayerRequest} onChangeText={(prayerRequest) => setRecord((c) => ({ ...c, prayerRequest }))} placeholder="Prayer request" placeholderTextColor={colors.slate} multiline />
+                <TextInput accessibilityLabel="Person or household name" style={styles.input} value={record.name} onChangeText={(name) => setRecord((c) => ({ ...c, name }))} placeholder="Person or household name" placeholderTextColor={theme.colors.textMuted} />
+                <TextInput accessibilityLabel="Phone number" style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((c) => ({ ...c, phone }))} placeholder="Phone" placeholderTextColor={theme.colors.textMuted} keyboardType="phone-pad" />
+                <TextInput accessibilityLabel="WhatsApp number" style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((c) => ({ ...c, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={theme.colors.textMuted} keyboardType="phone-pad" />
+                <TextInput accessibilityLabel="Prayer request" style={[styles.input, styles.textArea]} value={record.prayerRequest} onChangeText={(prayerRequest) => setRecord((c) => ({ ...c, prayerRequest }))} placeholder="Prayer request" placeholderTextColor={theme.colors.textMuted} multiline />
                 <View style={styles.flagRow}>
-                  <Flag label="Gospel shared" value={record.gospelShared} onPress={() => setRecord((c) => ({ ...c, gospelShared: !c.gospelShared }))} />
-                  <Flag label="Invited" value={record.invitedToChurch} onPress={() => setRecord((c) => ({ ...c, invitedToChurch: !c.invitedToChurch }))} />
-                  <Flag label="Bible study" value={record.bibleStudyStarted} onPress={() => setRecord((c) => ({ ...c, bibleStudyStarted: !c.bibleStudyStarted }))} />
-                  <Flag label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((c) => ({ ...c, savedAcceptedChrist: !c.savedAcceptedChrist }))} />
-                  <Flag label="Follow up" value={record.followUpNeeded} onPress={() => setRecord((c) => ({ ...c, followUpNeeded: !c.followUpNeeded }))} />
+                  <Flag styles={styles} theme={theme} label="Gospel shared" value={record.gospelShared} onPress={() => setRecord((c) => ({ ...c, gospelShared: !c.gospelShared }))} />
+                  <Flag styles={styles} theme={theme} label="Invited" value={record.invitedToChurch} onPress={() => setRecord((c) => ({ ...c, invitedToChurch: !c.invitedToChurch }))} />
+                  <Flag styles={styles} theme={theme} label="Bible study" value={record.bibleStudyStarted} onPress={() => setRecord((c) => ({ ...c, bibleStudyStarted: !c.bibleStudyStarted }))} />
+                  <Flag styles={styles} theme={theme} label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((c) => ({ ...c, savedAcceptedChrist: !c.savedAcceptedChrist }))} />
+                  <Flag styles={styles} theme={theme} label="Follow up" value={record.followUpNeeded} onPress={() => setRecord((c) => ({ ...c, followUpNeeded: !c.followUpNeeded }))} />
                 </View>
-                <TextInput style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((c) => ({ ...c, notes }))} placeholder="Notes" placeholderTextColor={colors.slate} multiline />
-                <PrimaryButton label={myLocation ? 'Save at my location' : 'Save to this region'} variant="gold" onPress={addRecord} />
+                <TextInput accessibilityLabel="Notes" style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((c) => ({ ...c, notes }))} placeholder="Notes" placeholderTextColor={theme.colors.textMuted} multiline />
+                <Pressable accessibilityRole="button" accessibilityLabel={myLocation ? 'Save at my location' : 'Save to this region'} disabled={busy} onPress={addRecord} style={[styles.goldButton, busy && styles.buttonBusy]}>
+                  {busy ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
+                  <Text style={styles.goldButtonText}>{busy ? 'Saving…' : myLocation ? 'Save at my location' : 'Save to this region'}</Text>
+                </Pressable>
               </View>
             ) : null}
 
             {sheet === 'admin' ? (
               <View style={styles.form}>
                 <Text style={styles.empty}>Fix the numbers for {selected.name}. Leave a box empty to keep it.</Text>
-                <TextInput style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((c) => ({ ...c, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={colors.slate} />
-                <TextInput style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((c) => ({ ...c, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={colors.slate} />
-                <TextInput style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((c) => ({ ...c, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={colors.slate} />
-                <TextInput style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((c) => ({ ...c, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={colors.slate} />
-                <PrimaryButton label="Save" variant="gold" onPress={saveMetricOverrides} />
+                <TextInput accessibilityLabel="People reached" style={styles.input} value={metricEdits.reached} onChangeText={(reached) => setMetricEdits((c) => ({ ...c, reached }))} keyboardType="number-pad" placeholder={`People reached (${selected.metrics.peopleReached})`} placeholderTextColor={theme.colors.textMuted} />
+                <TextInput accessibilityLabel="Souls saved" style={styles.input} value={metricEdits.soulsSaved} onChangeText={(soulsSaved) => setMetricEdits((c) => ({ ...c, soulsSaved }))} keyboardType="number-pad" placeholder={`Souls saved (${selected.metrics.soulsSaved})`} placeholderTextColor={theme.colors.textMuted} />
+                <TextInput accessibilityLabel="Prayer requests" style={styles.input} value={metricEdits.prayerRequests} onChangeText={(prayerRequests) => setMetricEdits((c) => ({ ...c, prayerRequests }))} keyboardType="number-pad" placeholder={`Prayer requests (${selected.metrics.prayerRequests})`} placeholderTextColor={theme.colors.textMuted} />
+                <TextInput accessibilityLabel="Follow-ups due" style={styles.input} value={metricEdits.followUps} onChangeText={(followUps) => setMetricEdits((c) => ({ ...c, followUps }))} keyboardType="number-pad" placeholder={`Follow-ups due (${selected.metrics.followUpsDue})`} placeholderTextColor={theme.colors.textMuted} />
+                <Pressable accessibilityRole="button" accessibilityLabel="Save these numbers" disabled={busy} onPress={saveMetricOverrides} style={[styles.goldButton, busy && styles.buttonBusy]}>
+                  {busy ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
+                  <Text style={styles.goldButtonText}>{busy ? 'Saving…' : 'Save these numbers'}</Text>
+                </Pressable>
               </View>
             ) : null}
           </ScrollView>
@@ -1043,113 +1226,160 @@ function nearestTerritory(territories: TerritoryWithActivity[], here: LatLng): T
     .sort((a, b) => (degrees(a) + (nudge[a.level] ?? 0.3)) - (degrees(b) + (nudge[b.level] ?? 0.3)))[0];
 }
 
-function Stat({ label, value, tone = colors.royalBlue }: { label: string; value: number; tone?: string }) {
+type MapStyles = ReturnType<typeof useStyles>;
+
+function Stat({ styles, label, value, tone }: { styles: MapStyles; label: string; value: number; tone: string }) {
   return <View style={styles.stat}><Text style={[styles.statValue, { color: tone }]}>{value.toLocaleString()}</Text><Text style={styles.statLabel}>{label}</Text></View>;
 }
 
-function Flag({ label, value, onPress }: { label: string; value: boolean; onPress: () => void }) {
+function Flag({ styles, theme, label, value, onPress }: { styles: MapStyles; theme: AppTheme; label: string; value: boolean; onPress: () => void }) {
   return (
-    <Pressable accessibilityRole="button" accessibilityState={{ selected: value }} onPress={onPress} style={[styles.flag, value && styles.flagOn]}>
-      {value ? <Ionicons name="checkmark" size={14} color="#071231" /> : null}
+    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: value }} onPress={onPress} style={[styles.flag, value && styles.flagOn]}>
+      <Ionicons name={value ? 'checkmark-circle' : 'ellipse-outline'} size={15} color={value ? theme.colors.textOnAccent : theme.colors.textMuted} />
       <Text style={[styles.flagText, value && styles.flagTextOn]}>{label}</Text>
     </Pressable>
   );
 }
 
-const styles = StyleSheet.create({
-  mapControls: { position: 'absolute', right: 12, gap: 10, alignItems: 'center' },
-  zoomStack: { width: 44, borderRadius: 22, backgroundColor: colors.white, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
-  zoomButton: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-  zoomDivider: { height: 1, marginHorizontal: 10, backgroundColor: 'rgba(15,23,42,0.10)' },
-  searchResults: { position: 'absolute', left: 12, right: 12, maxHeight: '40%', borderRadius: 16, paddingHorizontal: 14, backgroundColor: colors.white, zIndex: 20, elevation: 12 },
-  searchResult: { paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.softLine },
-  sheetToggle: { minHeight: 44, alignItems: 'center', justifyContent: 'center' },
-  root: { flex: 1, backgroundColor: '#E8EEF7' },
-  topBar: { position: 'absolute', left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  roundButton: { width: 44, height: 44, borderRadius: 22, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
-  roundButtonOn: { backgroundColor: colors.brightBlue },
-  search: { flex: 1, height: 44, borderRadius: 22, backgroundColor: colors.white, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 3 },
-  searchInput: { flex: 1, color: colors.royalBlue, fontWeight: '700' },
-  legend: { position: 'absolute', left: 12, flexDirection: 'row', flexWrap: 'wrap', gap: 6, maxWidth: '72%' },
-  legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.92)' },
-  legendDot: { width: 9, height: 9, borderRadius: 5 },
-  legendText: { color: colors.royalBlue, fontSize: 11, fontWeight: '800' },
-  pin: { maxWidth: 140, minHeight: 32, borderRadius: 999, borderWidth: 2, paddingHorizontal: 9, paddingVertical: 5, backgroundColor: 'rgba(255,255,255,0.96)', flexDirection: 'row', alignItems: 'center', gap: 6 },
-  pinDot: { width: 9, height: 9, borderRadius: 5 },
-  pinText: { color: colors.royalBlue, fontSize: 12, fontWeight: '900', maxWidth: 100 },
-  contactDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 2, borderColor: colors.white },
-  visitPin: { alignItems: 'center' },
-  visitPinHead: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.deepBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white, shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 4, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
-  visitPinHeadDraft: { backgroundColor: colors.gold },
-  visitPinTail: { width: 2, height: 8, backgroundColor: colors.white, marginTop: -1 },
-  visitPinTailDraft: { backgroundColor: colors.gold },
-  visitRowIcon: { width: 22, height: 22, borderRadius: 11, backgroundColor: colors.deepBlue, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
-  worker: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.brightBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white },
-  workerPulse: { position: 'absolute', width: 44, height: 44, borderRadius: 22, backgroundColor: withAlpha('#2563EB', 0.22) },
-  corner: { width: 14, height: 14, borderRadius: 7, backgroundColor: colors.gold, borderWidth: 2, borderColor: colors.white },
-  callout: { position: 'absolute', left: 12, right: 68, borderRadius: 16, backgroundColor: colors.white, padding: 12, gap: 6, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 10 },
-  calloutTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
-  calloutIcon: { width: 24, height: 24, borderRadius: 12, backgroundColor: colors.deepBlue, alignItems: 'center', justifyContent: 'center' },
-  calloutTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 14 },
-  calloutMeta: { color: colors.slate, fontSize: 12, marginTop: 2 },
-  calloutNotes: { color: colors.textBody, fontSize: 13, lineHeight: 18 },
-  drawBar: { position: 'absolute', left: 12, right: 12, borderRadius: 18, backgroundColor: '#071B45', padding: 14, gap: 10 },
-  drawText: { color: colors.white, fontWeight: '800' },
-  drawActions: { flexDirection: 'row', gap: 8 },
-  drawBtn: { flex: 1, minHeight: 42, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.12)', alignItems: 'center', justifyContent: 'center' },
-  drawBtnGold: { backgroundColor: colors.gold, flex: 1.6 },
-  drawBtnText: { color: colors.white, fontWeight: '900' },
-  sheet: { position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '58%', borderTopLeftRadius: 24, borderTopRightRadius: 24, backgroundColor: colors.white, paddingHorizontal: 16, paddingTop: 8, shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 12, shadowOffset: { width: 0, height: -3 }, elevation: 8 },
-  sheetQuiet: { gap: 12, paddingBottom: 16 },
-  quietRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
-  quietText: { flex: 1, color: colors.slate, fontWeight: '700' },
-  grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.18)', marginBottom: 8 },
-  sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, flexShrink: 1 },
-  statusChipText: { fontWeight: '900', fontSize: 12 },
-  levelText: { color: colors.slate, fontWeight: '800', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.6 },
-  sheetTitle: { color: colors.royalBlue, fontSize: 22, fontWeight: '900', marginTop: 6 },
-  liveLine: { color: colors.brightBlue, fontWeight: '800', fontSize: 12, marginTop: 2 },
-  quietLine: { color: colors.slate, fontWeight: '700', fontSize: 12, marginTop: 2 },
-  hint: { color: colors.slate, fontSize: 12, marginTop: 8, lineHeight: 17 },
-  tabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10 },
-  tab: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 999, backgroundColor: 'rgba(15,23,42,0.06)' },
-  tabOn: { backgroundColor: colors.royalBlue },
-  tabText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
-  tabTextOn: { color: colors.white },
-  sheetBody: { marginTop: 10 },
-  stats: { flexDirection: 'row', gap: 8 },
-  stat: { flex: 1, borderRadius: 14, backgroundColor: 'rgba(15,23,42,0.05)', paddingVertical: 10, alignItems: 'center' },
-  statValue: { fontSize: 18, fontWeight: '900' },
-  statLabel: { color: colors.slate, fontSize: 11, fontWeight: '800', marginTop: 2 },
-  actionRow: { flexDirection: 'row', gap: 8, marginTop: 12 },
-  bigButton: { flex: 1.4, minHeight: 50, borderRadius: 14, backgroundColor: colors.gold, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
-  bigButtonLive: { backgroundColor: colors.brightBlue },
-  bigButtonText: { color: '#071231', fontWeight: '900', fontSize: 15 },
-  outlineButton: { flex: 1, minHeight: 50, borderRadius: 14, borderWidth: 1.5, borderColor: colors.royalBlue, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 8 },
-  outlineButtonText: { color: colors.royalBlue, fontWeight: '900' },
-  section: { color: colors.slate, fontWeight: '800', fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 14, marginBottom: 6 },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1.5, backgroundColor: colors.white },
-  chipText: { color: colors.royalBlue, fontWeight: '800', fontSize: 13 },
-  upLink: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 12, marginBottom: 8 },
-  upLinkText: { color: colors.royalBlue, fontWeight: '800', fontSize: 13 },
-  contactRow: { flexDirection: 'row', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(15,23,42,0.06)' },
-  contactName: { color: colors.royalBlue, fontWeight: '900' },
-  contactSub: { color: colors.slate, fontSize: 12, marginTop: 2 },
-  contactPrayer: { color: colors.textBody, marginTop: 4 },
-  empty: { color: colors.slate, paddingVertical: 8, lineHeight: 19 },
-  form: { gap: 10, paddingBottom: 12 },
-  input: { minHeight: 46, borderRadius: 12, borderWidth: 1, borderColor: colors.softLine, paddingHorizontal: 12, color: colors.royalBlue, backgroundColor: colors.white },
-  textArea: { minHeight: 76, paddingTop: 10, textAlignVertical: 'top' },
-  flagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  flag: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 999, borderWidth: 1, borderColor: colors.softLine },
-  flagOn: { backgroundColor: colors.gold, borderColor: colors.gold },
-  flagText: { color: colors.royalBlue, fontWeight: '800', fontSize: 12 },
-  flagTextOn: { color: '#071231' },
-  backInline: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 8 },
-  backText: { color: colors.royalBlue, fontWeight: '800' },
-  gate: { alignItems: 'center', gap: 10, padding: 32 },
-  gateTitle: { color: colors.royalBlue, fontSize: 20, fontWeight: '900' },
-  gateBody: { color: colors.slate, textAlign: 'center' },
+/**
+ * Both themes, one definition.
+ *
+ * The map tiles underneath are always the light street style — that is the
+ * engine, and DO-NOT-BREAK fixes it there. What changes with the theme is the
+ * app's own chrome on top: the sheet, the search bar, the round controls, the
+ * legend. In dark mode those become deep navy plates with gold and white on
+ * them, which is both the theme the owner likes and the more readable thing to
+ * lay over a bright map. `chrome` is opaque on purpose: a translucent surface
+ * token would let map tiles show through a control and make its icon unreadable.
+ */
+const useStyles = createThemedStyles((t) => {
+  const chrome = t.dark ? withAlpha(t.colors.pageBottom, 0.95) : withAlpha(t.colors.surfaceRaised, 0.97);
+  const sheetFill = t.dark ? t.colors.pageBottom : t.colors.surfaceRaised;
+  const inset = t.dark ? t.colors.surface : t.colors.surfaceSunken;
+  const hairline = t.dark ? t.colors.border : t.colors.border;
+
+  return StyleSheet.create({
+    root: { flex: 1, backgroundColor: t.colors.page },
+    center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
+    mapControls: { position: 'absolute', right: 12, gap: 10, alignItems: 'center' },
+    zoomStack: { width: 48, borderRadius: 24, backgroundColor: chrome, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, ...t.elevation.medium },
+    zoomButton: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
+    zoomDivider: { height: StyleSheet.hairlineWidth, marginHorizontal: 10, backgroundColor: hairline },
+    roundButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: chrome, alignItems: 'center', justifyContent: 'center', borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, ...t.elevation.medium },
+    roundButtonOn: { backgroundColor: t.colors.brandSolid, borderColor: t.colors.accentBorder },
+
+    topBar: { position: 'absolute', left: 12, right: 12, flexDirection: 'row', alignItems: 'center', gap: 8 },
+    search: { flex: 1, height: 48, borderRadius: 24, backgroundColor: chrome, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, ...t.elevation.medium },
+    searchInput: { flex: 1, height: 48, color: t.colors.textPrimary, fontWeight: '700', fontSize: t.type.body },
+    searchResults: { position: 'absolute', left: 12, right: 12, maxHeight: '40%', borderRadius: t.radius.lg, paddingHorizontal: 16, backgroundColor: sheetFill, borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, zIndex: 20, ...t.elevation.high },
+    searchResult: { minHeight: 48, justifyContent: 'center', paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: hairline },
+
+    legend: { position: 'absolute', left: 12, flexDirection: 'row', flexWrap: 'wrap', gap: 6, maxWidth: '72%' },
+    legendItem: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 6, borderRadius: t.radius.pill, backgroundColor: chrome, borderWidth: StyleSheet.hairlineWidth, borderColor: hairline },
+    legendDot: { width: 9, height: 9, borderRadius: 5 },
+    legendText: { color: t.colors.textSecondary, fontSize: t.type.overline, fontWeight: '800' },
+
+    // ---- markers. These sit on the map tiles, which are always light, so they
+    // keep their own light plates in both themes. Repainting them navy in dark
+    // mode would hide them against the roads.
+    pin: { maxWidth: 150, minHeight: 36, borderRadius: t.radius.pill, borderWidth: 2, paddingHorizontal: 12, paddingVertical: 6, backgroundColor: withAlpha(colors.white, 0.97), flexDirection: 'row', alignItems: 'center', gap: 6 },
+    pinDot: { width: 9, height: 9, borderRadius: 5 },
+    pinText: { color: colors.royalBlue, fontSize: t.type.overline, fontWeight: '900', maxWidth: 106 },
+    contactDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 2, borderColor: colors.white },
+    visitPin: { alignItems: 'center' },
+    visitPinHead: { width: 28, height: 28, borderRadius: 14, backgroundColor: colors.deepBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white, ...t.elevation.medium },
+    visitPinHeadDraft: { backgroundColor: colors.gold },
+    visitPinTail: { width: 2, height: 8, backgroundColor: colors.white, marginTop: -1 },
+    visitPinTailDraft: { backgroundColor: colors.gold },
+    worker: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.brightBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white },
+    workerPulse: { position: 'absolute', width: 44, height: 44, borderRadius: 22, backgroundColor: withAlpha(colors.brightBlue, 0.30) },
+    corner: { width: 14, height: 14, borderRadius: 7, backgroundColor: colors.gold, borderWidth: 2, borderColor: colors.white },
+    visitRowIcon: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.dark ? t.colors.accentSolid : colors.deepBlue, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
+
+    callout: { position: 'absolute', left: 12, right: 72, borderRadius: t.radius.lg, backgroundColor: sheetFill, borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, padding: 14, gap: 6, ...t.elevation.high },
+    calloutTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+    calloutIcon: { width: 26, height: 26, borderRadius: 13, backgroundColor: t.dark ? t.colors.accentSolid : colors.deepBlue, alignItems: 'center', justifyContent: 'center' },
+    calloutTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+    calloutMeta: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 2 },
+    calloutNotes: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19 },
+
+    drawBar: { position: 'absolute', left: 12, right: 12, borderRadius: t.radius.xl, backgroundColor: t.dark ? t.colors.pageBottom : colors.royalBlue, borderWidth: t.dark ? StyleSheet.hairlineWidth : 0, borderColor: t.colors.accentBorder, padding: 16, gap: 12, ...t.elevation.high },
+    drawText: { color: colors.white, fontWeight: '800', fontSize: t.type.body },
+    drawActions: { flexDirection: 'row', gap: 8 },
+    drawBtn: { flex: 1, minHeight: 48, borderRadius: t.radius.md, backgroundColor: withAlpha(colors.white, 0.14), alignItems: 'center', justifyContent: 'center' },
+    drawBtnGold: { backgroundColor: t.colors.accentSolid, flex: 1.6 },
+    drawBtnText: { color: colors.white, fontWeight: '900', fontSize: t.type.meta },
+    drawBtnTextGold: { color: t.colors.textOnAccent },
+
+    sheet: { position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '58%', borderTopLeftRadius: 26, borderTopRightRadius: 26, backgroundColor: sheetFill, borderTopWidth: StyleSheet.hairlineWidth, borderColor: hairline, paddingHorizontal: 16, paddingTop: 8, ...t.elevation.high },
+    sheetQuiet: { gap: 12, paddingBottom: 16 },
+    quietRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
+    quietText: { flex: 1, color: t.colors.textSecondary, fontWeight: '700', fontSize: t.type.body, lineHeight: 20 },
+    grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: t.radius.pill, backgroundColor: t.colors.borderStrong, marginBottom: 8 },
+    sheetToggle: { minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+    sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+    sheetHeaderRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    statusChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: t.radius.pill, borderWidth: 1, flexShrink: 1 },
+    statusChipText: { fontWeight: '900', fontSize: t.type.meta },
+    levelText: { color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6 },
+    sheetTitle: { color: t.colors.textPrimary, fontSize: 24, fontWeight: '900', marginTop: 6 },
+    liveLine: { color: t.dark ? statusInkDark.new_believer : colors.brightBlue, fontWeight: '800', fontSize: t.type.meta, marginTop: 3 },
+    quietLine: { color: t.colors.textMuted, fontWeight: '700', fontSize: t.type.meta, marginTop: 3, lineHeight: 18 },
+    warnLine: { color: t.colors.warning, fontWeight: '800', fontSize: t.type.meta, marginTop: 4, lineHeight: 18 },
+    hint: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 10, lineHeight: 18 },
+
+    tabs: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 12 },
+    tab: { minHeight: 48, justifyContent: 'center', paddingHorizontal: 16, borderRadius: t.radius.pill, backgroundColor: inset },
+    tabOn: { backgroundColor: t.dark ? t.colors.accentSolid : t.colors.brandSolid },
+    tabText: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.meta },
+    tabTextOn: { color: t.dark ? t.colors.textOnAccent : t.colors.textOnBrand },
+
+    sheetBody: { marginTop: 12 },
+    stats: { flexDirection: 'row', gap: 8 },
+    stat: { flex: 1, borderRadius: t.radius.md, backgroundColor: inset, paddingVertical: 12, paddingHorizontal: 4, alignItems: 'center' },
+    statValue: { fontSize: 18, fontWeight: '900' },
+    statLabel: { color: t.colors.textMuted, fontSize: t.type.overline, fontWeight: '800', marginTop: 3 },
+
+    actionRow: { flexDirection: 'row', gap: 8, marginTop: 14 },
+    bigButton: { flex: 1.4, minHeight: 52, borderRadius: t.radius.md, backgroundColor: t.colors.accentSolid, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 16 },
+    bigButtonLive: { backgroundColor: colors.brightBlue },
+    bigButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+    bigButtonTextLive: { color: colors.white },
+    outlineButton: { flex: 1, minHeight: 52, borderRadius: t.radius.md, borderWidth: 1.5, borderColor: t.colors.borderStrong, backgroundColor: inset, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 16 },
+    outlineButtonText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+    goldButton: { flexDirection: 'row', gap: 8, minHeight: 52, borderRadius: t.radius.md, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 },
+    goldButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+    primaryButton: { minHeight: 52, borderRadius: t.radius.md, backgroundColor: t.dark ? t.colors.accentSolid : t.colors.brandSolid, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 18 },
+    primaryButtonText: { color: t.dark ? t.colors.textOnAccent : t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.body },
+    buttonBusy: { opacity: 0.75 },
+
+    section: { color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 16, marginBottom: 6 },
+    chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+    chip: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, paddingHorizontal: 16, borderRadius: t.radius.pill, borderWidth: 1.5, backgroundColor: inset },
+    chipText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+    upLink: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, marginTop: 8 },
+    upLinkText: { color: t.colors.accent, fontWeight: '800', fontSize: t.type.meta },
+
+    contactRow: { flexDirection: 'row', gap: 10, minHeight: 48, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: hairline },
+    contactName: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body },
+    contactSub: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 2 },
+    contactPrayer: { color: t.colors.textSecondary, fontSize: t.type.meta, marginTop: 4, lineHeight: 19 },
+    empty: { color: t.colors.textMuted, paddingVertical: 8, lineHeight: 20, fontSize: t.type.body },
+
+    form: { gap: 10, paddingBottom: 12 },
+    input: { minHeight: 48, borderRadius: t.radius.md, borderWidth: 1, borderColor: hairline, paddingHorizontal: 14, color: t.colors.textPrimary, backgroundColor: inset, fontSize: t.type.body },
+    textArea: { minHeight: 80, paddingTop: 12, textAlignVertical: 'top' },
+    flagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+    flag: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, paddingHorizontal: 16, borderRadius: t.radius.pill, borderWidth: 1, borderColor: hairline, backgroundColor: inset },
+    flagOn: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+    flagText: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.meta },
+    flagTextOn: { color: t.colors.textOnAccent },
+
+    backInline: { flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 48, paddingHorizontal: 16 },
+    backText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+    gate: { alignItems: 'center', gap: 10, padding: 32 },
+    gateTitle: { color: t.colors.textPrimary, fontSize: t.type.sectionTitle, fontWeight: '900' },
+    gateBody: { color: t.colors.textSecondary, textAlign: 'center', lineHeight: 21, fontSize: t.type.body },
+  });
 });

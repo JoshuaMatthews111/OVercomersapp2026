@@ -4,7 +4,7 @@ import type { ImageManipulatorContext, ImageRef } from 'expo-image-manipulator';
 import { Platform } from 'react-native';
 
 import { friendlyError } from './errorMessages';
-import { isAbortError } from './requestTimeout';
+import { fetchWithTimeout, isAbortError } from './requestTimeout';
 
 /*
  * Getting a file ready to leave the phone.
@@ -55,6 +55,12 @@ export const BUCKET_SIZE_LIMITS: Record<string, number> = {
 
 /** Used only for a bucket nobody has told us about yet. */
 export const FALLBACK_BUCKET_LIMIT_BYTES = 50 * MB;
+
+/**
+ * Handing a picked file over inside the browser is local work, so it is quick
+ * or it is broken. A minute is generous and still stops a spinner forever.
+ */
+const WEB_FILE_READ_TIMEOUT_MS = 60_000;
 
 /** How each bucket is described to a person, never by its technical name. */
 const BUCKET_LABELS: Record<string, string> = {
@@ -199,7 +205,44 @@ export type PreparedUpload = {
   height?: number;
   /** True when this is a smaller copy rather than the original file. */
   wasResized: boolean;
+  /**
+   * A plain sentence worth showing beside a SUCCESSFUL upload — never an error.
+   * Set when the photo could not be made smaller, or when the phone is short of
+   * memory. Usually undefined; ignore it and nothing is lost.
+   */
+  notice?: string;
 };
+
+/** Shown when shrinking did not work and the full-size photo goes instead. */
+export const FULL_SIZE_PHOTO_NOTICE = 'We could not make that photo smaller, so it may take a little longer to send.';
+
+/** Shown when the phone would not give a decoded photo's memory back. */
+export const LOW_MEMORY_NOTICE =
+  'Your phone is low on memory right now. If the next photo will not send, close a few apps and try again.';
+
+type Releasable = { release(): void } | null;
+
+/**
+ * Hand decoded bitmaps back to the platform.
+ *
+ * Each one holds a full-size image in memory, so they are let go before any
+ * bytes move. Releasing detaches the JavaScript object from its native bitmap
+ * and can refuse if the platform already reclaimed it — which is harmless in
+ * itself, but says this phone is under memory pressure, and that is worth
+ * passing back rather than swallowing. Returns false when any release refused.
+ */
+function releaseBitmaps(items: Releasable[]): boolean {
+  let allReleased = true;
+  for (const item of items) {
+    if (!item) continue;
+    try {
+      item.release();
+    } catch {
+      allReleased = false;
+    }
+  }
+  return allReleased;
+}
 
 /**
  * Shrink a photo before it is uploaded.
@@ -216,13 +259,14 @@ export async function prepareImageForUpload(input: {
   maxEdge?: number;
   quality?: number;
 }): Promise<PreparedUpload> {
-  const untouched = (): PreparedUpload => ({
+  const untouched = (notice?: string): PreparedUpload => ({
     uri: input.uri,
     mimeType: input.mimeType || '',
     sizeBytes: localFileSize(input.uri),
     width: input.width ?? undefined,
     height: input.height ?? undefined,
     wasResized: false,
+    notice,
   });
 
   if (!isResizableImage(input.uri, input.mimeType)) return untouched();
@@ -266,8 +310,16 @@ export async function prepareImageForUpload(input: {
     const saved = await rendered.saveAsync({ compress: quality, format: keepPng ? SaveFormat.PNG : SaveFormat.JPEG });
     const savedSize = localFileSize(saved.uri);
 
+    // Every decoded bitmap is handed back here, before the return, so nothing
+    // is still holding a full-size image in memory while the file goes out —
+    // and so a phone that refuses can say so on the result.
+    const memoryIsHealthy = releaseBitmaps([rendered, workContext, probed, probeContext]);
+    rendered = workContext = probed = probeContext = null;
+
     // Re-encoding can make a small, already-optimised file bigger. Keep the original then.
-    if (!isHeic && originalSize > 0 && savedSize > 0 && savedSize >= originalSize && !needsResize) return untouched();
+    if (!isHeic && originalSize > 0 && savedSize > 0 && savedSize >= originalSize && !needsResize) {
+      return untouched(memoryIsHealthy ? undefined : LOW_MEMORY_NOTICE);
+    }
 
     return {
       uri: saved.uri,
@@ -276,45 +328,42 @@ export async function prepareImageForUpload(input: {
       width: saved.width,
       height: saved.height,
       wasResized: true,
+      notice: memoryIsHealthy ? undefined : LOW_MEMORY_NOTICE,
     };
-  } catch {
-    // A photo that will not shrink is still a photo worth sending.
-    return untouched();
+  } catch (error) {
+    // A photo that will not shrink is still a photo worth sending, so this is
+    // never an error the person has to deal with — but it is not nothing
+    // either: their upload is about to be slower than it should be, and the
+    // caller is given a sentence that says so plainly.
+    console.warn('Photo could not be made smaller:', error instanceof Error ? error.message : 'unknown problem');
+    return untouched(FULL_SIZE_PHOTO_NOTICE);
   } finally {
-    // These hold a decoded bitmap each. Let them go before the upload starts.
-    try {
-      rendered?.release();
-      workContext?.release();
-      probed?.release();
-      probeContext?.release();
-    } catch {
-      /* the platform already reclaimed them */
-    }
+    // Anything still held after an early return or a failure goes back now.
+    releaseBitmaps([rendered, workContext, probed, probeContext]);
   }
 }
 
 /**
- * Read a file into memory as an upload body.
+ * Read a picked file on the web into an upload body.
  *
- * This is the fallback path now, not the main one: it materialises the whole
- * file in the JavaScript heap, which React Native then base64-encodes on the JS
- * thread. Fine for a web Blob or a small image; ruinous for a video. Streaming
- * from disk lives in uploadService.uploadFileToBucket().
+ * WEB ONLY, AND DELIBERATELY SO. A browser Blob is a handle to bytes the
+ * browser is already holding, so this hands the file over without copying it
+ * through the JavaScript heap. On a phone nothing reads a file into memory at
+ * all any more: uploadService streams it straight off disk with real progress.
+ * That in-memory path was the mechanism behind the silent five-minute publish,
+ * and it is gone rather than merely avoided — there is no longer any code here
+ * that can materialise a whole video in the heap.
  */
-export async function readUploadBody(uri: string, maxBytes = FALLBACK_BUCKET_LIMIT_BYTES) {
+export async function readUploadBody(uri: string, maxBytes = FALLBACK_BUCKET_LIMIT_BYTES): Promise<{ body: Blob; size: number }> {
   const tooBig = () => new UploadError(`That file is larger than ${formatBytes(maxBytes)}. Please choose a smaller one and try again.`, 'too-large');
 
   if (Platform.OS !== 'web') {
-    const file = new File(uri);
-    if (!file.exists) throw new UploadError('We could not find that file on your phone any more. Please pick it again.', 'missing');
-    if (file.size > maxBytes) throw tooBig();
-    const body = await file.arrayBuffer();
-    if (!body.byteLength) throw new UploadError('That file came through empty. Please pick it again.', 'empty');
-    if (body.byteLength > maxBytes) throw tooBig();
-    return { body, size: body.byteLength };
+    // Nothing should ever reach this. If something does, say so plainly rather
+    // than quietly loading the whole file into memory behind the person's back.
+    throw new UploadError('This phone could not prepare that file to send. Please close the app, open it again and try once more.', 'unsupported');
   }
 
-  const response = await fetch(uri);
+  const response = await fetchWithTimeout(uri, undefined, WEB_FILE_READ_TIMEOUT_MS);
   if (!response.ok) throw new UploadError('We could not read the file you chose. Please pick it again.', 'missing');
   const body = await response.blob();
   if (!body.size) throw new UploadError('That file came through empty. Please pick it again.', 'empty');

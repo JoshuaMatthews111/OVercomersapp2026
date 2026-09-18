@@ -1,12 +1,28 @@
-import { publicEnv } from '../../lib/publicEnv';
-import { useLocalSearchParams } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useFocusEffect, useLocalSearchParams } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  Share,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { ShareToChatSheet } from '../../components/ShareToChat';
 import { SharedRef } from '../../lib/chatService';
-import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
-import React, { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Modal, Pressable, ScrollView, Share, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   BIBLE_BOOKS,
   BibleBook,
@@ -19,20 +35,57 @@ import {
   getBiblePassage,
   getBibleReference,
   getBibleVerseNumbers,
-  normalizeBibleSelection
+  normalizeBibleSelection,
 } from '../../lib/bibleProvider';
 import { saveBibleFavorite } from '../../lib/contentService';
 import { friendlyError } from '../../lib/errorMessages';
-import { colors, shadows } from '../../lib/theme';
-import { useThemePreference } from '../../lib/themePreference';
+import { publicEnv } from '../../lib/publicEnv';
+import { AppTheme, createThemedStyles } from '../../lib/theme';
+import { useAppTheme } from '../../lib/themePreference';
 import { BibleVersion } from '../../types/models';
 
+/**
+ * The three translations the ministry offers, in this order, and no others.
+ * DO-NOT-BREAK item 4. Nothing in this screen may add a fourth.
+ */
 const allVersions: BibleVersion[] = ['KJV', 'NLT', 'AMP'];
-type PickerMode = 'book' | 'chapter' | 'verse' | 'quick' | null;
+
+type PickerMode = 'book' | 'chapter' | 'verse' | 'quick' | 'size' | null;
+
 const configuredVersions: Record<BibleVersion, boolean> = {
   KJV: true,
   NLT: Boolean(publicEnv('EXPO_PUBLIC_BIBLE_ID_NLT')),
   AMP: Boolean(publicEnv('EXPO_PUBLIC_BIBLE_ID_AMP')),
+};
+
+const versionNames: Record<BibleVersion, string> = {
+  KJV: 'King James Version',
+  NLT: 'New Living Translation',
+  AMP: 'Amplified Bible',
+};
+
+/**
+ * Reading size. The phone's own font setting still applies on top of this —
+ * this is the reader's choice for scripture specifically, which is the one
+ * place in the app where comfort matters most.
+ */
+const READING_SIZES = [
+  { id: 'standard', label: 'Standard', hint: 'The everyday reading size', scale: 1 },
+  { id: 'large', label: 'Large', hint: 'A little roomier on the page', scale: 1.15 },
+  { id: 'largest', label: 'Largest', hint: 'The most comfortable for long reading', scale: 1.32 },
+] as const;
+
+type ReadingSizeId = (typeof READING_SIZES)[number]['id'];
+
+const BOOKMARK_KEY = 'ogn.bible.lastRead';
+
+type Bookmark = {
+  version: BibleVersion;
+  bookId: string;
+  chapter: number;
+  verse: number;
+  readMode: BibleReadMode;
+  readingSize: ReadingSizeId;
 };
 
 const art = {
@@ -41,36 +94,100 @@ const art = {
 
 export default function BibleScreen() {
   const params = useLocalSearchParams<{ bookId?: string; chapter?: string; verse?: string; version?: string }>();
-  const { themePreference } = useThemePreference();
-  const dark = themePreference === 'dark';
+  const { theme, dark } = useAppTheme();
+  const styles = useStyles(theme);
+
   const [version, setVersion] = useState<BibleVersion>('KJV');
   const [selection, setSelection] = useState<BibleSelection>(DEFAULT_BIBLE_SELECTION);
   const [readMode, setReadMode] = useState<BibleReadMode>('chapter');
+  const [readingSize, setReadingSize] = useState<ReadingSizeId>('standard');
   const [passage, setPassage] = useState<BiblePassage | null>(null);
   const [verseNumbers, setVerseNumbers] = useState<number[]>(Array.from({ length: 50 }, (_, index) => index + 1));
+  const [verseListNote, setVerseListNote] = useState<string | null>(null);
   const [pickerMode, setPickerMode] = useState<PickerMode>(null);
   const [noteOpen, setNoteOpen] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [savingBible, setSavingBible] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [placeNote, setPlaceNote] = useState<string | null>(null);
   const [sharedVerse, setSharedVerse] = useState<SharedRef | null>(null);
+  const [restored, setRestored] = useState(false);
 
+  const requestRef = useRef(0);
+  const firstFocusRef = useRef(true);
+  /** A verse opened from a link or a prayer card always wins over the bookmark. */
+  const deepLinkedRef = useRef(Boolean(params.bookId && BIBLE_BOOKS.some((book) => book.id === params.bookId)));
+
+  const scale = READING_SIZES.find((size) => size.id === readingSize)?.scale ?? 1;
+
+  /* ---------------------------------------------------------------- *
+   * Where the reader left off.
+   * The chosen translation and the last chapter are put back before the
+   * first fetch, so coming back to the tab lands on the same page.
+   * ---------------------------------------------------------------- */
+  useEffect(() => {
+    let active = true;
+    async function restore() {
+      if (deepLinkedRef.current) {
+        setRestored(true);
+        return;
+      }
+      try {
+        const raw = await AsyncStorage.getItem(BOOKMARK_KEY);
+        if (!active || deepLinkedRef.current || !raw) return;
+        const saved = JSON.parse(raw) as Partial<Bookmark>;
+        if (saved.version && allVersions.includes(saved.version) && configuredVersions[saved.version]) {
+          setVersion(saved.version);
+        }
+        if (saved.bookId) {
+          setSelection(normalizeBibleSelection({ bookId: saved.bookId, chapter: saved.chapter, verse: saved.verse }));
+        }
+        if (saved.readMode === 'chapter' || saved.readMode === 'verse') setReadMode(saved.readMode);
+        if (READING_SIZES.some((size) => size.id === saved.readingSize)) {
+          setReadingSize(saved.readingSize as ReadingSizeId);
+        }
+      } catch {
+        if (active) setPlaceNote('We could not find where you left off, so we opened at John 3.');
+      } finally {
+        if (active) setRestored(true);
+      }
+    }
+    void restore();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  /* A deep link (a shared verse, a prayer card) always wins over the bookmark. */
   useEffect(() => {
     if (!params.bookId || !BIBLE_BOOKS.some((book) => book.id === params.bookId)) return;
+    deepLinkedRef.current = true;
     setSelection(normalizeBibleSelection({ bookId: params.bookId, chapter: Number(params.chapter) || 1, verse: Number(params.verse) || 1 }));
-    if (allVersions.includes(params.version as BibleVersion)) setVersion(params.version as BibleVersion);
+    const linkedVersion = params.version as BibleVersion | undefined;
+    if (linkedVersion && allVersions.includes(linkedVersion) && configuredVersions[linkedVersion]) setVersion(linkedVersion);
     setReadMode('verse');
+    setPlaceNote(null);
+    setRestored(true);
   }, [params.bookId, params.chapter, params.verse, params.version]);
 
-  async function shareToGroup() {
-    if (loading) return;
-    try {
-      const verse = await getBiblePassage(version, selection, 'verse');
-      const text = verse.verses.find((item) => item.verse === selection.verse)?.text || verse.content;
-      if (!text) return Alert.alert('Scripture unavailable', 'Load this verse before sharing.');
-      setSharedVerse({ kind: 'scripture', title: verse.reference + ' (' + version + ')', scripture: { ...selection, version, text, copyright: verse.copyright } });
-    } catch (err) { Alert.alert('Scripture unavailable', friendlyError(err, 'Please try again.')); }
-  }
+  useEffect(() => {
+    if (!restored) return;
+    let active = true;
+    async function remember() {
+      try {
+        const bookmark: Bookmark = { version, ...selection, readMode, readingSize };
+        await AsyncStorage.setItem(BOOKMARK_KEY, JSON.stringify(bookmark));
+      } catch {
+        if (active) setPlaceNote('We could not save your place this time. Your reading is not affected.');
+      }
+    }
+    void remember();
+    return () => {
+      active = false;
+    };
+  }, [restored, version, selection, readMode, readingSize]);
 
   const currentBook = useMemo(() => getBibleBook(selection.bookId), [selection.bookId]);
   const chapterNumbers = useMemo(
@@ -78,64 +195,139 @@ export default function BibleScreen() {
     [currentBook.chapters]
   );
   const currentReference = passage?.reference || getBibleReference(selection, readMode);
-  const displayReference = readMode === 'chapter'
-    ? getBibleReference(selection, 'chapter')
-    : currentReference;
+  const displayReference = readMode === 'chapter' ? getBibleReference(selection, 'chapter') : currentReference;
   const chapterVerses = useMemo(
-    () => readMode === 'chapter' && passage?.content ? parseChapterContent(passage.content) : [],
+    () => (readMode === 'chapter' && passage?.content ? parseChapterContent(passage.content) : []),
     [passage?.content, readMode]
+  );
+
+  const hasScripture = Boolean(passage && (passage.content || passage.verses.length));
+
+  /* ---------------------------------------------------------------- *
+   * Loading a passage. Every failure ends up on screen in plain words
+   * with a way to try again — never a blank reading pane.
+   * ---------------------------------------------------------------- */
+  const loadPassage = useCallback(
+    async (options?: { keepVisible?: boolean }) => {
+      const ticket = requestRef.current + 1;
+      requestRef.current = ticket;
+      if (!options?.keepVisible) setLoading(true);
+      setLoadError(null);
+      try {
+        const next = await getBiblePassage(version, selection, readMode);
+        if (requestRef.current !== ticket) return;
+        setPassage(next);
+      } catch (err) {
+        if (requestRef.current !== ticket) return;
+        setLoadError(friendlyError(err, 'This chapter would not load just now. Check your connection and try again.'));
+      } finally {
+        if (requestRef.current === ticket) setLoading(false);
+      }
+    },
+    [version, selection, readMode]
+  );
+
+  const loadRef = useRef(loadPassage);
+  useEffect(() => {
+    loadRef.current = loadPassage;
+  }, [loadPassage]);
+
+  useEffect(() => {
+    if (!restored) return;
+    void loadPassage();
+  }, [restored, loadPassage]);
+
+  /* Coming back to the tab re-reads the chapter, so nothing on screen is stale. */
+  useFocusEffect(
+    useCallback(() => {
+      if (firstFocusRef.current) {
+        firstFocusRef.current = false;
+        return;
+      }
+      void loadRef.current({ keepVisible: true });
+    }, [])
   );
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    getBiblePassage(version, selection, readMode)
-      .then((nextPassage) => {
-        if (active) setPassage(nextPassage);
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [version, selection.bookId, selection.chapter, selection.verse, readMode]);
-
-  useEffect(() => {
-    let active = true;
-    getBibleVerseNumbers(version, selection).then((numbers) => {
-      if (!active) return;
-      setVerseNumbers(numbers);
-      if (numbers.length && !numbers.includes(selection.verse)) {
-        setSelection((current) => {
-          if (current.bookId !== selection.bookId || current.chapter !== selection.chapter) return current;
-          return normalizeBibleSelection({ ...current, verse: numbers[0] });
-        });
+    async function loadVerseNumbers() {
+      try {
+        const numbers = await getBibleVerseNumbers(version, selection);
+        if (!active) return;
+        setVerseListNote(null);
+        if (!numbers.length) return;
+        setVerseNumbers(numbers);
+        if (!numbers.includes(selection.verse)) {
+          setSelection((current) => {
+            if (current.bookId !== selection.bookId || current.chapter !== selection.chapter) return current;
+            return normalizeBibleSelection({ ...current, verse: numbers[0] });
+          });
+        }
+      } catch {
+        if (active) setVerseListNote('We could not list the verses in this chapter. You can still read the whole chapter.');
       }
-    });
+    }
+    void loadVerseNumbers();
     return () => {
       active = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, selection.bookId, selection.chapter]);
+
+  async function onRefresh() {
+    setRefreshing(true);
+    try {
+      await loadPassage({ keepVisible: true });
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function shareToGroup() {
+    if (loading) return;
+    try {
+      const verse = await getBiblePassage(version, selection, 'verse');
+      const text = verse.verses.find((item) => item.verse === selection.verse)?.text || verse.content;
+      if (!text) {
+        Alert.alert('Nothing to share yet', 'Open the verse so it is on screen, then share it with your group.');
+        return;
+      }
+      setSharedVerse({
+        kind: 'scripture',
+        title: verse.reference + ' (' + version + ')',
+        scripture: { ...selection, version, text, copyright: verse.copyright },
+      });
+    } catch (err) {
+      Alert.alert('We could not share that verse', friendlyError(err, 'Please try again in a moment.'));
+    }
+  }
 
   async function shareVerse() {
     const firstVerse = passage?.verses[0];
     const shareText = passage?.content || firstVerse?.text;
-    if (!shareText) return Alert.alert('Scripture unavailable', 'This translation needs a licensed provider before sharing.');
-    await Share.share({
-      message: `${currentReference} (${version})\n${shareText}\n\nOvercomers Global Network`
-    });
+    if (!shareText) {
+      Alert.alert('Nothing to share yet', 'Open the passage so it is on screen, then share it.');
+      return;
+    }
+    try {
+      await Share.share({ message: `${currentReference} (${version})\n${shareText}\n\nOvercomers Global Network` });
+    } catch (err) {
+      Alert.alert('We could not share that passage', friendlyError(err, 'Please try again in a moment.'));
+    }
   }
 
   async function saveVerse() {
     const content = passage?.content || passage?.verses.map((verse) => `${verse.verse}. ${verse.text}`).join('\n') || '';
-    if (!content) return Alert.alert('Scripture unavailable', 'Load a passage before saving.');
+    if (!content) {
+      Alert.alert('Nothing to save yet', 'Open the passage so it is on screen, then save it.');
+      return;
+    }
     setSavingBible(true);
     try {
       await saveBibleFavorite({ version, reference: currentReference, content });
-      Alert.alert('Saved', `${currentReference} was saved to your Bible favorites.`);
+      Alert.alert('Saved', `${currentReference} is now in your saved scriptures.`);
     } catch (err) {
-      Alert.alert('Save not completed', friendlyError(err, 'We could not save this passage right now.'));
+      Alert.alert('We could not save that', friendlyError(err, 'Please try again in a moment.'));
     } finally {
       setSavingBible(false);
     }
@@ -144,45 +336,71 @@ export default function BibleScreen() {
   async function saveNote() {
     const text = noteText.trim();
     const content = passage?.content || passage?.verses.map((verse) => `${verse.verse}. ${verse.text}`).join('\n') || '';
-    if (!text) return Alert.alert('Note needed', 'Write a note before saving.');
+    if (!text) {
+      Alert.alert('Write something first', 'Add a few words before saving your note.');
+      return;
+    }
     setSavingBible(true);
     try {
       await saveBibleFavorite({ version, reference: currentReference, content, note: text });
       setNoteOpen(false);
       setNoteText('');
-      Alert.alert('Note saved', `Your note for ${currentReference} was saved.`);
+      Alert.alert('Note saved', `Your note on ${currentReference} is saved.`);
     } catch (err) {
-      Alert.alert('Note not saved', friendlyError(err, 'We could not save this note right now.'));
+      Alert.alert('We could not save your note', friendlyError(err, 'Please try again in a moment.'));
     } finally {
       setSavingBible(false);
     }
   }
 
+  function chooseVersion(next: BibleVersion) {
+    if (configuredVersions[next]) {
+      setPlaceNote(null);
+      setVersion(next);
+      return;
+    }
+    const ready = allVersions.filter((item) => configuredVersions[item]).map((item) => versionNames[item]);
+    Alert.alert(
+      `${versionNames[next]} is not ready`,
+      `We cannot show this translation in the app right now. You can keep reading in ${ready.join(' or ')}.`
+    );
+  }
+
   function selectBook(book: BibleBook) {
+    setPlaceNote(null);
     setReadMode('chapter');
     setSelection({ bookId: book.id, chapter: 1, verse: 1 });
     setPickerMode(null);
   }
 
   function selectChapter(chapter: number) {
+    setPlaceNote(null);
     setReadMode('chapter');
     setSelection((current) => normalizeBibleSelection({ ...current, chapter, verse: 1 }));
     setPickerMode(null);
   }
 
   function selectVerse(verse: number) {
+    setPlaceNote(null);
     setReadMode('verse');
     setSelection((current) => normalizeBibleSelection({ ...current, verse }));
     setPickerMode(null);
   }
 
   function selectQuickScripture(nextSelection: BibleSelection) {
+    setPlaceNote(null);
     setReadMode('verse');
     setSelection(normalizeBibleSelection(nextSelection));
     setPickerMode(null);
   }
 
+  function selectReadingSize(next: ReadingSizeId) {
+    setReadingSize(next);
+    setPickerMode(null);
+  }
+
   function goPreviousChapter() {
+    setPlaceNote(null);
     setReadMode('chapter');
     setSelection((current) => {
       if (current.chapter > 1) return normalizeBibleSelection({ ...current, chapter: current.chapter - 1, verse: 1 });
@@ -193,6 +411,7 @@ export default function BibleScreen() {
   }
 
   function goNextChapter() {
+    setPlaceNote(null);
     setReadMode('chapter');
     setSelection((current) => {
       const book = getBibleBook(current.bookId);
@@ -203,25 +422,49 @@ export default function BibleScreen() {
     });
   }
 
+  const readingNote = readerNote(passage, loadError, loading);
+
   return (
-    <LinearGradient colors={dark ? ['#020817', '#061334', '#071B45'] : ['#FFFFFF', '#FFFCF7', '#F7F3E6']} style={styles.root}>
+    <LinearGradient colors={theme.pageGradient} style={styles.root}>
       <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
       <SafeAreaView style={styles.safe}>
-        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={theme.colors.accent}
+              colors={[theme.colors.accent]}
+              progressBackgroundColor={theme.colors.surfaceRaised}
+            />
+          }
+        >
           <View style={styles.header}>
-            <Image source={art.seal} style={styles.seal} resizeMode="contain" />
-            <Text style={[styles.title, dark && styles.titleDark]}>Bible</Text>
+            <Image
+              source={art.seal}
+              style={styles.seal}
+              resizeMode="contain"
+              accessibilityLabel="Overcomers Global Network crest"
+            />
+            <Text style={styles.title}>Bible</Text>
             <View style={styles.headerActions}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Open quick scriptures" onPress={() => setPickerMode('quick')} style={[styles.headerIcon, dark && styles.headerIconDark]}>
-                <Ionicons name="search-outline" size={27} color={dark ? colors.gold : colors.royalBlue} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Favourite scriptures"
+                onPress={() => setPickerMode('quick')}
+                style={styles.headerIcon}
+              >
+                <Ionicons name="search-outline" size={26} color={theme.colors.accent} />
               </Pressable>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Open Bible translation settings"
-                onPress={() => Alert.alert('Bible translations', configuredVersions.NLT ? 'KJV, NLT, and AMP are configured with the current Bible API.' : 'KJV and AMP are configured with the current Bible API. Add EXPO_PUBLIC_BIBLE_ID_NLT from a licensed provider to enable NLT.')}
-                style={[styles.headerIcon, dark && styles.headerIconDark]}
+                accessibilityLabel="Reading size"
+                onPress={() => setPickerMode('size')}
+                style={styles.headerIcon}
               >
-                <Ionicons name="settings-outline" size={26} color={dark ? colors.gold : colors.royalBlue} />
+                <Ionicons name="text-outline" size={26} color={theme.colors.accent} />
               </Pressable>
             </View>
           </View>
@@ -231,73 +474,112 @@ export default function BibleScreen() {
               <Pressable
                 key={item}
                 accessibilityRole="button"
-                accessibilityLabel={`Select ${item} Bible version`}
+                accessibilityLabel={`Read in the ${versionNames[item]}`}
                 accessibilityState={{ disabled: !configuredVersions[item], selected: version === item }}
-                onPress={() => configuredVersions[item] ? setVersion(item) : Alert.alert(`${item} not configured`, `${item} needs a licensed Bible provider ID before it can display scripture text.`)}
-                style={[styles.versionPill, dark && styles.versionPillDark, !configuredVersions[item] && styles.versionPillDisabled, version === item && styles.versionPillActive, version === item && dark && styles.versionPillActiveDark]}
+                onPress={() => chooseVersion(item)}
+                style={[
+                  styles.versionPill,
+                  !configuredVersions[item] && styles.versionPillDisabled,
+                  version === item && styles.versionPillActive,
+                ]}
               >
-                <Text style={[styles.versionText, dark && styles.versionTextDark, !configuredVersions[item] && styles.versionTextDisabled, version === item && styles.versionTextActive, version === item && dark && styles.versionTextActiveDark]}>{item}</Text>
+                <Text style={[styles.versionText, version === item && styles.versionTextActive]}>{item}</Text>
               </Pressable>
             ))}
           </View>
 
-          <View style={[styles.selectorCard, dark && styles.selectorCardDark]}>
-            <Selector label="Book" value={currentBook.name} dark={dark} onPress={() => setPickerMode('book')} />
+          <View style={styles.selectorCard}>
+            <Selector label="Book" value={currentBook.name} theme={theme} onPress={() => setPickerMode('book')} />
             <View style={styles.selectorDivider} />
-            <Selector label="Chapter" value={String(selection.chapter)} dark={dark} onPress={() => setPickerMode('chapter')} />
+            <Selector label="Chapter" value={String(selection.chapter)} theme={theme} onPress={() => setPickerMode('chapter')} />
             <View style={styles.selectorDivider} />
-            <Selector label="Verse" value={readMode === 'chapter' ? 'All' : String(selection.verse)} dark={dark} onPress={() => setPickerMode('verse')} />
+            <Selector
+              label="Verse"
+              value={readMode === 'chapter' ? 'All' : String(selection.verse)}
+              theme={theme}
+              onPress={() => setPickerMode('verse')}
+            />
           </View>
 
-          <View style={[styles.toolCard, dark && styles.toolCardDark]}>
-            <Tool label="Group" icon="people-outline" dark={dark} onPress={shareToGroup} />
-            <Tool label="Note" icon="create-outline" dark={dark} onPress={() => setNoteOpen(true)} />
-            <Tool label={savingBible ? 'Saving' : 'Save'} icon="bookmark-outline" dark={dark} onPress={saveVerse} />
-            <Tool label="Share" icon="share-outline" dark={dark} onPress={shareVerse} />
+          <View style={styles.toolCard}>
+            <Tool label="Group" icon="people-outline" theme={theme} onPress={shareToGroup} />
+            <Tool label="Note" icon="create-outline" theme={theme} onPress={() => setNoteOpen(true)} />
+            <Tool label={savingBible ? 'Saving' : 'Save'} icon="bookmark-outline" busy={savingBible} theme={theme} onPress={saveVerse} />
+            <Tool label="Share" icon="share-outline" theme={theme} onPress={shareVerse} />
           </View>
 
-          <View style={[styles.readerCard, dark && styles.readerCardDark]}>
-            <Text style={[styles.chapterTitle, dark && styles.chapterTitleDark]}>{displayReference}</Text>
-            <View style={[styles.ornament, dark && styles.ornamentDark]} />
+          <View style={styles.readerCard}>
+            <Text style={styles.chapterTitle}>{displayReference}</Text>
+            <View style={styles.ornament} />
+
+            {placeNote ? <Text style={styles.placeNote}>{placeNote}</Text> : null}
+
             {loading ? (
               <View style={styles.loadingRow}>
-                <ActivityIndicator color={dark ? colors.gold : colors.royalBlue} />
-                <Text style={[styles.loadingText, dark && styles.loadingTextDark]}>Loading scripture...</Text>
+                <ActivityIndicator color={theme.colors.accent} />
+                <Text style={styles.loadingText}>Opening {displayReference}...</Text>
+              </View>
+            ) : loadError || !hasScripture ? (
+              <View style={styles.problemBlock}>
+                <Ionicons name="cloud-offline-outline" size={26} color={theme.colors.accent} />
+                <Text style={styles.problemText}>
+                  {loadError || readingNote || 'There is nothing here yet. Check your connection and try again.'}
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Try loading this passage again"
+                  onPress={() => loadPassage()}
+                  style={styles.retryButton}
+                >
+                  <Text style={styles.retryText}>Try again</Text>
+                </Pressable>
               </View>
             ) : readMode === 'chapter' && chapterVerses.length ? (
               chapterVerses.map((verse) => (
                 <View key={verse.verse} style={styles.chapterVerseRow}>
-                  <Text style={[styles.chapterVerseNum, dark && styles.chapterVerseNumDark]}>{verse.verse}</Text>
-                  <Text style={[styles.chapterVerseText, dark && styles.chapterVerseTextDark]}>{verse.text}</Text>
+                  <Text style={[styles.chapterVerseNum, scaled(18, scale)]}>{verse.verse}</Text>
+                  <Text style={[styles.chapterVerseText, scaled(18, scale)]}>{verse.text}</Text>
                 </View>
               ))
             ) : readMode === 'chapter' && passage?.content ? (
-              <Text style={[styles.chapterBody, dark && styles.chapterBodyDark]}>{passage.content}</Text>
-            ) : passage?.verses.length ? passage.verses.map((verse) => (
-              <View key={verse.verse} style={styles.verseRow}>
-                <Text style={[styles.verseNum, dark && styles.verseNumDark]}>{verse.verse}</Text>
-                <Text style={[styles.verseText, dark && styles.verseTextDark]}>{verse.text}</Text>
-              </View>
-            )) : (
-              <Text style={[styles.empty, dark && styles.emptyDark]}>This translation needs a licensed provider before scripture text can display.</Text>
+              <Text style={[styles.chapterBody, scaled(18, scale)]}>{passage.content}</Text>
+            ) : (
+              (passage?.verses ?? []).map((verse) => (
+                <View key={verse.verse} style={styles.verseRow}>
+                  <Text style={[styles.verseNum, scaled(21, scale)]}>{verse.verse}</Text>
+                  <Text style={[styles.verseText, scaled(21, scale)]}>{verse.text}</Text>
+                </View>
+              ))
             )}
-            {passage?.setupMessage ? (
-              <View style={[styles.notice, dark && styles.noticeDark]}>
-                <Ionicons name="information-circle-outline" size={18} color={dark ? colors.gold : colors.royalBlue} />
-                <Text style={[styles.noticeText, dark && styles.noticeTextDark]}>{passage.setupMessage}</Text>
+
+            {!loading && hasScripture && readingNote ? (
+              <View style={styles.notice}>
+                <Ionicons name="information-circle-outline" size={18} color={theme.colors.accent} />
+                <Text style={styles.noticeText}>{readingNote}</Text>
               </View>
             ) : null}
-            {passage?.copyright ? <Text style={[styles.copyright, dark && styles.copyrightDark]}>{passage.copyright}</Text> : null}
 
-            <View style={[styles.chapterNav, dark && styles.chapterNavDark]}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Previous Bible chapter" onPress={goPreviousChapter} style={styles.navButton}>
-                <Ionicons name="arrow-back" size={20} color={dark ? colors.gold : colors.deepGold} />
-                <Text style={[styles.navText, dark && styles.navTextDark]}>Previous Chapter</Text>
+            {passage?.copyright ? <Text style={styles.copyright}>{passage.copyright}</Text> : null}
+
+            <View style={styles.chapterNav}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Previous chapter"
+                onPress={goPreviousChapter}
+                style={styles.navButton}
+              >
+                <Ionicons name="arrow-back" size={20} color={theme.colors.accent} />
+                <Text style={styles.navText}>Previous</Text>
               </Pressable>
               <View style={styles.navDivider} />
-              <Pressable accessibilityRole="button" accessibilityLabel="Next Bible chapter" onPress={goNextChapter} style={styles.navButton}>
-                <Text style={[styles.navText, dark && styles.navTextDark]}>Next Chapter</Text>
-                <Ionicons name="arrow-forward" size={20} color={dark ? colors.gold : colors.deepGold} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Next chapter"
+                onPress={goNextChapter}
+                style={styles.navButton}
+              >
+                <Text style={styles.navText}>Next</Text>
+                <Ionicons name="arrow-forward" size={20} color={theme.colors.accent} />
               </Pressable>
             </View>
           </View>
@@ -305,140 +587,245 @@ export default function BibleScreen() {
       </SafeAreaView>
 
       <ShareToChatSheet item={sharedVerse} visible={Boolean(sharedVerse)} dark={dark} onClose={() => setSharedVerse(null)} />
+
       <ScripturePicker
         mode={pickerMode}
-        dark={dark}
         selection={selection}
         currentBook={currentBook}
         chapterNumbers={chapterNumbers}
         verseNumbers={verseNumbers}
+        verseListNote={verseListNote}
+        readingSize={readingSize}
+        theme={theme}
         onClose={() => setPickerMode(null)}
         onBook={selectBook}
         onChapter={selectChapter}
         onVerse={selectVerse}
         onQuick={selectQuickScripture}
+        onReadingSize={selectReadingSize}
       />
+
       <Modal visible={noteOpen} transparent animationType="fade" onRequestClose={() => setNoteOpen(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={[styles.modalCard, dark && styles.modalCardDark]}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalBackdrop}
+        >
+          <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.modalTitle, dark && styles.modalTitleDark]}>Bible Note</Text>
-                <Text style={[styles.noteReference, dark && styles.noteReferenceDark]}>{currentReference} • {version}</Text>
+              <View style={styles.modalHeaderCopy}>
+                <Text style={styles.modalTitle}>Your note</Text>
+                <Text style={styles.noteReference}>{currentReference} • {version}</Text>
               </View>
-              <Pressable accessibilityRole="button" accessibilityLabel="Close note editor" onPress={() => setNoteOpen(false)} style={[styles.modalClose, dark && styles.modalCloseDark]}>
-                <Ionicons name="close" size={22} color={dark ? colors.gold : colors.royalBlue} />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close your note"
+                onPress={() => setNoteOpen(false)}
+                style={styles.modalClose}
+              >
+                <Ionicons name="close" size={22} color={theme.colors.accent} />
               </Pressable>
             </View>
             <TextInput
               value={noteText}
               onChangeText={setNoteText}
-              placeholder="Write your reflection or prayer note..."
-              placeholderTextColor={dark ? 'rgba(255,255,255,0.5)' : colors.muted}
+              accessibilityLabel="Write your note on this passage"
+              placeholder="What is God saying to you here?"
+              placeholderTextColor={theme.colors.textMuted}
               multiline
-              style={[styles.noteInput, dark && styles.noteInputDark]}
+              style={styles.noteInput}
             />
-            <Pressable accessibilityRole="button" accessibilityLabel="Save Bible note" onPress={saveNote} disabled={savingBible} style={styles.saveNoteButton}>
-              <Text style={styles.saveNoteText}>{savingBible ? 'Saving...' : 'Save Note'}</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Save your note"
+              onPress={saveNote}
+              disabled={savingBible}
+              style={[styles.saveNoteButton, savingBible && styles.saveNoteButtonBusy]}
+            >
+              {savingBible ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
+              <Text style={styles.saveNoteText}>{savingBible ? 'Saving' : 'Save note'}</Text>
             </Pressable>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </LinearGradient>
   );
 }
 
-function Selector({ label, value, dark, onPress }: { label: string; value: string; dark: boolean; onPress: () => void }) {
+/**
+ * Turns whatever the scripture library reports back into one plain sentence a
+ * member would understand. Nothing technical ever reaches the reading pane.
+ */
+function readerNote(passage: BiblePassage | null, loadError: string | null, loading: boolean): string | null {
+  if (loading || loadError) return null;
+  if (!passage) return null;
+  const hasText = Boolean(passage.content || passage.verses.length);
+  if (!passage.setupMessage) return null;
+  if (hasText) return 'This is a saved copy of the verse. Reconnect to read the whole chapter.';
+  return 'This chapter is not on your phone yet. Check your connection and try again.';
+}
+
+function scaled(base: number, scale: number) {
+  const fontSize = Math.round(base * scale);
+  return { fontSize, lineHeight: Math.round(fontSize * 1.56) };
+}
+
+function Selector({ label, value, theme, onPress }: { label: string; value: string; theme: AppTheme; onPress: () => void }) {
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`Select Bible ${label}`} onPress={onPress} style={({ pressed }) => [styles.selector, pressed && styles.selectorPressed]}>
-      <Text style={[styles.selectorLabel, dark && styles.selectorLabelDark]}>{label}</Text>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${label}: ${value}. Choose another.`}
+      onPress={onPress}
+      style={({ pressed }) => [styles.selector, pressed && styles.selectorPressed]}
+    >
+      <Text style={styles.selectorLabel}>{label}</Text>
       <View style={styles.selectorValueRow}>
-        <Text numberOfLines={2} adjustsFontSizeToFit style={[styles.selectorValue, dark && styles.selectorValueDark]}>{value}</Text>
-        <Ionicons name="chevron-down" size={20} color={dark ? colors.gold : colors.deepGold} />
+        <Text numberOfLines={2} adjustsFontSizeToFit style={styles.selectorValue}>{value}</Text>
+        <Ionicons name="chevron-down" size={20} color={theme.colors.accent} />
       </View>
     </Pressable>
   );
 }
 
-function Tool({ label, icon, active, dark, onPress }: { label: string; icon: keyof typeof Ionicons.glyphMap; active?: boolean; dark: boolean; onPress?: () => void }) {
+function Tool({
+  label,
+  icon,
+  busy,
+  theme,
+  onPress,
+}: {
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  busy?: boolean;
+  theme: AppTheme;
+  onPress?: () => void;
+}) {
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`${label} Bible verse`} onPress={onPress} style={styles.tool}>
-      <Ionicons name={icon} size={24} color={active || dark ? colors.gold : colors.royalBlue} />
-      <Text style={[styles.toolText, dark && styles.toolTextDark, active && styles.toolTextActive]}>{label}</Text>
-      {active ? <View style={styles.toolLine} /> : null}
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${label} this passage`}
+      accessibilityState={{ busy: Boolean(busy) }}
+      onPress={onPress}
+      disabled={busy}
+      style={styles.tool}
+    >
+      {busy ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name={icon} size={24} color={theme.colors.accent} />}
+      <Text style={styles.toolText}>{label}</Text>
     </Pressable>
   );
 }
 
 function ScripturePicker({
   mode,
-  dark,
   selection,
   currentBook,
   chapterNumbers,
   verseNumbers,
+  verseListNote,
+  readingSize,
+  theme,
   onClose,
   onBook,
   onChapter,
   onVerse,
   onQuick,
+  onReadingSize,
 }: {
   mode: PickerMode;
-  dark: boolean;
   selection: BibleSelection;
   currentBook: BibleBook;
   chapterNumbers: number[];
   verseNumbers: number[];
+  verseListNote: string | null;
+  readingSize: ReadingSizeId;
+  theme: AppTheme;
   onClose: () => void;
   onBook: (book: BibleBook) => void;
   onChapter: (chapter: number) => void;
   onVerse: (verse: number) => void;
   onQuick: (selection: BibleSelection) => void;
+  onReadingSize: (size: ReadingSizeId) => void;
 }) {
+  const styles = useStyles(theme);
   if (!mode) return null;
 
-  const title = mode === 'book' ? 'Book' : mode === 'chapter' ? currentBook.name : mode === 'verse' ? `${currentBook.name} ${selection.chapter}` : 'Quick Scriptures';
+  const title =
+    mode === 'book'
+      ? 'Book'
+      : mode === 'chapter'
+        ? currentBook.name
+        : mode === 'verse'
+          ? `${currentBook.name} ${selection.chapter}`
+          : mode === 'size'
+            ? 'Reading size'
+            : 'Favourite scriptures';
+
+  const grid = mode === 'chapter' || mode === 'verse';
 
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.modalBackdrop}>
-        <View style={[styles.modalCard, dark && styles.modalCardDark]}>
+        <View style={styles.modalCard}>
           <View style={styles.modalHeader}>
-            <Text style={[styles.modalTitle, dark && styles.modalTitleDark]}>{title}</Text>
-            <Pressable accessibilityRole="button" accessibilityLabel="Close Bible picker" onPress={onClose} style={[styles.modalClose, dark && styles.modalCloseDark]}>
-              <Ionicons name="close" size={22} color={dark ? colors.gold : colors.royalBlue} />
+            <Text style={styles.modalTitle}>{title}</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close this list" onPress={onClose} style={styles.modalClose}>
+              <Ionicons name="close" size={22} color={theme.colors.accent} />
             </Pressable>
           </View>
 
-          <ScrollView contentContainerStyle={mode === 'chapter' || mode === 'verse' ? styles.numberGrid : styles.modalList} showsVerticalScrollIndicator={false}>
-            {mode === 'book' ? BIBLE_BOOKS.map((book) => (
-              <PickerRow
-                key={book.id}
-                title={book.name}
-                detail={`${book.chapters} chapter${book.chapters === 1 ? '' : 's'}`}
-                active={book.id === selection.bookId}
-                dark={dark}
-                onPress={() => onBook(book)}
-              />
-            )) : null}
+          {mode === 'verse' && verseListNote ? <Text style={styles.pickerNote}>{verseListNote}</Text> : null}
 
-            {mode === 'chapter' ? chapterNumbers.map((chapter) => (
-              <NumberOption key={chapter} value={chapter} active={chapter === selection.chapter} dark={dark} onPress={() => onChapter(chapter)} />
-            )) : null}
+          <ScrollView contentContainerStyle={grid ? styles.numberGrid : styles.modalList} showsVerticalScrollIndicator={false}>
+            {mode === 'book'
+              ? BIBLE_BOOKS.map((book) => (
+                  <PickerRow
+                    key={book.id}
+                    title={book.name}
+                    detail={`${book.chapters} chapter${book.chapters === 1 ? '' : 's'}`}
+                    active={book.id === selection.bookId}
+                    theme={theme}
+                    onPress={() => onBook(book)}
+                  />
+                ))
+              : null}
 
-            {mode === 'verse' ? verseNumbers.map((verse) => (
-              <NumberOption key={verse} value={verse} active={verse === selection.verse} dark={dark} onPress={() => onVerse(verse)} />
-            )) : null}
+            {mode === 'chapter'
+              ? chapterNumbers.map((chapter) => (
+                  <NumberOption key={chapter} value={chapter} active={chapter === selection.chapter} theme={theme} onPress={() => onChapter(chapter)} />
+                ))
+              : null}
 
-            {mode === 'quick' ? QUICK_SCRIPTURES.map((item) => (
-              <PickerRow
-                key={`${item.bookId}.${item.chapter}.${item.verse}`}
-                title={getBibleReference(item)}
-                active={item.bookId === selection.bookId && item.chapter === selection.chapter && item.verse === selection.verse}
-                dark={dark}
-                onPress={() => onQuick(item)}
-              />
-            )) : null}
+            {mode === 'verse'
+              ? verseNumbers.map((verse) => (
+                  <NumberOption key={verse} value={verse} active={verse === selection.verse} theme={theme} onPress={() => onVerse(verse)} />
+                ))
+              : null}
+
+            {mode === 'quick'
+              ? QUICK_SCRIPTURES.map((item) => (
+                  <PickerRow
+                    key={`${item.bookId}.${item.chapter}.${item.verse}`}
+                    title={getBibleReference(item)}
+                    active={item.bookId === selection.bookId && item.chapter === selection.chapter && item.verse === selection.verse}
+                    theme={theme}
+                    onPress={() => onQuick(item)}
+                  />
+                ))
+              : null}
+
+            {mode === 'size'
+              ? READING_SIZES.map((size) => (
+                  <PickerRow
+                    key={size.id}
+                    title={size.label}
+                    detail={size.hint}
+                    active={size.id === readingSize}
+                    theme={theme}
+                    onPress={() => onReadingSize(size.id)}
+                  />
+                ))
+              : null}
           </ScrollView>
         </View>
       </View>
@@ -446,22 +833,48 @@ function ScripturePicker({
   );
 }
 
-function PickerRow({ title, detail, active, dark, onPress }: { title: string; detail?: string; active: boolean; dark: boolean; onPress: () => void }) {
+function PickerRow({
+  title,
+  detail,
+  active,
+  theme,
+  onPress,
+}: {
+  title: string;
+  detail?: string;
+  active: boolean;
+  theme: AppTheme;
+  onPress: () => void;
+}) {
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={title} onPress={onPress} style={[styles.pickerRow, dark && styles.pickerRowDark, active && styles.pickerRowActive]}>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${title}${detail ? `, ${detail}` : ''}`}
+      accessibilityState={{ selected: active }}
+      onPress={onPress}
+      style={[styles.pickerRow, active && styles.pickerRowActive]}
+    >
       <View style={styles.pickerCopy}>
-        <Text style={[styles.pickerTitle, dark && styles.pickerTitleDark, active && styles.pickerTitleActive]}>{title}</Text>
-        {detail ? <Text style={[styles.pickerDetail, dark && styles.pickerDetailDark]}>{detail}</Text> : null}
+        <Text style={[styles.pickerTitle, active && styles.pickerTitleActive]}>{title}</Text>
+        {detail ? <Text style={styles.pickerDetail}>{detail}</Text> : null}
       </View>
-      {active ? <Ionicons name="checkmark-circle" size={22} color={dark ? colors.gold : colors.royalBlue} /> : null}
+      {active ? <Ionicons name="checkmark-circle" size={22} color={theme.colors.accent} /> : null}
     </Pressable>
   );
 }
 
-function NumberOption({ value, active, dark, onPress }: { value: number; active: boolean; dark: boolean; onPress: () => void }) {
+function NumberOption({ value, active, theme, onPress }: { value: number; active: boolean; theme: AppTheme; onPress: () => void }) {
+  const styles = useStyles(theme);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={String(value)} onPress={onPress} style={[styles.numberOption, dark && styles.numberOptionDark, active && styles.numberOptionActive, active && dark && styles.numberOptionActiveDark]}>
-      <Text style={[styles.numberText, dark && styles.numberTextDark, active && styles.numberTextActive]}>{value}</Text>
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={String(value)}
+      accessibilityState={{ selected: active }}
+      onPress={onPress}
+      style={[styles.numberOption, active && styles.numberOptionActive]}
+    >
+      <Text style={[styles.numberText, active && styles.numberTextActive]}>{value}</Text>
     </Pressable>
   );
 }
@@ -478,110 +891,239 @@ function parseChapterContent(content: string) {
   return rows;
 }
 
-const styles = StyleSheet.create({
-  root: { flex: 1 },
-  safe: { flex: 1 },
-  scroll: { paddingHorizontal: 16, paddingTop: 10, paddingBottom: 112 },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 18 },
-  seal: { width: 114, height: 88 },
-  title: { flex: 1, color: colors.royalBlue, fontWeight: '900', fontSize: 38 },
-  titleDark: { color: colors.white },
-  headerActions: { flexDirection: 'row', gap: 10 },
-  headerIcon: { width: 46, height: 46, borderRadius: 23, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center', ...shadows.soft },
-  headerIconDark: { backgroundColor: 'rgba(255,255,255,0.07)', borderWidth: 1, borderColor: 'rgba(212,175,55,0.22)' },
-  versionRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
-  versionPill: { flex: 1, minHeight: 58, borderRadius: 17, borderWidth: 1, borderColor: colors.deepGold, backgroundColor: colors.white, alignItems: 'center', justifyContent: 'center' },
-  versionPillDark: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: colors.gold },
-  versionPillDisabled: { opacity: 0.42 },
-  versionPillActive: { backgroundColor: colors.royalBlue },
-  versionPillActiveDark: { backgroundColor: colors.gold },
-  versionText: { color: colors.royalBlue, fontWeight: '900', fontSize: 20 },
-  versionTextDark: { color: colors.white },
-  versionTextDisabled: { color: colors.muted },
-  versionTextActive: { color: colors.white },
-  versionTextActiveDark: { color: '#071231' },
-  selectorCard: { minHeight: 92, borderRadius: 18, backgroundColor: colors.white, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: colors.softLine, marginBottom: 14, ...shadows.soft },
-  selectorCardDark: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(212,175,55,0.22)' },
-  selector: { flex: 1, alignSelf: 'stretch', justifyContent: 'center', paddingHorizontal: 12 },
-  selectorPressed: { opacity: 0.7 },
-  selectorLabel: { color: colors.deepGold, textTransform: 'uppercase', fontWeight: '800', fontSize: 12 },
-  selectorLabelDark: { color: colors.gold },
-  selectorValueRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginTop: 6 },
-  selectorValue: { flex: 1, color: colors.royalBlue, fontWeight: '900', fontSize: 22 },
-  selectorValueDark: { color: colors.white },
-  selectorDivider: { width: 1, height: 56, backgroundColor: 'rgba(212,175,55,0.28)' },
-  toolCard: { minHeight: 76, borderRadius: 18, backgroundColor: colors.white, flexDirection: 'row', borderWidth: 1, borderColor: colors.softLine, marginBottom: 16, overflow: 'hidden', ...shadows.soft },
-  toolCardDark: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(212,175,55,0.22)' },
-  tool: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 5 },
-  toolText: { color: colors.royalBlue, fontWeight: '800' },
-  toolTextDark: { color: colors.white },
-  toolTextActive: { color: colors.gold },
-  toolLine: { position: 'absolute', bottom: 0, width: '70%', height: 3, borderRadius: 999, backgroundColor: colors.gold },
-  readerCard: { borderRadius: 18, padding: 20, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, ...shadows.soft },
-  readerCardDark: { backgroundColor: 'rgba(2,8,23,0.42)', borderColor: 'rgba(212,175,55,0.24)' },
-  chapterTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 36, marginBottom: 8 },
-  chapterTitleDark: { color: colors.gold },
-  ornament: { width: 155, height: 2, backgroundColor: colors.deepGold, marginBottom: 20 },
-  ornamentDark: { backgroundColor: colors.gold },
-  loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 },
-  loadingText: { color: colors.royalBlue, fontWeight: '800' },
-  loadingTextDark: { color: colors.white },
-  verseRow: { flexDirection: 'row', gap: 14, marginBottom: 21 },
-  verseNum: { color: colors.deepGold, fontWeight: '900', fontSize: 21, lineHeight: 34, minWidth: 28 },
-  verseNumDark: { color: colors.gold },
-  verseText: { flex: 1, color: colors.royalBlue, fontSize: 22, lineHeight: 34 },
-  verseTextDark: { color: 'rgba(255,255,255,0.92)' },
-  chapterVerseRow: { flexDirection: 'row', gap: 12, marginBottom: 15 },
-  chapterVerseNum: { color: colors.deepGold, fontWeight: '900', fontSize: 18, lineHeight: 29, minWidth: 28 },
-  chapterVerseNumDark: { color: colors.gold },
-  chapterVerseText: { flex: 1, color: colors.royalBlue, fontSize: 18, lineHeight: 29 },
-  chapterVerseTextDark: { color: 'rgba(255,255,255,0.92)' },
-  chapterBody: { color: colors.royalBlue, fontSize: 18, lineHeight: 30 },
-  chapterBodyDark: { color: 'rgba(255,255,255,0.92)' },
-  empty: { color: colors.slate, fontSize: 16, lineHeight: 24 },
-  emptyDark: { color: 'rgba(255,255,255,0.72)' },
-  notice: { flexDirection: 'row', gap: 8, backgroundColor: colors.paleGold, padding: 12, borderRadius: 12, marginTop: 4 },
-  noticeDark: { backgroundColor: 'rgba(212,175,55,0.1)' },
-  noticeText: { flex: 1, color: colors.royalBlue, lineHeight: 19 },
-  noticeTextDark: { color: 'rgba(255,255,255,0.78)' },
-  copyright: { color: colors.muted, fontSize: 12, marginTop: 14 },
-  copyrightDark: { color: 'rgba(255,255,255,0.54)' },
-  chapterNav: { marginTop: 16, minHeight: 64, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, flexDirection: 'row', alignItems: 'center', overflow: 'hidden', ...shadows.soft },
-  chapterNavDark: { backgroundColor: 'rgba(255,255,255,0.04)', borderColor: 'rgba(212,175,55,0.24)' },
-  navButton: { flex: 1, minHeight: 64, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8, paddingHorizontal: 8 },
-  navText: { color: colors.royalBlue, fontWeight: '800' },
-  navTextDark: { color: colors.gold },
-  navDivider: { width: 1, height: 38, backgroundColor: 'rgba(212,175,55,0.32)' },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(2,8,23,0.58)', justifyContent: 'flex-end', padding: 16 },
-  modalCard: { maxHeight: '78%', borderRadius: 20, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, padding: 16, ...shadows.lift },
-  modalCardDark: { backgroundColor: '#071231', borderColor: 'rgba(212,175,55,0.28)' },
-  modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
-  modalTitle: { color: colors.royalBlue, fontSize: 24, fontWeight: '900' },
-  modalTitleDark: { color: colors.gold },
-  noteReference: { color: colors.slate, fontWeight: '800', marginTop: 2 },
-  noteReferenceDark: { color: 'rgba(255,255,255,0.62)' },
-  modalClose: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.paleGold, alignItems: 'center', justifyContent: 'center' },
-  modalCloseDark: { backgroundColor: 'rgba(255,255,255,0.07)' },
-  modalList: { gap: 10, paddingBottom: 8 },
-  pickerRow: { minHeight: 58, borderRadius: 14, borderWidth: 1, borderColor: colors.softLine, backgroundColor: colors.white, paddingHorizontal: 14, paddingVertical: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  pickerRowDark: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(212,175,55,0.2)' },
-  pickerRowActive: { borderColor: colors.deepGold, backgroundColor: colors.paleGold },
-  pickerCopy: { flex: 1 },
-  pickerTitle: { color: colors.royalBlue, fontWeight: '900', fontSize: 17 },
-  pickerTitleDark: { color: colors.white },
-  pickerTitleActive: { color: colors.royalBlue },
-  pickerDetail: { color: colors.muted, marginTop: 2, fontWeight: '700' },
-  pickerDetailDark: { color: 'rgba(255,255,255,0.62)' },
-  numberGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingBottom: 8 },
-  numberOption: { width: 54, height: 48, borderRadius: 14, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.softLine, alignItems: 'center', justifyContent: 'center' },
-  numberOptionDark: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(212,175,55,0.22)' },
-  numberOptionActive: { backgroundColor: colors.royalBlue, borderColor: colors.deepGold },
-  numberOptionActiveDark: { backgroundColor: colors.gold },
-  numberText: { color: colors.royalBlue, fontWeight: '900', fontSize: 17 },
-  numberTextDark: { color: colors.white },
-  numberTextActive: { color: colors.white },
-  noteInput: { minHeight: 150, borderRadius: 14, borderWidth: 1, borderColor: colors.softLine, backgroundColor: '#F8FAFC', color: colors.textBody, padding: 14, textAlignVertical: 'top', lineHeight: 21 },
-  noteInputDark: { backgroundColor: 'rgba(255,255,255,0.05)', borderColor: 'rgba(212,175,55,0.22)', color: colors.white },
-  saveNoteButton: { minHeight: 50, borderRadius: 999, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center', marginTop: 12 },
-  saveNoteText: { color: '#071231', fontWeight: '900' },
-});
+/* --------------------------------------------------------------------------
+ * One style sheet, both themes, no hand-rolled dark siblings. Every colour
+ * comes from lib/theme.ts so light mode is designed rather than inherited,
+ * and nothing that holds words is locked to a fixed height — a reader on the
+ * largest phone font must never lose the end of a verse.
+ * ----------------------------------------------------------------------- */
+const useStyles = createThemedStyles((t: AppTheme) =>
+  StyleSheet.create({
+    root: { flex: 1 },
+    safe: { flex: 1 },
+    scroll: { paddingHorizontal: t.spacing.lg, paddingTop: 10, paddingBottom: 112 },
+
+    header: { flexDirection: 'row', alignItems: 'center', gap: 14, marginBottom: 18 },
+    seal: { width: 114, height: 88 },
+    title: { flex: 1, color: t.colors.textPrimary, fontWeight: '900', fontSize: 38 },
+    headerActions: { flexDirection: 'row', gap: 10 },
+    headerIcon: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.low,
+    },
+
+    versionRow: { flexDirection: 'row', gap: 10, marginBottom: t.spacing.lg },
+    versionPill: {
+      flex: 1,
+      minHeight: 58,
+      borderRadius: 17,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      backgroundColor: t.colors.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.low,
+    },
+    versionPillDisabled: { opacity: 0.45 },
+    versionPillActive: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+    versionText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 20 },
+    versionTextActive: { color: t.colors.textOnAccent },
+
+    selectorCard: {
+      minHeight: 92,
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surface,
+      flexDirection: 'row',
+      alignItems: 'center',
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      marginBottom: 14,
+      ...t.elevation.medium,
+    },
+    selector: { flex: 1, alignSelf: 'stretch', minHeight: 88, justifyContent: 'center', paddingHorizontal: 12 },
+    selectorPressed: { opacity: 0.7 },
+    selectorLabel: { color: t.colors.accent, textTransform: 'uppercase', fontWeight: '800', fontSize: t.type.overline },
+    selectorValueRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6, marginTop: 6 },
+    selectorValue: { flex: 1, color: t.colors.textPrimary, fontWeight: '900', fontSize: 22 },
+    selectorDivider: { width: 1, alignSelf: 'stretch', marginVertical: 18, backgroundColor: t.colors.border },
+
+    toolCard: {
+      minHeight: 78,
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surface,
+      flexDirection: 'row',
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      marginBottom: t.spacing.lg,
+      overflow: 'hidden',
+      ...t.elevation.medium,
+    },
+    tool: { flex: 1, alignSelf: 'stretch', minHeight: 76, alignItems: 'center', justifyContent: 'center', gap: 5 },
+    toolText: { color: t.colors.textPrimary, fontWeight: '800' },
+
+    readerCard: {
+      borderRadius: t.radius.xl,
+      padding: 20,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      ...t.elevation.medium,
+    },
+    chapterTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 36, marginBottom: 8 },
+    ornament: { width: 155, height: 2, backgroundColor: t.colors.accentSolid, marginBottom: 20 },
+    placeNote: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 20, marginBottom: 16 },
+
+    loadingRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 },
+    loadingText: { flex: 1, color: t.colors.textSecondary, fontWeight: '800' },
+
+    problemBlock: {
+      alignItems: 'center',
+      gap: 12,
+      paddingVertical: 24,
+      paddingHorizontal: 8,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.accentMuted,
+      marginBottom: 8,
+    },
+    problemText: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 23, textAlign: 'center' },
+    retryButton: {
+      minHeight: 48,
+      paddingHorizontal: 26,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.low,
+    },
+    retryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+
+    verseRow: { flexDirection: 'row', gap: 14, marginBottom: 21 },
+    verseNum: { color: t.colors.accent, fontWeight: '900', minWidth: 30 },
+    verseText: { flex: 1, color: t.colors.textPrimary },
+    chapterVerseRow: { flexDirection: 'row', gap: 12, marginBottom: 15 },
+    chapterVerseNum: { color: t.colors.accent, fontWeight: '900', minWidth: 30 },
+    chapterVerseText: { flex: 1, color: t.colors.textPrimary },
+    chapterBody: { color: t.colors.textPrimary },
+
+    notice: {
+      flexDirection: 'row',
+      gap: 8,
+      backgroundColor: t.colors.accentMuted,
+      padding: 12,
+      borderRadius: t.radius.md,
+      marginTop: 4,
+    },
+    noticeText: { flex: 1, color: t.colors.textSecondary, lineHeight: 20 },
+    copyright: { color: t.colors.textMuted, fontSize: t.type.overline, marginTop: 14 },
+
+    chapterNav: {
+      marginTop: t.spacing.lg,
+      minHeight: 66,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.surfaceSunken,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      flexDirection: 'row',
+      alignItems: 'center',
+      overflow: 'hidden',
+    },
+    navButton: { flex: 1, alignSelf: 'stretch', minHeight: 64, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 8, paddingHorizontal: 8 },
+    navText: { color: t.colors.textPrimary, fontWeight: '800' },
+    navDivider: { width: 1, alignSelf: 'stretch', marginVertical: 14, backgroundColor: t.colors.border },
+
+    modalBackdrop: { flex: 1, backgroundColor: t.colors.overlay, justifyContent: 'flex-end', padding: t.spacing.lg },
+    modalCard: {
+      maxHeight: '78%',
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      padding: t.spacing.lg,
+      ...t.elevation.high,
+    },
+    modalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 12 },
+    modalHeaderCopy: { flex: 1 },
+    modalTitle: { color: t.colors.textPrimary, fontSize: 24, fontWeight: '900' },
+    noteReference: { color: t.colors.textSecondary, fontWeight: '800', marginTop: 2 },
+    modalClose: {
+      width: 48,
+      height: 48,
+      borderRadius: 24,
+      backgroundColor: t.colors.accentMuted,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pickerNote: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 20, marginBottom: 12 },
+    modalList: { gap: 10, paddingBottom: 8 },
+    pickerRow: {
+      minHeight: 60,
+      minWidth: 52,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      backgroundColor: t.colors.surface,
+      paddingHorizontal: t.spacing.lg,
+      paddingVertical: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+      ...t.elevation.low,
+    },
+    pickerRowActive: { borderColor: t.colors.accentBorder, backgroundColor: t.colors.accentMuted },
+    pickerCopy: { flex: 1 },
+    pickerTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+    pickerTitleActive: { color: t.colors.accent },
+    pickerDetail: { color: t.colors.textMuted, marginTop: 2, fontWeight: '700' },
+
+    numberGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, paddingBottom: 8 },
+    numberOption: {
+      width: 56,
+      minHeight: 50,
+      borderRadius: 14,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...t.elevation.low,
+    },
+    numberOptionActive: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+    numberText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+    numberTextActive: { color: t.colors.textOnAccent },
+
+    noteInput: {
+      minHeight: 150,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+      backgroundColor: t.colors.surfaceSunken,
+      color: t.colors.textPrimary,
+      padding: 14,
+      textAlignVertical: 'top',
+      lineHeight: 22,
+    },
+    saveNoteButton: {
+      minHeight: 52,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 10,
+      marginTop: 12,
+      ...t.elevation.low,
+    },
+    saveNoteButtonBusy: { opacity: 0.75 },
+    saveNoteText: { color: t.colors.textOnAccent, fontWeight: '900' },
+  })
+);

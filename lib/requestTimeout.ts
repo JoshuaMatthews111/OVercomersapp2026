@@ -148,6 +148,16 @@ export async function fetchWithTimeout(
 
 const STORAGE_OBJECT_PATH = '/storage/v1/object/';
 
+/**
+ * Edge functions do real work before they answer. Deleting an account walks
+ * about twenty tables and then removes the person's files, which comfortably
+ * outruns the everyday 15-second budget — and an aborted deletion leaves
+ * somebody half-removed, which is the worst outcome of all. Found 2026-09-18
+ * while wiring in-app account deletion for App Review.
+ */
+const EDGE_FUNCTION_PATH = '/functions/v1/';
+const EDGE_FUNCTION_TIMEOUT_MS = 90_000;
+
 // These storage endpoints carry a small JSON body. They are metadata calls, not
 // file transfers, so they keep the everyday budget — a flat two minutes on a
 // signing call just means the screen hangs for two minutes when storage is sick.
@@ -184,8 +194,9 @@ function requestBodySize(body: unknown): number {
  * file write, which is sized to the bytes being written.
  */
 export function supabaseFetchTimeoutMs(input: RequestInfo | URL, init?: RequestInit): number {
-  if (!init?.body) return DEFAULT_TIMEOUT_MS;
   const url = requestUrlOf(input);
+  if (url.includes(EDGE_FUNCTION_PATH)) return EDGE_FUNCTION_TIMEOUT_MS;
+  if (!init?.body) return DEFAULT_TIMEOUT_MS;
   if (!url.includes(STORAGE_OBJECT_PATH)) return DEFAULT_TIMEOUT_MS;
   if (STORAGE_METADATA_PATHS.some((path) => url.includes(path))) return DEFAULT_TIMEOUT_MS;
   const size = requestBodySize(init.body);
