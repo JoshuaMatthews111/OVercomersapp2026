@@ -400,8 +400,7 @@ const PERMISSION_ANSWERS = /^(don.?t allow|deny|not now|limit access|only while 
 async function handlePermissionSheet(route, control) {
   const nodes = await tree();
   const words = nodes.map(labelOf).filter(Boolean).join(" | ");
-  const answer = nodes.find((n) => n.frame && /^(don.?t allow|deny|not now)$/i.test(labelOf(n)))
-    ?? nodes.find((n) => n.frame && PERMISSION_ANSWERS.test(labelOf(n)));
+  const answer = nodes.find((n) => n.frame && /^(don.?t allow|deny|not now)$/i.test(labelOf(n)));
   // No system answer button, no permission sheet — whatever the words say.
   if (!answer) return false;
   const what = (words.match(/[^|]*(?:would like|access to|allow)[^|]*/i) ?? [words.slice(0, 160)])[0].trim();
@@ -533,6 +532,9 @@ async function signIn(tag) {
   const submit = await tapLabelled(/^sign in$/i);
   note(tag + " submit", submit.ok ? 'pressed "' + submit.tapped + '"' : submit.why);
   await sleep(9000);
+  // First login can raise the OS notification sheet before Profile is
+  // readable. Decline it before judging whether authentication succeeded.
+  await handlePermissionSheet('/welcome', tag + ' sign-in');
   signedInProof = await proveSignedIn();
 
   // A rejected sign-in raises a modal alert. Left open, it swallows every
@@ -561,6 +563,7 @@ async function signIn(tag) {
  */
 let signedInProof = { ok: false, why: "not checked yet" };
 async function proveSignedIn() {
+  await handlePermissionSheet('/profile', 'session verification');
   await simctl(["openurl", UDID, SCHEME + "://profile"]).catch(() => undefined);
   await sleep(1500);
   await tapLabelled(/^open$/i);

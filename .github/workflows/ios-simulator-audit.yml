@@ -90,9 +90,9 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
             -derivedDataPath ios/build \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES \
             build | tail -40
           echo "APP_PATH=$(find ios/build/Build/Products -name '*.app' -maxdepth 2 | head -1)" >> $GITHUB_ENV
 
