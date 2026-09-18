@@ -72,3 +72,24 @@ Then Nexora verify (never self-certify a fix):
     Send a notice, Library). Keep it that simple; no nine-role picker.
 22. expo-image and react-native-webview are native modules: any change
     that needs them ships as a new EAS build, not only an OTA update.
+
+## Map engine (changed 2026-09-18)
+
+The evangelism map runs on **MapLibre** with free OpenStreetMap tiles
+(`https://tiles.openfreemap.org/styles/liberty`). It needs **no API key and no
+billing account**. `react-native-maps` was removed because Google Maps on
+Android requires a billing-enabled key and card verification failed on every
+account tried.
+
+Do not reintroduce `react-native-maps` or any keyed map provider without a
+working billing account. If the tile host ever fails, swap only the style URL
+— the rest of the screen is provider-neutral.
+
+These map behaviours must keep working:
+- Region outlines colored by status (GeoJSON fill + line layer).
+- Tap a drawn region to select it (JS point-in-polygon on the tap point).
+- Center pins for regions with no outline; contact and live-worker pins.
+- Draw an outline by tapping corners; undo, cancel, save.
+- My location, region search, zoom in/out, fit-to-region.
+- Points are stored as {latitude, longitude} and converted to [lng, lat] only
+  at the MapLibre boundary. Never change the stored shape.
