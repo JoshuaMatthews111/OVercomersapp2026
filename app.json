@@ -39,6 +39,7 @@
       }
     },
     "plugins": [
+      "./plugins/with-short-app-name",
       "expo-router",
       "expo-location",
       "expo-notifications",

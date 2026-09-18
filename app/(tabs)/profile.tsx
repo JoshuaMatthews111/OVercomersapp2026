@@ -47,6 +47,7 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [settingsDetail, setSettingsDetail] = useState<SettingsDetail>(null);
   const [showNotificationSettings, setShowNotificationSettings] = useState(false);
+  const [savingNotificationPrefs, setSavingNotificationPrefs] = useState(false);
   useEffect(() => {
     if (params.settings === 'notifications') {
       setShowNotificationSettings(true);
@@ -231,12 +232,18 @@ export default function ProfileScreen() {
   }
 
   async function toggleNotificationPreference(key: keyof NotificationPreferences) {
+    if (savingNotificationPrefs) return;
+    const previous = notificationPrefs;
     const next = { ...notificationPrefs, [key]: !notificationPrefs[key] };
+    setSavingNotificationPrefs(true);
     setNotificationPrefs(next);
     try {
       await saveNotificationPreferences(next);
     } catch (err) {
+      setNotificationPrefs(previous);
       Alert.alert('Preference not saved', friendlyError(err, 'Please check your connection and try again.'));
+    } finally {
+      setSavingNotificationPrefs(false);
     }
   }
 
@@ -354,7 +361,7 @@ export default function ProfileScreen() {
                   <Text style={[styles.notificationTitle, dark && styles.notificationTitleDark]}>Notification Preferences</Text>
                   <Text style={[styles.notificationBody, dark && styles.notificationBodyDark]}>Choose what OGN can send to this device. You can also turn notifications off in your phone settings.</Text>
                   {notificationRows.map((row) => (
-                    <Pressable key={row.key} onPress={() => toggleNotificationPreference(row.key)} style={[styles.notificationRow, dark && styles.notificationRowDark]}>
+                    <Pressable key={row.key} accessibilityRole="switch" accessibilityLabel={row.label} accessibilityState={{ checked: notificationPrefs[row.key], disabled: savingNotificationPrefs }} disabled={savingNotificationPrefs} onPress={() => toggleNotificationPreference(row.key)} style={[styles.notificationRow, dark && styles.notificationRowDark]}>
                       <Ionicons name={row.icon} size={20} color={dark ? colors.gold : colors.royalBlue} />
                       <Text style={[styles.notificationLabel, dark && styles.notificationLabelDark]}>{row.label}</Text>
                       <View style={[styles.switchTrack, notificationPrefs[row.key] && styles.switchTrackOn]}>
@@ -362,7 +369,7 @@ export default function ProfileScreen() {
                       </View>
                     </Pressable>
                   ))}
-                  <Pressable onPress={enablePushNotifications} style={styles.enablePushButton}>
+                  <Pressable accessibilityRole="button" accessibilityLabel="Enable Push on This Device" disabled={loading} onPress={enablePushNotifications} style={styles.enablePushButton}>
                     <Ionicons name="notifications" size={18} color="#071231" />
                     <Text style={styles.enablePushText}>Enable Push on This Device</Text>
                   </Pressable>

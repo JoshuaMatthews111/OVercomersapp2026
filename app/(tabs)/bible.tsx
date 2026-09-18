@@ -171,7 +171,7 @@ export default function BibleScreen() {
   }
 
   function selectVerse(verse: number) {
-    setReadMode('chapter');
+    setReadMode('verse');
     setSelection((current) => normalizeBibleSelection({ ...current, verse }));
     setPickerMode(null);
   }

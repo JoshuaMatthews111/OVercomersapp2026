@@ -22,7 +22,9 @@ const statusColor: Record<Territory['status'], string> = {
 };
 
 export default function MapsWebScreen() {
-  const { access } = useAccessProfile();
+  const { access, loadingAccess } = useAccessProfile();
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadingMap, setLoadingMap] = useState(true);
   const [territoryList, setTerritoryList] = useState<Territory[]>([]);
   const [contactList, setContactList] = useState<OutreachContact[]>([]);
   const [selected, setSelected] = useState<Territory | null>(null);
@@ -36,12 +38,13 @@ export default function MapsWebScreen() {
   }
 
   useEffect(() => {
+    if (loadingAccess || !access.canUseEvangelism) return;
     Promise.all([getTerritories(), getOutreachContacts()]).then(([territories, contacts]) => {
       setTerritoryList(territories);
       setContactList(contacts);
       setSelected(territories[0] || null);
-    });
-  }, []);
+    }).catch((err) => setLoadError(friendlyError(err, 'Outreach regions could not load. Please reopen this screen to try again.'))).finally(() => setLoadingMap(false));
+  }, [loadingAccess, access.canUseEvangelism]);
 
   const children = useMemo(() => territoryList.filter((territory) => territory.parentId === selected?.id), [selected, territoryList]);
   const relatedContacts = useMemo(() => {
@@ -161,7 +164,7 @@ export default function MapsWebScreen() {
   }
 
   if (!selected) {
-    return <Screen><EvangelismBackButton onPress={goBack} /><AppHeader title="Evangelism Map" /><Card><Text style={styles.body}>Loading territories...</Text></Card></Screen>;
+    return <Screen><EvangelismBackButton onPress={goBack} /><AppHeader title="Evangelism Map" /><Card><Text style={styles.body}>{loadingMap ? 'Loading territories…' : loadError || 'No outreach regions are available yet.'}</Text></Card></Screen>;
   }
 
   return (

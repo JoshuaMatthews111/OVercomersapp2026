@@ -193,10 +193,15 @@ export default function MapsScreen() {
   }
 
   async function toggleCheckin() {
+    if (busy) return;
     if (checkinId) {
-      await endCheckin(checkinId).catch(() => undefined);
-      setCheckinId(null);
-      setWorkers((current) => current.filter((w) => w.id !== checkinId));
+      setBusy(true);
+      try {
+        await endCheckin(checkinId);
+        setCheckinId(null);
+        setWorkers((current) => current.filter((w) => w.id !== checkinId));
+      } catch (err) { Alert.alert('Check-in is still active', friendlyError(err, 'Please try ending your check-in again.')); }
+      finally { setBusy(false); }
       return;
     }
     setBusy(true);
@@ -244,8 +249,9 @@ export default function MapsScreen() {
   }
 
   async function addRecord() {
-    if (!selected) return;
+    if (!selected || busy) return;
     if (!record.name.trim()) return Alert.alert('Name needed', 'Add a person or household name first.');
+    setBusy(true);
     try {
       const status = record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made';
       const saved = await saveOutreachContact({
@@ -267,6 +273,8 @@ export default function MapsScreen() {
       Alert.alert('Saved', 'The record is attached to this region.');
     } catch (err) {
       Alert.alert('Not saved', friendlyError(err, 'Your account may need evangelism permission.'));
+    } finally {
+      setBusy(false);
     }
   }
 

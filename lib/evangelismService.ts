@@ -1,4 +1,3 @@
-import { contacts, territories } from '../data/mockData';
 import { OutreachContact, Territory } from '../types/models';
 import { supabase } from './supabase';
 
@@ -45,12 +44,13 @@ function mapTerritoryRow(row: any): Territory {
 }
 
 export async function getTerritories(): Promise<Territory[]> {
-  if (!hasSupabase) return territories;
+  if (!hasSupabase) return [];
   // territories_geo returns boundary and center as plain numbers / GeoJSON.
   const { data, error } = await supabase.rpc('territories_geo');
   if (!error && data?.length) return data.map(mapTerritoryRow);
   const fallback = await supabase.from('territories').select('*').order('created_at');
-  if (fallback.error || !fallback.data?.length) return territories;
+  if (fallback.error) throw fallback.error;
+  if (!fallback.data?.length) return [];
   return fallback.data.map(mapTerritoryRow);
 }
 
@@ -143,9 +143,10 @@ export function subscribeLiveWorkers(onChange: () => void) {
 }
 
 export async function getOutreachContacts(): Promise<OutreachContact[]> {
-  if (!hasSupabase) return contacts;
+  if (!hasSupabase) return [];
   const { data, error } = await supabase.from('outreach_contacts').select('*').order('created_at', { ascending: false }).limit(100);
-  if (error || !data) return contacts;
+  if (error) throw error;
+  if (!data) return [];
   return data.map((row) => ({
     id: row.id,
     territoryId: row.territory_id,

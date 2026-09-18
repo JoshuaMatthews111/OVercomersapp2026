@@ -37,6 +37,7 @@ export default function StoryViewerScreen() {
   const remaining = useMemo(() => storyRemainingLabel({ publishedAt, expiresAt }), [publishedAt, expiresAt]);
   const isVideo = Boolean(mediaUrl && isVideoUrl(mediaUrl));
   const [paused, setPaused] = useState(false);
+  const [held, setHeld] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
@@ -56,7 +57,7 @@ export default function StoryViewerScreen() {
     else router.replace('/(tabs)' as any);
   }
   useEffect(() => {
-    if (isVideo || !mediaReady || imageFailed || paused || shareOpen || !foreground) return;
+    if (isVideo || !mediaReady || imageFailed || paused || held || shareOpen || !foreground) return;
     const current = (playback as any).__getValue ? (playback as any).__getValue() : 0;
     const animation = Animated.timing(playback, {
       toValue: 1,
@@ -66,7 +67,7 @@ export default function StoryViewerScreen() {
     });
     animation.start(({ finished }) => { if (finished) close(); });
     return () => animation.stop();
-  }, [isVideo, mediaReady, imageFailed, paused, shareOpen, foreground]);
+  }, [isVideo, mediaReady, imageFailed, paused, held, shareOpen, foreground]);
   const progressWidth = playback.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   async function openAction() {
@@ -97,9 +98,9 @@ export default function StoryViewerScreen() {
         </Pressable>
       </View>
 
-      <Pressable style={styles.mediaFrame} onPressIn={() => setPaused(true)} onPressOut={() => setPaused(false)} accessibilityLabel="Story media, hold to pause">
+      <Pressable style={styles.mediaFrame} onPressIn={() => setHeld(true)} onPressOut={() => setHeld(false)} accessibilityLabel="Story media, hold to pause">
         {isVideo && mediaUrl && !imageFailed ? (
-          <StoryVideo url={mediaUrl} onEnd={close} progress={playback} paused={paused || shareOpen || !foreground} onReady={() => setMediaReady(true)} onError={() => setImageFailed(true)} />
+          <StoryVideo url={mediaUrl} onEnd={close} progress={playback} paused={paused || held || shareOpen || !foreground} onReady={() => setMediaReady(true)} onError={() => setImageFailed(true)} />
         ) : mediaUrl && !imageFailed ? (
           <Image source={{ uri: mediaUrl }} resizeMode="contain" style={styles.media} onLoad={() => setMediaReady(true)} onError={() => setImageFailed(true)} />
         ) : (

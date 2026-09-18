@@ -65,13 +65,17 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
         <Pressable style={StyleSheet.absoluteFill} onPress={() => { if (!sending) onClose(); }} accessibilityLabel="Close share sheet" />
         <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: '88%', flexGrow: 0 }} contentContainerStyle={[styles.sheet, { paddingBottom: Math.max(16, insets.bottom) }, dark && styles.sheetDark]}>
           <View style={styles.grabber} />
-          <Text style={[styles.heading, dark && styles.textDark]}>Share to a group</Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={[styles.heading, dark && styles.textDark]}>Share to a group</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close group sharing" disabled={sending} onPress={onClose} style={{ minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' }}><Ionicons name="close" size={22} color={dark ? colors.white : colors.royalBlue} /></Pressable>
+          </View>
           {item ? (
             <View style={[styles.itemCard, dark && styles.itemCardDark]}>
               <Ionicons name={iconFor(item.kind)} size={20} color={colors.gold} />
               <View style={{ flex: 1 }}>
                 <Text numberOfLines={1} style={[styles.itemTitle, dark && styles.textDark]}>{item.title}</Text>
                 {item.speaker ? <Text numberOfLines={1} style={[styles.itemMeta, dark && styles.textDimDark]}>{item.speaker}</Text> : null}
+                {item.scripture ? <Text style={[styles.itemMeta, dark && styles.textDimDark, { marginTop: 8, lineHeight: 20 }]}>{item.scripture.text}</Text> : null}
               </View>
             </View>
           ) : null}
