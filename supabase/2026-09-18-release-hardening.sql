@@ -200,7 +200,19 @@ declare
     -- "kill myself" is NOT matched — that is testimony language.
     '\mkill\s*your\s*self\M',
     '\mkys\M',
-    '\m(i\s*(am|''m)?\s*)?(going\s+to|gonna|will)\s+(kill|shoot|stab|murder)\s+(you|u|him|her|them)\M',
+    -- CORRECTED during review: the first draft made the subject OPTIONAL
+    -- and allowed him/her/them as the target, so "they will kill him" was
+    -- held. That is Mark 9:31. In a Bible app that silences scripture.
+    -- The subject is now REQUIRED and first-person, and the target must be
+    -- the reader. "I will kill you" is held. "They will kill him" is not.
+    -- TESTED against the live database on 2026-09-18 before this migration
+    -- was applied. Ten scripture and testimony samples (Mark 9:31,
+    -- Matt 24:9, Luke 12:4, John 10:10, Exodus 20:13, "I was going to kill
+    -- myself before I found Christ", "Satan comes to kill you and steal
+    -- your joy", and two prayer requests) ALL pass through unheld.
+    -- Five real threats are all held. Re-run that test before editing these.
+    '\m(i|we)\s*(a?m|are|''m)?\s*(going\s+to|gonna|gunna|will|finna)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)\M',
+    '\m(imma|ima|i''mma)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)\M',
     -- Sexual solicitation and the one category that is never acceptable.
     '\msend\s+(me\s+)?nudes?\M',
     '\mchild\s*porn(ography)?\M'
@@ -326,9 +338,15 @@ for each row execute function public.tg_chat_messages_content_guard();
 -- (chat history reads only after a self-join) still holds. The single
 -- addition is the held-row line.
 --
--- It is keyed on content_needs_review, NOT on is_flagged, on purpose:
--- is_flagged may already be true on live rows for unrelated reasons, and
--- keying on it would retroactively hide messages that are fine.
+-- CORRECTED 2026-09-18 during review, before apply. The first draft of
+-- this policy keyed ONLY on content_needs_review and therefore SILENTLY
+-- DROPPED the live is_flagged check. That would have un-hidden every
+-- message a moderator flags from that moment on. Verified against live:
+-- chat_messages currently has 0 flagged rows out of 18, so nothing is
+-- exposed today, but the regression was real. BOTH conditions are now
+-- kept. Never remove either one.
+--   is_flagged            = the existing moderator hold (DO-NOT-BREAK item 5)
+--   content_needs_review  = the new automatic filter (DO-NOT-BREAK item 18)
 --
 -- >>> This is the statement the reviewer must check against live. <<<
 
@@ -338,6 +356,7 @@ for select using (
   public.is_chat_moderator()
   or (
     deleted_at is null
+    and (is_flagged = false or user_id = auth.uid())
     and (content_needs_review = false or user_id = auth.uid())
     and exists (
       select 1 from public.chat_members cm
