@@ -1,12 +1,23 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import React from 'react';
-import { Linking, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useState } from 'react';
+import { Alert, Linking, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Card } from '../components/Card';
 import { Screen } from '../components/Screen';
 import { colors, shadows } from '../lib/theme';
 
 export default function SupportScreen() {
+  const [showEmail, setShowEmail] = useState(false);
+
+  async function emailSupport() {
+    setShowEmail(true);
+    try {
+      await Linking.openURL('mailto:support@overcomersglobalnetwork.com');
+    } catch {
+      Alert.alert('Email support', 'No email app could be opened. Write to support@overcomersglobalnetwork.com from your email app, or use the support website below.');
+    }
+  }
+
   function goBack() {
     if (router.canGoBack()) router.back();
     else router.replace('/(tabs)/profile' as any);
@@ -27,10 +38,11 @@ export default function SupportScreen() {
       <Card style={styles.card}>
         <Text style={styles.cardTitle}>Need help?</Text>
         <Text style={styles.body}>Contact OGN support for account access, prayer request questions, media issues, giving links, or app feedback.</Text>
-        <Pressable onPress={() => Linking.openURL('mailto:support@overcomersglobalnetwork.com')} style={styles.primaryButton}>
+        <Pressable accessibilityRole="button" onPress={emailSupport} style={styles.primaryButton}>
           <Ionicons name="mail-outline" size={20} color="#071231" />
           <Text style={styles.primaryText}>Email Support</Text>
         </Pressable>
+        {showEmail && <Text selectable accessibilityLiveRegion="polite" style={styles.body}>Email support@overcomersglobalnetwork.com. If your email app did not open, copy this address or use the support website below.</Text>}
         <Pressable onPress={() => Linking.openURL('https://overcomersglobalnetwork.com/support')} style={styles.secondaryButton}>
           <Ionicons name="open-outline" size={20} color={colors.royalBlue} />
           <Text style={styles.secondaryText}>Open Support Website</Text>
