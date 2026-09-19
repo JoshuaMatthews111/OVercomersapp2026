@@ -1,7 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import { Platform } from 'react-native';
-import { getNotificationPreferences, registerForPushNotifications } from './notificationService';
+import { registerForPushNotifications } from './notificationService';
 
 /**
  * Until now a phone only registered for push when the person went to
@@ -22,8 +22,20 @@ export async function ensurePushRegistered(): Promise<'registered' | 'skipped'> 
       if (asked) return 'skipped';
       await AsyncStorage.setItem(ASKED_KEY, new Date().toISOString());
     }
-    const preferences = await getNotificationPreferences();
-    await registerForPushNotifications(preferences);
+    /**
+     * No preferences are read or written here on purpose.
+     *
+     * This used to call getNotificationPreferences() first and hand the result
+     * straight back to registerForPushNotifications(), which wrote the very
+     * same values back to the server — four round trips at every launch that
+     * could not change anything. Keeping the token fresh is the whole job of
+     * this function; what the person has ticked is the Notifications screen's
+     * job, and it saves on every tap. Somebody who has never opened that
+     * screen has no preferences row at all and still receives everything:
+     * supabase/functions/send-push-notification/index.ts:102 is
+     * `if (!prefs) return true;`.
+     */
+    await registerForPushNotifications();
     return 'registered';
   } catch {
     return 'skipped';

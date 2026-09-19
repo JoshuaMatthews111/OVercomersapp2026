@@ -14,7 +14,7 @@ const NO_LOCATION = 'The place for this gathering has not been shared yet';
 const NO_DATE = 'The date and time have not been shared yet';
 
 export default function EventDetailScreen() {
-  const { theme, dark } = useAppTheme();
+  const { theme } = useAppTheme();
   const styles = useStyles(theme);
   const params = useLocalSearchParams<{
     id?: string;
@@ -73,6 +73,10 @@ export default function EventDetailScreen() {
   const locationText = event?.location?.trim() || '';
   const watchUrl = event?.registrationUrl?.trim() || '';
 
+  // This goes back to whatever screen opened the event — Home most of the
+  // time, but the notice that linked here just as often. The buttons that use
+  // it therefore say "Go back", not "Back to Home", because "Home" is only
+  // where it lands when there is nothing behind it.
   function goBack() {
     if (router.canGoBack()) router.back();
     else router.replace('/(tabs)' as any);
@@ -106,7 +110,7 @@ export default function EventDetailScreen() {
   return (
     <Screen style={styles.page}>
       <View style={styles.header}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Back to Home" onPress={goBack} style={styles.backButton}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={goBack} style={styles.backButton}>
           <Ionicons name="chevron-back" size={24} color={theme.colors.accent} />
         </Pressable>
         <View style={{ flex: 1 }}>
@@ -220,10 +224,10 @@ export default function EventDetailScreen() {
         <Card style={styles.emptyCard}>
           <Ionicons name="calendar-outline" size={32} color={theme.colors.accent} />
           <Text style={styles.emptyTitle}>We could not find that event</Text>
-          <Text style={styles.body}>It may have been changed or taken down. Go back to Home to see what is on.</Text>
-          <Pressable accessibilityRole="button" accessibilityLabel="Back to Home" onPress={goBack} style={styles.retryButton}>
-            <Ionicons name="home-outline" size={18} color={theme.colors.textOnAccent} />
-            <Text style={styles.retryText}>Back to Home</Text>
+          <Text style={styles.body}>It may have been changed or taken down. Go back and see what else is on.</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={goBack} style={styles.retryButton}>
+            <Ionicons name="arrow-back-outline" size={18} color={theme.colors.textOnAccent} />
+            <Text style={styles.retryText}>Go back</Text>
           </Pressable>
         </Card>
       )}

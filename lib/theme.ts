@@ -122,6 +122,31 @@ export type ThemeColorTokens = {
   borderStrong: string;
   /** The brand gold rim. The light weight is not the dark weight. */
   accentBorder: string;
+  /**
+   * The edge that makes a CARD a card, with or without a shadow behind it.
+   *
+   * `border` above is a divider and nothing more — it was measured at 1.41:1
+   * on the light surface and 1.52:1 worst case in dark, which is fine for a
+   * line BETWEEN two rows of one panel and useless as the outline OF a panel.
+   * Wherever a screen built a panel out of `surface` + `border` and left the
+   * elevation off, the panel had no visible edge at all, because in light mode
+   * the card fill and the page fill are 1.01:1 apart — the boundary was doing
+   * all the work on its own and it was below threshold.
+   *
+   * This token never depends on a shadow. Use it for anything that has to read
+   * as its own surface: cards, panels, sheets, round icon buttons, the empty
+   * state, the map canvas. Keep `border` for hairlines inside one of those.
+   */
+  cardBorder: string;
+
+  /**
+   * The two halves of a progress bar. They are a matched PAIR and are the only
+   * correct way to draw one — `accentSolid` on `surfaceSunken` measured
+   * 1.78:1 in light mode, so the one indicator the owner asked for ("no way
+   * for me to check to see if it's loading") was invisible on a light screen.
+   */
+  progressTrack: string;
+  progressFill: string;
 
   /** Headlines and body copy. */
   textPrimary: string;
@@ -180,6 +205,8 @@ export type AppTheme = {
   /** Convenience tuple for `<LinearGradient colors={theme.pageGradient}>`. */
   pageGradient: [string, string, string];
   elevation: ThemeElevationTokens;
+  /** The six outreach states plus `quiet`, each with a colour, words and a glyph. */
+  status: StatusTokens;
   spacing: typeof spacing;
   radius: typeof radius;
   type: typeof typeScale;
@@ -212,6 +239,23 @@ const lightColors: ThemeColorTokens = {
   border: '#DED7C6',          // 1.41:1 on surface — quiet divider only, always paired with elevation
   borderStrong: '#7C8497',    // 3.69:1 on surface, 3.18:1 worst case — passes 1.4.11
   accentBorder: '#A67C1A',    // 3.74:1 on surface, 3.23:1 worst case — the light-weight gold rim
+  // Warm taupe, so the edge of a card belongs to a cream page instead of
+  // borrowing a cool grey from somewhere else. Measured against every light
+  // ground a card can land on: surface #FFFDF8 3.55:1, surfaceRaised #FFFFFF
+  // 3.61:1, pageBottom #F7F3E6 3.25:1, surfaceSunken #F1ECE0 3.06:1.
+  // WORST CASE 3.06:1 — passes WCAG 1.4.11 (3:1) with no shadow at all.
+  // It replaces a 1.41:1 hairline, so the card edge is 2.2x stronger.
+  cardBorder: '#8E8676',
+
+  // A navy groove with the brand gold running along it — the same shape light
+  // mode's member sees in dark mode, and unmistakably OGN.
+  //   fill #D4AF37 on track #1A2A55 .... 6.63:1  (was 1.78:1 on surfaceSunken)
+  //   track #1A2A55 on surface #FFFDF8  13.71:1  (so an EMPTY bar still reads
+  //   as a bar; the old #F1ECE0 track was 1.16:1 on the card and vanished)
+  // Gold can never reach 3:1 against any lighter track — white is only
+  // 2.10:1 — so the track is what had to move, not the gold.
+  progressTrack: '#1A2A55',
+  progressFill: '#D4AF37',
 
   textPrimary: '#0B1D4D',     // brand navy — 13.73:1 worst case
   textSecondary: '#4B5563',   // 6.41:1 worst case
@@ -265,6 +309,21 @@ const darkColors: ThemeColorTokens = {
   border: 'rgba(212,175,55,0.24)',   // 1.56:1 against its own surface — quiet divider only
   borderStrong: 'rgba(212,175,55,0.62)', // 3.34:1 against its own surface — passes 1.4.11
   accentBorder: 'rgba(212,175,55,0.62)', // in dark the structural edge IS the gold rim
+  // In dark the card edge IS the gold rim the app already ships on the Home
+  // feature card (app/(tabs)/index.tsx:466), so nothing new is invented here.
+  // Composited over every dark ground a card can sit on, the weakest is
+  // surfaceRaised over pageBottom: 3.34:1. The old 0.24 rim was 1.52:1.
+  cardBorder: 'rgba(212,175,55,0.62)',
+
+  // Dark already had enough fill/track separation (8.31:1), but its track was
+  // invisible — rgba(2,8,23,0.55) over a dark card measures 1.00:1, so at 0%
+  // there was no bar on the screen at all, only empty space. Lifting the
+  // track to a white veil trades surplus fill contrast for a groove you can
+  // actually see waiting:
+  //   fill #D4AF37 on track ............ 4.17:1 worst case (still >= 3:1)
+  //   track against what is behind it .. 1.41:1 worst, 1.55:1 best
+  progressTrack: 'rgba(255,255,255,0.14)',
+  progressFill: '#D4AF37',
 
   textPrimary: '#FFFFFF',              // 13.52:1 worst case
   textSecondary: 'rgba(255,255,255,0.78)', // 8.82:1 worst case
@@ -333,12 +392,95 @@ export const crestSize = {
   hero: { width: 120, height: 100 },
 };
 
+/* ------------------------------------------------------------------------- *
+ *  STATUS — the six outreach states, and the quiet seventh
+ *
+ *  The Reach tab and the map both mark a region's state. Until now they read
+ *  the raw constants at the top of this file, and three of the six dots were
+ *  below threshold on the dark card:
+ *
+ *    untapped       #B42318  2.06:1   follow_up_due  #6941C6  2.04:1
+ *    new_believer   #123A8F  1.31:1
+ *
+ *  Light mode was no better, and nobody had measured it: in_progress #D99A10
+ *  came out at 2.08:1, covered #1F9D55 at 2.96:1 and discipled #D4AF37 at
+ *  1.78:1 on the light card. Every value below is measured against the WORST
+ *  ground its own theme can put it on (for dark that is surfaceRaised over
+ *  pageBottom; for light it is surfaceSunken).
+ *
+ *  And colour is never the whole answer. About one man in twelve cannot
+ *  separate the red dot from the green one, and this screen belongs to
+ *  outreach leaders reading it outdoors on a phone. So every state carries a
+ *  `label` and an `icon` as well, and the rule for any screen using these is:
+ *
+ *      NEVER draw the colour on its own. Draw the icon, or the words, or both.
+ *
+ *  The words are deliberately plain. A leader glancing at this between doors
+ *  should not have to translate "follow_up_due" in his head.
+ * ------------------------------------------------------------------------- */
+
+/** The six stored states, plus `quiet` for a region with no dated evidence. */
+export type StatusKey = 'untapped' | 'in_progress' | 'covered' | 'follow_up_due' | 'new_believer' | 'discipled' | 'quiet';
+
+export type StatusTone = {
+  /** The mark. >= 3:1 on every surface of its own theme. */
+  color: string;
+  /** Soft wash behind a chip. Pair the text on it with `color`. */
+  muted: string;
+  /** Plain words. Status must never be colour alone — show this, or the icon. */
+  label: string;
+  /** The same thing in one or two words, for a chip in a narrow row. */
+  shortLabel: string;
+  /** Ionicons glyph, so the mark has a SHAPE and not only a colour. */
+  icon: string;
+};
+
+export type StatusTokens = Record<StatusKey, StatusTone>;
+
+/** Wording and glyphs are shared; only the weights change between themes. */
+const statusVoice: Record<StatusKey, { label: string; shortLabel: string; icon: string }> = {
+  untapped:      { label: 'Not reached yet',     shortLabel: 'Not reached', icon: 'ellipse-outline' },
+  in_progress:   { label: 'Being worked now',    shortLabel: 'In progress', icon: 'time-outline' },
+  covered:       { label: 'Covered',             shortLabel: 'Covered',     icon: 'checkmark-circle' },
+  follow_up_due: { label: 'Follow-up due',       shortLabel: 'Follow up',   icon: 'flag' },
+  new_believer:  { label: 'New believer here',   shortLabel: 'New believer', icon: 'sparkles' },
+  discipled:     { label: 'Being discipled',     shortLabel: 'Discipled',   icon: 'school-outline' },
+  quiet:         { label: 'No activity yet',     shortLabel: 'No activity', icon: 'remove-circle-outline' },
+};
+
+function tone(key: StatusKey, color: string, muted: string): StatusTone {
+  return { color, muted, ...statusVoice[key] };
+}
+
+/* Light. Worst case is against surfaceSunken #F1ECE0. */
+const lightStatus: StatusTokens = {
+  untapped:      tone('untapped',      '#B42318', '#FDECEC'), // 5.58:1  (was 5.58:1)
+  in_progress:   tone('in_progress',   '#92400E', '#FFF6DB'), // 6.01:1  (was 2.08:1 — #D99A10)
+  covered:       tone('covered',       '#146C43', '#EAF8EF'), // 5.47:1  (was 2.96:1 — #1F9D55)
+  follow_up_due: tone('follow_up_due', '#5B21B6', '#F1EAFE'), // 7.62:1  (was 5.62:1)
+  new_believer:  tone('new_believer',  '#123A8F', '#E8EEFB'), // 8.79:1  (was 8.79:1)
+  discipled:     tone('discipled',     '#8A5A00', '#FFF7E2'), // 5.03:1  (was 1.78:1 — #D4AF37)
+  quiet:         tone('quiet',         '#5B6474', '#F1ECE0'), // 5.06:1  (was 4.22:1 — #667085)
+};
+
+/* Dark. Worst case is against surfaceRaised composited over pageBottom. */
+const darkStatus: StatusTokens = {
+  untapped:      tone('untapped',      '#FCA5A5', 'rgba(180,35,24,0.22)'),   // 7.13:1  (was 2.06:1)
+  in_progress:   tone('in_progress',   '#F2C14E', 'rgba(217,154,16,0.18)'),  // 8.06:1  (was 5.53:1)
+  covered:       tone('covered',       '#5BD98A', 'rgba(31,157,85,0.18)'),   // 7.56:1  (was 3.87:1)
+  follow_up_due: tone('follow_up_due', '#C4B5FD', 'rgba(105,65,198,0.24)'),  // 7.33:1  (was 2.04:1)
+  new_believer:  tone('new_believer',  '#93C5FD', 'rgba(18,58,143,0.30)'),   // 7.50:1  (was 1.31:1)
+  discipled:     tone('discipled',     '#D4AF37', 'rgba(212,175,55,0.16)'),  // 6.43:1  (was 6.43:1)
+  quiet:         tone('quiet',         'rgba(255,255,255,0.62)', 'rgba(255,255,255,0.08)'), // 6.16:1 (was 2.72:1)
+};
+
 const lightTheme: AppTheme = {
   mode: 'light',
   dark: false,
   colors: lightColors,
   pageGradient: [lightColors.pageTop, lightColors.pageMid, lightColors.pageBottom],
   elevation: lightElevation,
+  status: lightStatus,
   spacing,
   radius,
   type: typeScale,
@@ -350,6 +492,7 @@ const darkTheme: AppTheme = {
   colors: darkColors,
   pageGradient: [darkColors.pageTop, darkColors.pageMid, darkColors.pageBottom],
   elevation: darkElevation,
+  status: darkStatus,
   spacing,
   radius,
   type: typeScale,
@@ -387,5 +530,211 @@ export function createThemedStyles<T>(factory: (theme: AppTheme) => T): (theme: 
     const made = factory(theme);
     cache.set(theme.mode, made);
     return made;
+  };
+}
+
+/**
+ * One status, safely. An unknown or missing key reads as `quiet` rather than
+ * throwing or, worse, painting a whole region a colour nothing earned.
+ */
+export function statusTone(theme: AppTheme, key: string | null | undefined): StatusTone {
+  if (key && key in theme.status) return theme.status[key as StatusKey];
+  return theme.status.quiet;
+}
+
+/* ------------------------------------------------------------------------- *
+ *  HERO ARTWORK — where the sphere actually is inside each file
+ *
+ *  The problem this replaces
+ *  -------------------------
+ *  Every full-bleed globe header was placed with a number typed into the
+ *  screen. app/(tabs)/profile.tsx (the More tab) does it with one rule —
+ *  `brandGlobe: { left: '-9%', width: '118%' }` at line 1377 — and then feeds
+ *  it TWO COMPLETELY DIFFERENT PAINTINGS depending on the theme. They are not
+ *  the same picture in two colourways:
+ *
+ *    profile-header-globe-dark.png   an Earth limb that fills the whole frame
+ *    profile-header-globe-light.png  a pale globe sitting off to the right
+ *
+ *  Measured 2026-09-19 on the files themselves, by taking the
+ *  intensity-weighted centroid of everything that differs from the corner
+ *  background, at the 5% and 8% thresholds, and averaging the two. That
+ *  estimator reproduces the numbers already recorded for the Home globes
+ *  (0.5615 -> 0.5646 and 0.6233 -> 0.6217, both within 0.003), so it is the
+ *  same ruler that measured the H1 fix:
+ *
+ *    profile-header-globe-dark.png   2172 x 724   focus x 0.6529  y 0.2825
+ *    profile-header-globe-light.png  2172 x 724   focus x 0.8094  y 0.4720
+ *
+ *  The two subjects sit 0.1565 of the canvas apart — 15.7% of the width, or
+ *  14.0% measured with a tighter 20% threshold, which is the figure in the
+ *  audit. Either way ONE offset cannot be right for both. With `left: -9%`
+ *  the More tab shows the middle of the canvas, roughly x 0.27 to 0.72 on a
+ *  393pt phone: fine for the dark limb, and it pushes the light globe almost
+ *  entirely off the right-hand edge. That is why the More tab reads as an
+ *  empty cream band in light mode.
+ *
+ *  The fix is to stop typing offsets into screens. A screen says WHICH
+ *  artwork and HOW BIG the box is; this file knows where the subject is.
+ *
+ *  Nothing here changes the Home globe. `homeGlobeDark` / `homeGlobeLight`
+ *  carry the focus numbers already shipping in app/(tabs)/index.tsx verbatim,
+ *  and with `anchorY` equal to `focusY` the maths below reduces term for term
+ *  to the `globePlacement()` that screen already uses. Adopting it cannot
+ *  drift the H1 fix.
+ * ------------------------------------------------------------------------- */
+
+export type HeroArt = {
+  /** Pixel size of the file, so nobody has to guess the aspect ratio. */
+  sourceWidth: number;
+  sourceHeight: number;
+  /** Optical centre of the subject inside the file, as a fraction of the file. */
+  focusX: number;
+  focusY: number;
+  /** Columns left of this fraction are leftover export furniture; keep them off screen. */
+  cropLeft: number;
+  /** Where in the BOX the subject should land, as a fraction of the box. */
+  anchorX: number;
+  anchorY: number;
+  /** How strongly the art sits behind the copy on top of it. */
+  opacity: number;
+};
+
+/**
+ * Every hero bitmap in the app, keyed by the thing it belongs to. A screen
+ * picks one with `theme.dark ? heroArt.profileGlobeDark : heroArt.profileGlobeLight`
+ * and never writes a percentage again.
+ */
+export const heroArt = {
+  /* Home. Verbatim from app/(tabs)/index.tsx — do not re-measure, H1 is settled. */
+  homeGlobeDark: {
+    sourceWidth: 1448, sourceHeight: 1086,
+    focusX: 0.5615, focusY: 0.3315,
+    cropLeft: 0,
+    anchorX: 0.5, anchorY: 0.3315,
+    opacity: 0.72,
+  } as HeroArt,
+  homeGlobeLight: {
+    sourceWidth: 1448, sourceHeight: 1086,
+    focusX: 0.6233, focusY: 0.5253,
+    // A leftover card frame is baked into this file: a grey hairline at
+    // x 115-116 and a fainter top edge at y 143. Nothing left of x 123
+    // (0.085 of 1448) may ever be on screen.
+    cropLeft: 0.085,
+    anchorX: 0.5, anchorY: 0.5253,
+    opacity: 0.98,
+  } as HeroArt,
+
+  /* More tab. Measured 2026-09-19. These two are the defect. */
+  profileGlobeDark: {
+    sourceWidth: 2172, sourceHeight: 724,
+    focusX: 0.6529, focusY: 0.2825,
+    cropLeft: 0,
+    // The name and motto sit in a scrim over the left 74% of the header, so
+    // the bright part of the artwork belongs just outside it.
+    anchorX: 0.74, anchorY: 0.2825,
+    opacity: 0.82,
+  } as HeroArt,
+  profileGlobeLight: {
+    sourceWidth: 2172, sourceHeight: 724,
+    focusX: 0.8094, focusY: 0.4720,
+    cropLeft: 0,
+    anchorX: 0.74, anchorY: 0.4720,
+    opacity: 0.96,
+  } as HeroArt,
+
+  /* Media tab. Measured the same way, same day, so the set is complete. */
+  mediaGlobeDark: {
+    sourceWidth: 357, sourceHeight: 387,
+    focusX: 0.3535, focusY: 0.4068,
+    cropLeft: 0,
+    anchorX: 0.5, anchorY: 0.4068,
+    opacity: 0.82,
+  } as HeroArt,
+  mediaGlobeLight: {
+    sourceWidth: 820, sourceHeight: 678,
+    focusX: 0.5920, focusY: 0.4936,
+    cropLeft: 0,
+    anchorX: 0.5, anchorY: 0.4936,
+    opacity: 0.96,
+  } as HeroArt,
+};
+
+export type HeroArtPlacement = {
+  width: number;
+  height: number;
+  translateX: number;
+  translateY: number;
+  /** Ready to spread into a style: `style={{ ...placed, transform: placed.transform }}`. */
+  transform: [{ translateX: number }, { translateY: number }];
+  opacity: number;
+};
+
+/**
+ * Size and place a hero bitmap so its subject lands on the artwork's anchor
+ * and the picture still reaches every edge of the box.
+ *
+ * Returns a plain width/height plus a translate — never a negative `left` or
+ * `top` — so the result does not depend on how a parent happens to clip.
+ * `resizeMode` should be "cover" or "stretch"; the size returned is already
+ * the exact aspect ratio of the file, so neither one can distort it.
+ */
+export function heroArtPlacement(art: HeroArt, boxWidth: number, boxHeight: number): HeroArtPlacement {
+  const { sourceWidth: W, sourceHeight: H } = art;
+  const focusPxX = art.focusX * W;
+  const focusPxY = art.focusY * H;
+  const cropPxX = art.cropLeft * W;
+
+  const scale =
+    Math.max(
+      // Horizontal: the left edge of the box stays covered...
+      art.anchorX > 0 ? (art.anchorX * boxWidth) / focusPxX : 0,
+      // ...and so does the right edge.
+      art.anchorX < 1 ? ((1 - art.anchorX) * boxWidth) / (W - focusPxX) : 0,
+      // Leftover export furniture never reaches the screen.
+      focusPxX > cropPxX ? (art.anchorX * boxWidth) / (focusPxX - cropPxX) : 0,
+      // Vertical: same two conditions, top and bottom.
+      art.anchorY > 0 ? (art.anchorY * boxHeight) / focusPxY : 0,
+      art.anchorY < 1 ? ((1 - art.anchorY) * boxHeight) / (H - focusPxY) : 0,
+    ) * 1.01; // 1% bleed, so rounding can never open a seam at an edge
+
+  const translateX = art.anchorX * boxWidth - focusPxX * scale;
+  const translateY = art.anchorY * boxHeight - focusPxY * scale;
+
+  return {
+    width: W * scale,
+    height: H * scale,
+    translateX,
+    translateY,
+    transform: [{ translateX }, { translateY }],
+    opacity: art.opacity,
+  };
+}
+
+/**
+ * A whole progress bar, ready to spread, so a screen cannot pair the fill
+ * with the wrong track by accident. `height` is the bar's thickness; 10 is
+ * the size already used on Home and on Admin.
+ *
+ *   const bar = progressBarStyles(theme);
+ *   <View style={bar.track}><View style={[bar.fill, { width: `${pct}%` }]} /></View>
+ *
+ * Give the outer view `accessibilityRole="progressbar"` and an
+ * `accessibilityValue`, because a member using VoiceOver has to be told it is
+ * working too — a colour, however well measured, says nothing out loud.
+ */
+export function progressBarStyles(theme: AppTheme, height = 10) {
+  return {
+    track: {
+      height,
+      borderRadius: theme.radius.pill,
+      backgroundColor: theme.colors.progressTrack,
+      overflow: 'hidden' as const,
+    },
+    fill: {
+      height: '100%' as const,
+      borderRadius: theme.radius.pill,
+      backgroundColor: theme.colors.progressFill,
+    },
   };
 }

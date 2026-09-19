@@ -3,9 +3,18 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { router, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import {ActivityIndicator, Animated, AppState, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import {ActivityIndicator, Alert, Animated, AppState, Easing, Image, Linking, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ShareToChatSheet } from '../components/ShareToChat';
+import {
+  alreadyReported,
+  blockChatUser,
+  blockHidesContent,
+  isReportableStoryId,
+  reportStory,
+  storySafetyFor,
+} from '../lib/chatService';
+import { friendlyError } from '../lib/errorMessages';
 import { storyRemainingLabel } from '../lib/storyTime';
 import { AppTheme, createThemedStyles, themes } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
@@ -22,6 +31,9 @@ const TAP_MS = 320;
 // becomes a single one and the header carries the position instead.
 const MAX_SEGMENTS = 10;
 
+/** Why the ring ran out, when it ran out for a reason worth explaining. */
+type EmptyReason = 'reported' | 'blocked';
+
 /** One thing the viewer plays: a photo or a video, plus the words with it. */
 export type StorySlide = {
   id: string;
@@ -34,6 +46,12 @@ export type StorySlide = {
   accent: string;
   publishedAt?: string;
   expiresAt?: string;
+  /**
+   * Who wrote it — `app_stories.created_by`. Optional, because Home does not
+   * carry it today; when it is missing the viewer looks it up itself so that
+   * "Block this person" has somebody to block.
+   */
+  authorId?: string;
 };
 
 /*
@@ -97,7 +115,7 @@ export default function StoryViewerScreen() {
 
   // The playlist is read once. A deep link straight to /story-viewer has no
   // playlist waiting, so the params still describe a single, playable story.
-  const [slides] = useState<StorySlide[]>(() => {
+  const [slides, setSlides] = useState<StorySlide[]>(() => {
     const handed = takePlaylist();
     if (handed && handed.slides.length) return handed.slides;
     return [
@@ -135,6 +153,16 @@ export default function StoryViewerScreen() {
   const [shareOpen, setShareOpen] = useState(false);
   const [foreground, setForeground] = useState(AppState.currentState === 'active');
   const [linkNote, setLinkNote] = useState<string | null>(null);
+  /** Open while the report/block sheet is up, so the story does not play on behind it. */
+  const [safetyOpen, setSafetyOpen] = useState(false);
+  const [safetyBusy, setSafetyBusy] = useState(false);
+  const [viewerId, setViewerId] = useState<string | null>(null);
+  /** story id -> who wrote it. Filled once, from the same row the member already reads. */
+  const [authorById, setAuthorById] = useState<Record<string, string>>({});
+  /** True when we could not find out who wrote these, so the sheet can say so. */
+  const [authorsUnavailable, setAuthorsUnavailable] = useState(false);
+  /** Set once there is nothing left to play, and why. Never a blank screen. */
+  const [emptyReason, setEmptyReason] = useState<EmptyReason | null>(null);
 
   const remaining = useMemo(
     () => storyRemainingLabel({ publishedAt: current?.publishedAt, expiresAt: current?.expiresAt }),
@@ -174,6 +202,48 @@ export default function StoryViewerScreen() {
 
   function goNext() {
     goTo(index + 1);
+  }
+
+  /**
+   * Take stories off THIS person's ring and keep playing.
+   *
+   * Nothing is deleted and nobody else's ring changes — this is one viewer's
+   * own copy of the queue. The next story slides into the same position, so
+   * reporting one story does not drop somebody back to Home.
+   */
+  function dropStories(matches: (slide: StorySlide) => boolean, reason: EmptyReason) {
+    const kept = slides.filter((slide) => !matches(slide));
+    if (kept.length === slides.length) return;
+    if (!kept.length) {
+      // Not close() — a viewer that opens and shuts again in the same blink
+      // reads as broken. Say plainly why there is nothing here.
+      setSlides(kept);
+      setEmptyReason(reason);
+      return;
+    }
+
+    // Stay on the story being watched if it survived; otherwise go to the next
+    // one that did — never backwards onto something already seen.
+    const playingId = slides[index]?.id;
+    let nextIndex = kept.findIndex((slide) => slide.id === playingId);
+    if (nextIndex === -1) {
+      const after = slides.slice(index + 1).find((slide) => kept.some((keeper) => keeper.id === slide.id));
+      if (!after) {
+        setEmptyReason(reason);
+        return;
+      }
+      nextIndex = kept.findIndex((slide) => slide.id === after.id);
+    }
+
+    // Only restart the timer when a different story is now on screen.
+    if (kept[nextIndex]?.id !== playingId) {
+      playback.setValue(0);
+      setMediaReady(false);
+      setMediaFailed(false);
+      setPaused(false);
+    }
+    setSlides(kept);
+    setIndex(nextIndex);
   }
 
   function goPrev() {
@@ -220,7 +290,10 @@ export default function StoryViewerScreen() {
   ).current;
 
   useEffect(() => {
-    if (isVideo || !mediaReady || mediaFailed || paused || held || shareOpen || !foreground) return;
+    // `emptyReason` matters here: once the ring has run out the quiet panel is
+    // on screen, and a timer still running behind it would close the screen
+    // out from under the person a few seconds after they read it.
+    if (emptyReason || isVideo || !mediaReady || mediaFailed || paused || held || shareOpen || safetyOpen || !foreground) return;
     const at = (playback as unknown as { __getValue?: () => number }).__getValue?.() ?? 0;
     const animation = Animated.timing(playback, {
       toValue: 1,
@@ -232,7 +305,7 @@ export default function StoryViewerScreen() {
       if (result.finished) goNext();
     });
     return () => animation.stop();
-  }, [index, isVideo, mediaReady, mediaFailed, paused, held, shareOpen, foreground]);
+  }, [index, isVideo, mediaReady, mediaFailed, paused, held, shareOpen, safetyOpen, foreground, emptyReason]);
 
   // A story with no picture and no video has nothing to play, so give the
   // words their seven seconds too instead of freezing on them.
@@ -243,6 +316,126 @@ export default function StoryViewerScreen() {
 
   const progressWidth = playback.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
+  /* -------------------------------------------------------------------------
+   * Report and block
+   *
+   * Members publish stories now, so Apple guideline 1.2 and Google Play's
+   * user-generated-content policy both apply to this screen: a way to report
+   * what you are looking at, a way to stop seeing the person who posted it,
+   * and a leader who can act. The report goes into `public.content_reports`,
+   * in the same shape and the same queue the database's own filter uses, and
+   * the block is the SAME list chat reads — lib/chatService.ts keeps one list,
+   * so blocking somebody here also silences them in every room.
+   *
+   * The person who was reported or blocked is never told, and nothing on their
+   * phone changes.
+   * ----------------------------------------------------------------------- */
+
+  // The ring as it arrived. Stories leave it as they are reported or blocked;
+  // the lookup below is done once, against the list we started with.
+  const openedWith = useRef(slides).current;
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      // One question, answered in one place: who wrote these, and which of them
+      // must this person not be shown. A failure inside there costs only "Block
+      // this person" — never the story, and never the screen.
+      const safety = await storySafetyFor(openedWith).catch(() => null);
+      if (cancelled || !safety) return;
+      setViewerId(safety.viewerId);
+      setAuthorById(safety.authorById);
+      setAuthorsUnavailable(safety.authorsUnavailable);
+      // Anything already reported on this phone, and anything by somebody who
+      // was blocked in chat, is gone before the first frame plays.
+      const hidden = new Set(safety.hiddenStoryIds);
+      const allReported = safety.hiddenStoryIds.every((id) => alreadyReported('app_story', id));
+      dropStories((slide) => hidden.has(slide.id), allReported ? 'reported' : 'blocked');
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openedWith]);
+
+  const authorOfCurrent = current ? authorById[current.id] : undefined;
+  const mine = Boolean(viewerId && authorOfCurrent && authorOfCurrent === viewerId);
+  /** Shown on anything this person did not write that is a real story row. */
+  const canFlagStory = isReportableStoryId(current?.id) && !mine;
+
+  async function reportThisStory(slide: StorySlide) {
+    if (safetyBusy) return;
+    setSafetyBusy(true);
+    try {
+      const result = await reportStory(slide.id, 'Member report: story');
+      dropStories((item) => item.id === slide.id, 'reported');
+      Alert.alert(
+        'Thank you for telling us',
+        result.alreadyReported
+          ? 'You have already told us about this one, and a leader has it. We have taken it out of your stories.'
+          : 'A leader from the ministry will read this. We have taken it out of your stories.',
+      );
+    } catch (err) {
+      Alert.alert('That did not go through', friendlyError(err, 'Please try again.'));
+    } finally {
+      setSafetyBusy(false);
+    }
+  }
+
+  async function blockStoryAuthor(authorId: string) {
+    if (safetyBusy) return;
+    setSafetyBusy(true);
+    try {
+      await blockChatUser(authorId);
+      const hides = await blockHidesContent();
+      if (hides) dropStories((item) => (authorById[item.id] || '') === authorId, 'blocked');
+      Alert.alert(
+        'Blocked',
+        hides
+          ? 'You will not see their stories or their messages. They are not told about this.'
+          : 'Because you help look after the ministry you still see what they post, so you can act on it. They are not told about this.',
+      );
+    } catch (err) {
+      Alert.alert('That did not go through', friendlyError(err, 'Please try again.'));
+    } finally {
+      setSafetyBusy(false);
+    }
+  }
+
+  function openStoryActions() {
+    const slide = current;
+    if (!slide || safetyBusy) return;
+    const authorId = authorById[slide.id];
+    const buttons: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [
+      {
+        text: alreadyReported('app_story', slide.id) ? 'Already reported' : 'Report this story',
+        onPress: () => { setSafetyOpen(false); void reportThisStory(slide); },
+      },
+    ];
+    // Only when we know who wrote it. Android shows three buttons at most, and
+    // these are the three.
+    if (authorId && authorId !== viewerId) {
+      buttons.push({
+        text: 'Block this person',
+        style: 'destructive',
+        onPress: () => { setSafetyOpen(false); void blockStoryAuthor(authorId); },
+      });
+    }
+    buttons.push({ text: 'Cancel', style: 'cancel', onPress: () => setSafetyOpen(false) });
+    setSafetyOpen(true);
+    // A missing "Block this person" is explained rather than just absent: the
+    // two cases are "we could not check who posted this" and "nobody is on it".
+    const canBlock = Boolean(authorId && authorId !== viewerId);
+    Alert.alert(
+      'This story',
+      canBlock
+        ? 'Tell a leader about it, or stop seeing what this person posts.'
+        : authorsUnavailable
+          ? 'You can tell a leader about this story. We could not check who posted it just now, so blocking is not available here — their name in a chat room will offer it.'
+          : 'You can tell a leader about this story.',
+      buttons,
+      { cancelable: true, onDismiss: () => setSafetyOpen(false) },
+    );
+  }
+
   async function openAction() {
     if (!actionUrl) return;
     try {
@@ -250,6 +443,42 @@ export default function StoryViewerScreen() {
     } catch {
       setLinkNote('That link could not be opened on this phone.');
     }
+  }
+
+  // Nothing left to play, for a reason worth saying out loud. Every hook above
+  // has already run, so this early return is safe.
+  if (emptyReason) {
+    return (
+      <LinearGradient
+        colors={theme.pageGradient}
+        style={[styles.root, { paddingTop: insets.top + 14, paddingBottom: Math.max(insets.bottom, 10) }]}
+      >
+        <View style={styles.topBar}>
+          <View style={styles.storyHeaderCopy} />
+          <Pressable accessibilityRole="button" accessibilityLabel="Close stories" onPress={close} style={styles.chromeButton}>
+            <Ionicons name="close" size={24} color={theme.colors.textPrimary} />
+          </Pressable>
+        </View>
+        <View style={styles.quietPanel}>
+          <Ionicons
+            name={emptyReason === 'reported' ? 'heart-outline' : 'hand-left-outline'}
+            size={44}
+            color={theme.colors.accent}
+          />
+          <Text style={styles.quietTitle}>
+            {emptyReason === 'reported' ? 'Thank you for telling us' : 'Nothing to show here'}
+          </Text>
+          <Text style={styles.quietBody}>
+            {emptyReason === 'reported'
+              ? 'A leader from the ministry will read it. That is the end of the stories for now.'
+              : 'These are from someone you blocked, so they are not shown to you. They are not told about this.'}
+          </Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Back to home" onPress={close} style={styles.quietButton}>
+            <Text style={styles.quietButtonText}>Back to home</Text>
+          </Pressable>
+        </View>
+      </LinearGradient>
+    );
   }
 
   return (
@@ -291,6 +520,17 @@ export default function StoryViewerScreen() {
             {remaining}
           </Text>
         </View>
+        {canFlagStory ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Report this story, or block the person who posted it"
+            disabled={safetyBusy}
+            onPress={openStoryActions}
+            style={styles.chromeButton}
+          >
+            <Ionicons name="flag-outline" size={19} color={theme.colors.textPrimary} />
+          </Pressable>
+        ) : null}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={paused ? 'Resume story' : 'Pause story'}
@@ -311,7 +551,7 @@ export default function StoryViewerScreen() {
             url={mediaUrl}
             onEnd={goNext}
             progress={playback}
-            paused={paused || held || shareOpen || !foreground}
+            paused={paused || held || shareOpen || safetyOpen || !foreground}
             onReady={() => setMediaReady(true)}
             onError={() => setMediaFailed(true)}
           />
@@ -382,6 +622,20 @@ export default function StoryViewerScreen() {
             <Ionicons name="people-outline" size={18} color={theme.colors.textPrimary} />
             <Text style={styles.shareText}>To a group</Text>
           </Pressable>
+          {/* The same thing as the flag in the top bar, written out. Whichever
+              one a person looks for, it is there. */}
+          {canFlagStory ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Report this story, or block the person who posted it"
+              disabled={safetyBusy}
+              onPress={openStoryActions}
+              style={styles.reportButton}
+            >
+              <Ionicons name="flag-outline" size={17} color={theme.colors.textPrimary} />
+              <Text style={styles.reportText}>Report</Text>
+            </Pressable>
+          ) : null}
         </View>
       </ScrollView>
 
@@ -546,5 +800,30 @@ const useStyles = createThemedStyles((t: AppTheme) =>
       borderColor: t.colors.borderStrong,
     },
     shareText: { color: t.colors.textPrimary, fontWeight: '800' },
+    reportButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 16,
+      minHeight: 48,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+    },
+    reportText: { color: t.colors.textPrimary, fontWeight: '800' },
+
+    quietPanel: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14, paddingHorizontal: 30 },
+    quietTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle, textAlign: 'center' },
+    quietBody: { color: t.colors.textSecondary, textAlign: 'center', lineHeight: 22, fontSize: t.type.body },
+    quietButton: {
+      minHeight: 48,
+      justifyContent: 'center',
+      paddingHorizontal: 24,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+      marginTop: 4,
+    },
+    quietButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
   }),
 );

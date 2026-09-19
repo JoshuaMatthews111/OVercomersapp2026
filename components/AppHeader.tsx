@@ -86,7 +86,11 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     borderRadius: 22,
     backgroundColor: t.colors.surfaceRaised,
     borderWidth: 1,
-    borderColor: t.colors.border,
+    // A round 44pt button whose fill is 1.01:1 from the page behind it has no
+    // shape at all unless its edge is real. `border` gave it 1.41:1 in light;
+    // `cardBorder` is 3.06:1 worst case in light and 3.34:1 worst case in
+    // dark, so the bell and the profile button read as buttons in both.
+    borderColor: t.colors.cardBorder,
     alignItems: 'center',
     justifyContent: 'center',
     ...(t.dark ? t.elevation.low : t.elevation.medium),

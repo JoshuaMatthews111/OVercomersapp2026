@@ -12,7 +12,7 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Animated, BackHandler, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Animated, BackHandler, Keyboard, KeyboardAvoidingView, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { getMyPrayerRequests, getPrayerRequests, submitPrayerRequest } from '../lib/contentService';
 import { friendlyError } from '../lib/errorMessages';
@@ -27,6 +27,12 @@ type Mode = 'submit' | 'mine';
 type Visibility = 'prayer-team' | 'public-wall';
 /** The list is one of these three things, never two of them at once. */
 type ListState = 'loading' | 'ready' | 'failed';
+
+/**
+ * How much empty room sits under the last card when the keyboard is down.
+ * The keyboard's own height is added to this while it is up — see Page.
+ */
+const SCROLL_BOTTOM_GAP = 72;
 
 export default function PrayerScreen() {
   const { theme } = useAppTheme();
@@ -375,6 +381,37 @@ export default function PrayerScreen() {
 
 // ---------- pieces ----------
 
+/**
+ * How many points of the screen the soft keyboard is covering right now, or 0
+ * when it is down.
+ *
+ * The keyboard is MEASURED rather than guessed. react-native 0.86 reports it
+ * on the event as `endCoordinates.height`
+ * (node_modules/react-native/Libraries/Components/Keyboard/Keyboard.d.ts —
+ * `KeyboardEvent { endCoordinates: KeyboardMetrics }`, and `KeyboardMetrics`
+ * carries `height`), so a 4.7-inch iPhone SE reporting 216pt and a 6.7-inch
+ * Pro Max reporting 336pt are both handled without a number being typed in
+ * here to go stale.
+ *
+ * iOS fires `keyboardWillShow` ahead of the animation, so the room is made as
+ * the keyboard rises. Android has no "will" event when the window is resized
+ * — the type definition above says so in as many words — so it listens for
+ * `keyboardDidShow` instead.
+ */
+function useKeyboardInset(): number {
+  const [inset, setInset] = useState(0);
+
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const shown = Keyboard.addListener(showEvent, (event) => setInset(event.endCoordinates.height));
+    const hidden = Keyboard.addListener(hideEvent, () => setInset(0));
+    return () => { shown.remove(); hidden.remove(); };
+  }, []);
+
+  return inset;
+}
+
 function Page({
   title,
   subtitle,
@@ -392,9 +429,10 @@ function Page({
 }) {
   const { theme, dark } = useAppTheme();
   const styles = useStyles(theme);
+  const keyboardInset = useKeyboardInset();
   return (
     <LinearGradient colors={theme.pageGradient} style={styles.root}>
-      <SafeAreaView style={styles.safe}>
+      <SafeAreaView edges={['top', 'left', 'right', 'bottom']} style={styles.safe}>
         <View style={styles.header}>
           <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={onBack} hitSlop={12} style={styles.backButton}>
             <Ionicons name="chevron-back" size={24} color={theme.colors.accent} />
@@ -404,18 +442,46 @@ function Page({
             {subtitle ? <Text style={styles.headerSubtitle}>{subtitle}</Text> : null}
           </View>
         </View>
-        <ScrollView
-          contentContainerStyle={styles.scroll}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            onRefresh ? (
-              <RefreshControl refreshing={Boolean(refreshing)} onRefresh={onRefresh} tintColor={theme.colors.accent} colors={[theme.colors.accentSolid]} />
-            ) : undefined
-          }
-        >
-          {children}
-        </ScrollView>
+        {/*
+          Somebody writing a prayer request has to be able to reach the button
+          that sends it. This screen had nothing lifting it at all, so on iOS
+          the keyboard sat on top of "Send request" and there was no way to
+          scroll it clear.
+
+          Two things do the work, and they are the same two the rest of the app
+          already uses (app/reset-password.tsx, app/chat-room.tsx,
+          app/(tabs)/bible.tsx):
+
+          1. The KeyboardAvoidingView shrinks the scrolling area by the height
+             the keyboard covers. 'padding' on iOS, 'height' on Android, never
+             left undefined — an undefined behaviour is the same as no
+             KeyboardAvoidingView at all on Android.
+          2. The scroll content keeps the keyboard's own measured height of
+             spare room underneath it, so the last control can always be
+             scrolled up past the top of the keyboard rather than stopping just
+             short of it.
+
+          `keyboardShouldPersistTaps="handled"` is what stops the first tap
+          being eaten: with the default ("never") the tap that lands while the
+          keyboard is up only dismisses the keyboard and the person has to tap
+          Send a second time.
+        */}
+        <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <ScrollView
+            style={styles.safe}
+            contentContainerStyle={[styles.scroll, { paddingBottom: SCROLL_BOTTOM_GAP + keyboardInset }]}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              onRefresh ? (
+                <RefreshControl refreshing={Boolean(refreshing)} onRefresh={onRefresh} tintColor={theme.colors.accent} colors={[theme.colors.accentSolid]} />
+              ) : undefined
+            }
+          >
+            {children}
+          </ScrollView>
+        </KeyboardAvoidingView>
       </SafeAreaView>
     </LinearGradient>
   );
@@ -500,7 +566,7 @@ const useStyles = createThemedStyles((t) =>
     safe: { flex: 1 },
     grow: { flex: 1 },
     dimmed: { opacity: 0.55 },
-    scroll: { paddingHorizontal: 18, paddingBottom: 72, paddingTop: 4 },
+    scroll: { paddingHorizontal: 18, paddingBottom: SCROLL_BOTTOM_GAP, paddingTop: 4 },
     header: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 18, paddingTop: 4, paddingBottom: 16 },
     backButton: {
       width: 48,

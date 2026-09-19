@@ -18,13 +18,21 @@ import { ActivityIndicator, Alert, Animated, BackHandler, Pressable, RefreshCont
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   AdminWorkbench,
+  ContentQueue,
+  ContentReport,
   ManagedMedia,
+  ReportedItem,
+  approveReportedItem,
+  closeContentReports,
   deleteMediaItem,
   deleteStory,
   getAdminWorkbench,
+  getContentQueue,
   grantUserRole,
+  markCareHandled,
   moderateMessage,
   PushAudience,
+  removeReportedItem,
   revokeUserRole,
   sendAdminPush,
   setMediaStatus,
@@ -51,7 +59,48 @@ type Done = { title: string; body?: string };
 
 /** Change the workbench that is already on screen, without a round trip. */
 type Patch = (workbench: AdminWorkbench) => AdminWorkbench;
-type RunAction = (done: Done, action: () => Promise<unknown>, patch?: Patch) => Promise<void>;
+/** The same, for the reports queue, which loads on its own. */
+type QueuePatch = (queue: ContentQueue) => ContentQueue;
+type RunAction = (done: Done, action: () => Promise<unknown>, patch?: Patch, queuePatch?: QueuePatch) => Promise<void>;
+
+/** Drop one card out of the queue the moment its button is pressed. */
+function withoutItem(key: string): QueuePatch {
+  return (queue) => ({ ...queue, items: queue.items.filter((item) => item.key !== key) });
+}
+
+/**
+ * "2 hours ago", the way a person says it.
+ *
+ * An alert with no time on it is an alert nobody can prioritise: the whole
+ * point of a pastoral-care row is that somebody reads it TODAY.
+ */
+function whenText(iso?: string): string {
+  if (!iso) return 'just now';
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return 'just now';
+  const minutes = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} day${days === 1 ? '' : 's'} ago`;
+  return new Date(then).toLocaleDateString();
+}
+
+/**
+ * Why this is on the list, in words a person would use.
+ *
+ * The database writes machine reasons — "auto-filter: held for review",
+ * "pastoral care: someone may need help". None of those go on screen. And a
+ * care row is never described as a violation or an offence, because it is
+ * neither: nobody did anything wrong and nothing was hidden.
+ */
+function reasonLine(report: ContentReport): string {
+  if (!report.automatic) return `${report.reporterName || 'A member'} reported this.`;
+  if (report.tier === 'care') return 'Picked up automatically from what was written.';
+  return 'Held automatically until a leader reads it.';
+}
 
 // The four switches a person can have. Everything else stays under the hood.
 const PEOPLE_SWITCHES: { role: AppRole; label: string; hint: string }[] = [
@@ -62,6 +111,39 @@ const PEOPLE_SWITCHES: { role: AppRole; label: string; hint: string }[] = [
   // reads prayer with is_staff_or_above, so this role alone grants nothing yet.
   { role: 'prayer_team', label: 'Prayer team', hint: 'Joins the prayer team' },
 ];
+
+/**
+ * A plain word for every role the database can actually hold.
+ *
+ * The four switches above are the only roles this screen GRANTS, but the
+ * people list shows whatever the database says a person already has — and it
+ * used to print the raw word when it did not recognise one, so the owner read
+ * "outreach_worker" and "super_admin" on his own congregation's page.
+ *
+ * Read out of the live app_role enum on 2026-09-19, all eleven values:
+ * visitor, member, outreach, staff, leader, admin, super_admin, prayer_team,
+ * media_admin, moderator, outreach_worker. Keyed by string rather than by
+ * AppRole on purpose: types/models.ts does NOT list outreach_worker, so a
+ * typed map would drop the very value that exposed this.
+ */
+const ROLE_LABELS: Record<string, string> = {
+  visitor: 'Visitor',
+  member: 'Member',
+  outreach: 'Outreach leader',
+  outreach_worker: 'Outreach worker',
+  staff: 'Staff',
+  leader: 'Leader',
+  admin: 'Admin',
+  super_admin: 'Admin',
+  prayer_team: 'Prayer team',
+  media_admin: 'Can post media',
+  moderator: 'Moderator',
+};
+
+/** Never show a database word to a person. "Outreach worker", not "outreach_worker". */
+function roleLabel(role: string): string {
+  return ROLE_LABELS[role] || role.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+}
 
 const AUDIENCES: { key: PushAudience; label: string }[] = [
   { key: 'all', label: 'Everyone' },
@@ -153,28 +235,49 @@ export default function AdminScreen() {
   const params = useLocalSearchParams<{ page?: string }>();
   const [page, setPage] = useState<Page>(typeof params.page === 'string' && ['review', 'post', 'people', 'notice', 'library'].includes(params.page) ? (params.page as Page) : 'home');
   const [workbench, setWorkbench] = useState<AdminWorkbench | null>(null);
+  const [queue, setQueue] = useState<ContentQueue | null>(null);
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
 
   const canOpen = !loadingAccess && access.canOpenAdmin;
+  // public.content_reports is readable only by is_staff_or_above(), and
+  // canManageContent mirrors exactly that set. Asking for it with anything
+  // less comes back as an empty list, which would read as "nothing waiting"
+  // when the truth is "you are not allowed to know".
+  const canReadReports = access.canManageContent;
 
   const refresh = useCallback(async () => {
     if (!canOpen) return;
-    try {
-      setWorkbench(await getAdminWorkbench());
+    // The queue and the workbench load side by side. A failure in either one
+    // must not blank the other — the moderation queue is the half that can
+    // have somebody waiting on it.
+    const [workbenchResult, queueResult] = await Promise.allSettled([
+      getAdminWorkbench(),
+      canReadReports ? getContentQueue() : Promise.resolve<ContentQueue>({ items: [], unavailable: [] }),
+    ]);
+
+    setQueue(
+      queueResult.status === 'fulfilled'
+        ? queueResult.value
+        : { items: [], unavailable: ['the reports queue'] }
+    );
+
+    if (workbenchResult.status === 'fulfilled') {
+      setWorkbench(workbenchResult.value);
       setLoadError('');
-    } catch (err) {
+    } else {
       // Never leave "All clear" sitting over a failed read (A4, NO-SILENT-FAILURE).
-      setLoadError(friendlyError(err, 'We could not load this page just now. Pull down to try again.'));
+      setLoadError(friendlyError(workbenchResult.reason, 'We could not load this page just now. Pull down to try again.'));
     }
-  }, [canOpen]);
+  }, [canOpen, canReadReports]);
 
   // Come back to Admin and it reloads. Post something, come back, it is there.
   useFocusEffect(
     useCallback(() => {
       if (!canOpen) {
         setWorkbench(null);
+        setQueue(null);
         return;
       }
       refresh();
@@ -206,6 +309,10 @@ export default function AdminScreen() {
     setWorkbench((current) => (current ? patch(current) : current));
   }, []);
 
+  const applyToQueue = useCallback((patch: QueuePatch) => {
+    setQueue((current) => (current ? patch(current) : current));
+  }, []);
+
   /**
    * Do one thing, say so, and show the result immediately.
    *
@@ -215,11 +322,12 @@ export default function AdminScreen() {
    * on screen changes at once and the reload happens quietly behind it.
    */
   const run = useCallback<RunAction>(
-    async (done, action, patch) => {
+    async (done, action, patch, queuePatch) => {
       setBusy(true);
       try {
         await action();
         if (patch) applyLocally(patch);
+        if (queuePatch) applyToQueue(queuePatch);
         Alert.alert(done.title, done.body);
         refresh().catch((err) =>
           setLoadError(friendlyError(err, 'We could not refresh this page. Pull down to try again.'))
@@ -230,15 +338,50 @@ export default function AdminScreen() {
         setBusy(false);
       }
     },
-    [applyLocally, refresh]
+    [applyLocally, applyToQueue, refresh]
   );
 
-  const heldMessages = (workbench?.messages || []).filter((m) => m.isFlagged);
-  const waitingStories = (workbench?.stories || []).filter((s) => s.status !== 'published');
+  // A report carries the whole story — what was written, who flagged it, when
+  // and why — so anything that has one is shown as a report and NOT a second
+  // time in the plain lists below. When the queue could not be read these sets
+  // are empty, so nothing is hidden by a failure.
+  const reportedChatIds = useMemo(
+    () => new Set((queue?.items || []).filter((i) => i.targetType === 'chat_message').map((i) => i.targetId)),
+    [queue]
+  );
+  const reportedStoryIds = useMemo(
+    () => new Set((queue?.items || []).filter((i) => i.targetType === 'app_story').map((i) => i.targetId)),
+    [queue]
+  );
+
+  const careItems = (queue?.items || []).filter((i) => i.tier === 'care');
+  const reviewItems = (queue?.items || []).filter((i) => i.tier === 'review');
+  const heldMessages = (workbench?.messages || []).filter((m) => m.isFlagged && !reportedChatIds.has(m.id));
+  const waitingStories = (workbench?.stories || []).filter((s) => s.status !== 'published' && !reportedStoryIds.has(s.id));
   const newPrayers = (workbench?.prayers || []).filter((p) => p.status === 'new');
-  const reviewCount = heldMessages.length + waitingStories.length + newPrayers.length;
-  const somethingMissing = Boolean(loadError) || Boolean(workbench?.unavailable.length);
+  const reviewCount = careItems.length + reviewItems.length + heldMessages.length + waitingStories.length + newPrayers.length;
+  const otherThanCare = reviewCount - careItems.length;
+  const somethingMissing = Boolean(loadError) || Boolean(workbench?.unavailable.length) || Boolean(queue?.unavailable.length);
   const stillLoading = workbench === null && !loadError;
+
+  /**
+   * What the Admin row says underneath its title. A pastoral-care alert is
+   * named there, not buried in a number, so the owner can see from the home
+   * screen that somebody may be struggling.
+   */
+  const reviewRowSub = stillLoading
+    ? 'Having a look...'
+    : somethingMissing
+      ? 'Some of this could not be loaded'
+      : careItems.length
+        ? `${careItems.length === 1 ? 'Someone' : `${careItems.length} people`} may need support${otherThanCare ? ` • ${otherThanCare} more waiting` : ''}`
+        : reviewCount
+          ? `${reviewCount} waiting`
+          // Only an account that can read the reports table has seen everything
+          // there is to see. Anyone else gets an invitation, not a promise.
+          : canReadReports
+            ? 'All clear'
+            : 'Open to check';
 
   if (loadingAccess) {
     return (
@@ -282,7 +425,7 @@ export default function AdminScreen() {
               icon="eye-outline"
               tone="danger"
               title="Needs your look"
-              sub={stillLoading ? 'Having a look...' : somethingMissing ? 'Some of this could not be loaded' : reviewCount ? `${reviewCount} waiting` : 'All clear'}
+              sub={reviewRowSub}
               badge={reviewCount}
               onPress={() => setPage('review')}
             />
@@ -308,9 +451,35 @@ export default function AdminScreen() {
               <Text style={styles.cardMeta}>Looking for anything that needs you...</Text>
             </View>
           ) : null}
-          {!stillLoading && !reviewCount && !somethingMissing ? (
+          {!stillLoading && !reviewCount && !somethingMissing && canReadReports ? (
             <Empty icon="checkmark-circle-outline" title="All clear" body="Nothing is waiting for you." />
           ) : null}
+          {queue?.unavailable.length ? (
+            <Notice tone="warn" text={`We could not load ${queue.unavailable.join(' or ')}. Pull down to try again.`} />
+          ) : null}
+          {!canReadReports && !stillLoading ? (
+            <Text style={styles.cardMeta}>
+              Reported posts are shown to OGN leaders and admins. You are seeing everything else that needs a look.
+            </Text>
+          ) : null}
+
+          {/* Care first, always. Nobody here is in trouble — somebody may be hurting. */}
+          {careItems.length ? <Label text="Someone may need support" /> : null}
+          {careItems.length ? (
+            <Text style={styles.cardMeta}>
+              These went out as normal and nothing about them is hidden. They are here because of what was written, so a
+              leader can quietly check in on the person.
+            </Text>
+          ) : null}
+          {careItems.map((item) => (
+            <CareCard key={item.key} item={item} run={run} busy={busy} />
+          ))}
+
+          {reviewItems.length ? <Label text="Reported or held" /> : null}
+          {reviewItems.map((item) => (
+            <ReportCard key={item.key} item={item} run={run} busy={busy} />
+          ))}
+
           {heldMessages.length ? <Label text="Held chat messages" /> : null}
           {heldMessages.map((m) => (
             <Card key={m.id}>
@@ -426,6 +595,128 @@ function confirmAction(title: string, body: string, confirmLabel: string, onYes:
     { text: 'Keep', style: 'cancel' },
     { text: confirmLabel, style: 'destructive', onPress: onYes },
   ]);
+}
+
+// ---------- The reports queue ----------
+
+/**
+ * A pastoral-care alert.
+ *
+ * Deliberately not a moderation card. It is a different colour, it carries a
+ * heart rather than an eye, it sits above everything else, and it has ONE
+ * button — because there is nothing here to approve or remove. The post is
+ * live, it was always live, and the only thing waiting is a person.
+ */
+function CareCard({ item, run, busy }: { item: ReportedItem; run: RunAction; busy: boolean }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const who = item.authorName || 'Someone';
+  return (
+    <View style={styles.careCard}>
+      <View style={styles.inlineRow}>
+        <Ionicons name="heart-outline" size={20} color={theme.colors.accent} />
+        <Text style={[styles.cardTitle, styles.grow]}>{who} may need someone to reach out</Text>
+      </View>
+      <Text style={styles.cardBody}>{item.preview || 'They shared a picture or a clip without any words.'}</Text>
+      <Text style={styles.cardMeta}>{item.where} • {whenText(item.newestAt)}</Text>
+      <Text style={styles.careNote}>
+        Nobody is in trouble and nothing has been hidden. Reach out to them however your team normally would.
+      </Text>
+      <View style={styles.actions}>
+        <Btn
+          label="A leader has reached out"
+          disabled={busy}
+          onPress={() =>
+            run(
+              { title: 'Thank you', body: 'That one is marked as looked after.' },
+              () => markCareHandled(item),
+              undefined,
+              withoutItem(item.key)
+            )
+          }
+        />
+      </View>
+    </View>
+  );
+}
+
+/** Something a member reported, or something the filter is holding back. */
+function ReportCard({ item, run, busy }: { item: ReportedItem; run: RunAction; busy: boolean }) {
+  const { theme } = useAppTheme();
+  const styles = useStyles(theme);
+  const who = item.authorName || 'Someone';
+
+  if (item.contentMissing) {
+    return (
+      <Card>
+        <Text style={styles.cardTitle}>{item.where}</Text>
+        <Text style={styles.cardBody}>This has already been taken down, so there is nothing left to read.</Text>
+        <Text style={styles.cardMeta}>{whenText(item.newestAt)}</Text>
+        {item.reports.map((report) => (
+          <Text key={report.id} style={styles.cardMeta}>{reasonLine(report)}</Text>
+        ))}
+        <View style={styles.actions}>
+          <Btn
+            label="Close this"
+            disabled={busy}
+            onPress={() =>
+              run(
+                { title: 'Closed', body: 'It is off the list.' },
+                () => closeContentReports(item.reports.map((report) => report.id), 'removed'),
+                undefined,
+                withoutItem(item.key)
+              )
+            }
+          />
+        </View>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <Text style={styles.cardTitle}>{item.where}</Text>
+      <Text style={styles.cardBody}>{item.preview || 'A picture or a clip, with no words.'}</Text>
+      <Text style={styles.cardMeta}>{who} • {whenText(item.newestAt)}</Text>
+      {item.reports.map((report) => (
+        <Text key={report.id} style={styles.cardMeta}>{reasonLine(report)}</Text>
+      ))}
+      <Text style={styles.cardMeta}>
+        {item.held ? 'Hidden from everyone until you decide.' : 'Still showing to everyone.'}
+      </Text>
+      <View style={styles.actions}>
+        <Btn
+          label={item.held ? 'Approve' : 'Leave it up'}
+          disabled={busy}
+          onPress={() =>
+            run(
+              item.held
+                ? { title: 'Approved', body: 'It is live for everyone now.' }
+                : { title: 'Left up', body: 'It stays where it is.' },
+              () => approveReportedItem(item),
+              undefined,
+              withoutItem(item.key)
+            )
+          }
+        />
+        <Btn
+          label="Remove"
+          danger
+          disabled={busy}
+          onPress={() =>
+            confirmAction('Remove this?', 'Nobody will see it again.', 'Remove', () =>
+              run(
+                { title: 'Removed', body: 'It is gone for everyone.' },
+                () => removeReportedItem(item),
+                undefined,
+                withoutItem(item.key)
+              )
+            )
+          }
+        />
+      </View>
+    </Card>
+  );
 }
 
 // ---------- Post something ----------
@@ -1035,7 +1326,7 @@ function PeoplePage({ workbench, run, busy }: { workbench: AdminWorkbench | null
           <View style={styles.avatar}><Text style={styles.avatarText}>{(entry.name || '?').slice(0, 1).toUpperCase()}</Text></View>
           <View style={styles.grow}>
             <Text style={styles.cardTitle}>{entry.name || 'Member'}</Text>
-            <Text style={styles.cardMeta}>{entry.roles.map((r) => PEOPLE_SWITCHES.find((s) => s.role === r)?.label || r).join(' • ')}</Text>
+            <Text style={styles.cardMeta}>{Array.from(new Set(entry.roles.map((r) => roleLabel(r)))).join(' • ')}</Text>
           </View>
           <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
         </Pressable>
@@ -1716,6 +2007,19 @@ const useStyles = createThemedStyles((t) =>
       gap: 6,
       ...t.elevation.medium,
     },
+    // A care alert must never look like a moderation card. Same shape so it
+    // reads as part of the list, the ministry's own gold rim so the eye lands
+    // on it first, and a heart instead of an eye.
+    careCard: {
+      padding: 14,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.accentMuted,
+      borderWidth: 1.5,
+      borderColor: t.colors.accentBorder,
+      gap: 6,
+      ...t.elevation.medium,
+    },
+    careNote: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19, marginTop: 2 },
     cardTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body },
     cardBody: { color: t.colors.textSecondary, lineHeight: 20, fontSize: t.type.body },
     cardMeta: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 2 },

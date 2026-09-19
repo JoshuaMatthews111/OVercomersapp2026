@@ -13,11 +13,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
-import { usePathname } from 'expo-router';
+import { useSegments } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import type { VideoThumbnail } from 'expo-video';
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, Linking, Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Linking, Modal, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import { SharedRef } from './chatService';
@@ -51,7 +51,38 @@ export function useNowPlaying() {
   return ctx;
 }
 
-const TAB_PATHS = new Set(['/', '/index', '/messages', '/give', '/community', '/bible', '/profile']);
+/**
+ * The folder every tab screen lives in: app/(tabs)/.
+ *
+ * This used to be a hand-written list of the six tab addresses. When the
+ * seventh tab, "Reach" (/outreach), was added on 2026-09-18 the list was not
+ * updated, so on that one tab the mini player was drawn UNDER the tab bar.
+ * A list of routes copied out of the router is a list that rots, so there is
+ * no list any more: the question "am I standing on a tab?" is asked of the
+ * router itself.
+ */
+const TAB_GROUP = '(tabs)';
+
+/**
+ * True when the screen under the player is one of the tabs.
+ *
+ * `useSegments()` hands back the FILE segments of the current route, group
+ * folders included — expo-router 57.0.22 builds them in
+ * node_modules/expo-router/build/global-state/getRouteInfoFromState.js, where
+ * `segments` keeps every route name and only `pathname` strips the `(group)`
+ * parts. So app/(tabs)/outreach.tsx reads `['(tabs)', 'outreach']` and
+ * app/prayer.tsx reads `['prayer']`.
+ *
+ * Because the answer comes from the route's own folder, ANY file dropped into
+ * app/(tabs)/ is covered the moment it exists — an eighth tab cannot be
+ * forgotten here, because there is nothing left to remember to update.
+ * `.includes` rather than `segments[0]` so a future group wrapped around the
+ * tabs (app/(app)/(tabs)/…) still answers correctly.
+ */
+function useOnTabScreen(): boolean {
+  const segments = useSegments();
+  return segments.includes(TAB_GROUP);
+}
 
 /** The cover for whatever is playing: the one we were handed, or the one the link gives us free. */
 function coverFor(item: NowPlaying | null): string | undefined {
@@ -199,10 +230,16 @@ function MiniPlayer({ ctx, visible }: { ctx: Ctx; visible: boolean }) {
   const { theme, dark } = useAppTheme();
   const styles = useStyles(theme);
   const insets = useSafeAreaInsets();
-  const pathname = usePathname();
+  const onTab = useOnTabScreen();
   if (!visible || !ctx.item) return null;
-  const onTab = TAB_PATHS.has(pathname);
-  const bottom = onTab ? (Platform.OS === 'ios' ? 92 : 78) : insets.bottom + 10;
+  // How tall the tab bar is, worked out the way app/(tabs)/_layout.tsx works
+  // it out: TAB_BAR_CONTENT_HEIGHT (58pt of icon, label and top padding) plus
+  // the phone's own bottom inset, floored at 10. Resting the player exactly on
+  // top of that keeps it where it has always been on a home-indicator iPhone
+  // (58 + 34 = 92) and stops it hanging in mid-air on an iPhone SE or a
+  // button-navigation Android, where the bar is only 68 tall.
+  const tabBarHeight = 58 + Math.max(insets.bottom, 10);
+  const bottom = onTab ? tabBarHeight : insets.bottom + 10;
   const isEmbed = ctx.item.type === 'embed';
   // A minimised web-view video is genuinely stopped. Say that, rather than
   // leaving a bar that looks like it is still playing.

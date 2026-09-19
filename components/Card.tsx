@@ -16,6 +16,19 @@ import { useAppTheme } from '../lib/themePreference';
  *           whisper of shadow. A wide black shadow does nothing on a navy
  *           page, and on Android a heavy elevation under a translucent fill
  *           washes the frosting out to grey.
+ *
+ * Corrected 2026-09-19. The edge is no longer allowed to lean on the shadow.
+ * It used `colors.border`, which is a DIVIDER: 1.41:1 against the light
+ * surface, 1.52:1 worst case in dark. In light mode a card fill and a page
+ * fill are only 1.01:1 apart, so that hairline was the entire boundary, and
+ * it was under the 3:1 WCAG 1.4.11 asks of a component edge. Anywhere the
+ * shadow was dropped — behind a translucent parent, on an Android build where
+ * elevation is flattened, or in one of the panels that simply omitted it —
+ * the card stopped being a card.
+ *
+ * It now draws `colors.cardBorder`, which is measured to read on its own:
+ * 3.06:1 worst case in light, 3.34:1 worst case in dark. The shadow still
+ * goes on top of that; it is depth now, not the only evidence the card exists.
  */
 export function Card({ children, style }: { children: React.ReactNode; style?: ViewStyle }) {
   const { theme } = useAppTheme();
@@ -26,7 +39,7 @@ export function Card({ children, style }: { children: React.ReactNode; style?: V
 const useStyles = createThemedStyles((t) => StyleSheet.create({
   card: {
     backgroundColor: t.colors.surface,
-    borderColor: t.colors.border,
+    borderColor: t.colors.cardBorder,
     borderWidth: 1,
     borderRadius: t.radius.lg,
     padding: t.spacing.lg,

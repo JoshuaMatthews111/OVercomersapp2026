@@ -12,12 +12,15 @@ import {
   ChatProfileSearchResult,
   SharedRef,
   addChatMember,
+  alreadyReported,
   blockChatUser,
+  blockHidesContent,
   chatRoomTitle,
   deleteOwnChatMessage,
   getChatMembers,
   getChatMessages,
   getChatRooms,
+  isUserBlocked,
   joinChatRoom,
   moderateChatMessage,
   removeChatMember,
@@ -25,6 +28,7 @@ import {
   searchChatProfiles,
   sendChatMessage,
   subscribeToChat,
+  unblockChatUser,
   uploadChatAttachment,
 } from '../lib/chatService';
 import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../components/ChatAttachments';
@@ -361,7 +365,69 @@ export default function ChatRoomScreen() {
     setSelectedProfile({ userId: message.userId, displayName: message.displayName, avatarUrl: message.avatarUrl });
   }
 
-  function messageActions(message: ChatMessage, own: boolean) {
+  /**
+   * Report is a real report: it files a row in the same queue the database's
+   * own filter writes to, and it says so without accusing anybody. Reporting
+   * the same message twice writes nothing the second time.
+   */
+  async function reportMessage(message: ChatMessage) {
+    try {
+      const result = await reportChatMessage(message.id, 'Member report: chat message');
+      Alert.alert(
+        'Thank you for telling us',
+        result.alreadyReported
+          ? 'You have already told us about this one, and a leader has it. You do not need to do anything else.'
+          : 'A leader from the ministry will read this. You do not need to do anything else.',
+      );
+    } catch (err) {
+      Alert.alert('That report did not go through', friendlyError(err, 'Please try again.'));
+    }
+  }
+
+  /**
+   * Block is a real block: lib/chatService.ts reads the list back on every load
+   * of every room, so the person is gone from the history, from the live
+   * connection and from the member list, not just from this screen's memory.
+   *
+   * Nothing is sent to the person who was blocked, and nothing on their phone
+   * changes. What we say here depends on what actually happened — a leader who
+   * moderates the room keeps seeing the messages, and is told that plainly
+   * rather than being told they are hidden when they are not.
+   */
+  async function blockPerson(personId: string, displayName: string) {
+    try {
+      await blockChatUser(personId);
+      const hides = await blockHidesContent();
+      if (hides) {
+        setMessages((current) => current.filter((item) => item.userId !== personId));
+        setRoomMembers((current) => current.filter((item) => item.userId !== personId));
+      }
+      Alert.alert(
+        `${displayName} is blocked`,
+        hides
+          ? 'You will not see what they write. They are not told about this.'
+          : 'Because you help look after this room you still see their messages, so you can act on them. They are not told about this.',
+        [
+          { text: 'Undo', onPress: () => { void unblockPerson(personId, displayName); } },
+          { text: 'Done', style: 'cancel' },
+        ],
+      );
+    } catch (err) {
+      Alert.alert('That did not work', friendlyError(err, 'Please try again.'));
+    }
+  }
+
+  async function unblockPerson(personId: string, displayName: string) {
+    try {
+      await unblockChatUser(personId);
+      await refreshRoom();
+      Alert.alert(`${displayName} is unblocked`, 'You will see what they write again.');
+    } catch (err) {
+      Alert.alert('That did not work', friendlyError(err, 'Please try again.'));
+    }
+  }
+
+  async function messageActions(message: ChatMessage, own: boolean) {
     if (message.sendingProgress !== undefined) return;
     const buttons: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [];
     if (own) {
@@ -370,14 +436,24 @@ export default function ChatRoomScreen() {
         catch (err) { Alert.alert('Message not deleted', friendlyError(err, 'Please try again.')); }
       } });
     } else {
-      buttons.push({ text: 'Report', onPress: async () => {
-        try { await reportChatMessage(message.id, 'Reported from chat room'); Alert.alert('Report sent', 'Thank you. OGN moderators will look at it.'); }
-        catch (err) { Alert.alert('Report failed', friendlyError(err, 'Please try again.')); }
-      } });
-      if (message.userId) buttons.push({ text: 'Block this person', style: 'destructive', onPress: async () => {
-        try { await blockChatUser(message.userId!); setMessages((current) => current.filter((item) => item.userId !== message.userId)); }
-        catch (err) { Alert.alert('Block failed', friendlyError(err, 'Please try again.')); }
-      } });
+      const personId = message.userId;
+      // Asked before the sheet opens so the button says which way it goes. A
+      // member only ever sees "Block" here, because somebody they have already
+      // blocked has no message left on this screen to hold down.
+      const blocked = personId ? await isUserBlocked(personId) : false;
+      buttons.push({
+        text: alreadyReported('chat_message', message.id) ? 'Already reported' : 'Report this message',
+        onPress: () => { void reportMessage(message); },
+      });
+      if (personId && !blocked) buttons.push({
+        text: 'Block this person',
+        style: 'destructive',
+        onPress: () => { void blockPerson(personId, message.displayName); },
+      });
+      if (personId && blocked) buttons.push({
+        text: 'Unblock this person',
+        onPress: () => { void unblockPerson(personId, message.displayName); },
+      });
       // Removing someone else's message is a staff action; the database says so
       // too, so a moderator who cannot do it is never offered the button.
       if (access.canRemoveChatMessages) buttons.push({ text: 'Remove for everyone', style: 'destructive', onPress: async () => {
@@ -430,12 +506,12 @@ export default function ChatRoomScreen() {
           </Pressable>
         ) : null}
         <Pressable
-          onLongPress={() => messageActions(message, own)}
+          onLongPress={() => { void messageActions(message, own); }}
           delayLongPress={280}
           accessibilityRole="button"
-          accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message.${message.isFlagged && own ? ' Waiting for a leader to read it.' : ''} Hold for options.`}
-          accessibilityActions={[{ name: 'longpress', label: 'Message options' }]}
-          onAccessibilityAction={() => messageActions(message, own)}
+          accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message.${message.isFlagged && own ? ' Waiting for a leader to read it.' : ''} Hold to report or block.`}
+          accessibilityActions={[{ name: 'longpress', label: 'Report or block' }]}
+          onAccessibilityAction={() => { void messageActions(message, own); }}
           style={[styles.bubble, own && styles.bubbleOwn]}
         >
           {!own ? (

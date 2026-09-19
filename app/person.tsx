@@ -2,10 +2,18 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { initials } from '../components/chatShared';
-import { openDirectChannel } from '../lib/chatService';
+import {
+  alreadyReported,
+  blockChatUser,
+  blockHidesContent,
+  isUserBlocked,
+  openDirectChannel,
+  reportPerson,
+  unblockChatUser,
+} from '../lib/chatService';
 import { friendlyError } from '../lib/errorMessages';
 import { supabase } from '../lib/supabase';
 import { currentUserId } from '../lib/uploadService';
@@ -49,17 +57,23 @@ export default function PersonScreen() {
   const [missing, setMissing] = useState(false);
   const [isMe, setIsMe] = useState(false);
   const [opening, setOpening] = useState(false);
+  /** Whether this person is on the reader's blocked list. The screen says which. */
+  const [blocked, setBlocked] = useState(false);
+  const [safetyBusy, setSafetyBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) { setLoading(false); setMissing(true); return; }
     setLoadError(null);
     setLoading(true);
     try {
-      const [me, result] = await Promise.all([
+      const [me, result, isBlocked] = await Promise.all([
         currentUserId(),
         supabase.from('chat_profiles').select('id, display_name, avatar_url, country, region, role').eq('id', id).maybeSingle(),
+        // Never let a failed block lookup stop a profile from opening.
+        isUserBlocked(id).catch(() => false),
       ]);
       setIsMe(me === id);
+      setBlocked(isBlocked);
       if (result.error) throw result.error;
       const data = result.data as any;
       if (!data) { setMissing(true); setPerson(null); return; }
@@ -96,6 +110,101 @@ export default function PersonScreen() {
     } finally {
       setOpening(false);
     }
+  }
+
+  /* -------------------------------------------------------------------------
+   * Report and block, on the page of the person themselves
+   *
+   * The same two things chat and the story viewer offer, in the one place
+   * somebody looks when they want to know who they are dealing with. The
+   * report goes into `public.content_reports`, the same queue the database's
+   * own filter writes into; the block is the SAME list chat and stories read,
+   * because lib/chatService.ts keeps exactly one.
+   *
+   * Nothing here is ever visible to the person it is about.
+   * ----------------------------------------------------------------------- */
+
+  async function reportThisPerson() {
+    if (!id || safetyBusy) return;
+    setSafetyBusy(true);
+    try {
+      const result = await reportPerson(id, 'Member report: profile');
+      Alert.alert(
+        'Thank you for telling us',
+        result.alreadyReported
+          ? `You have already told us about ${firstName}, and a leader has it.`
+          : 'A leader from the ministry will look at this. You do not need to do anything else.',
+      );
+    } catch (err) {
+      Alert.alert('That did not go through', friendlyError(err, 'Please try again.'));
+    } finally {
+      setSafetyBusy(false);
+    }
+  }
+
+  async function blockThisPerson() {
+    if (!id || safetyBusy) return;
+    setSafetyBusy(true);
+    try {
+      await blockChatUser(id);
+      setBlocked(true);
+      const hides = await blockHidesContent();
+      Alert.alert(
+        `${firstName} is blocked`,
+        hides
+          ? 'You will not see their messages or their stories. They are not told about this.'
+          : 'Because you help look after the ministry you still see what they post, so you can act on it. They are not told about this.',
+      );
+    } catch (err) {
+      setBlocked(false);
+      Alert.alert('That did not go through', friendlyError(err, 'Please try again.'));
+    } finally {
+      setSafetyBusy(false);
+    }
+  }
+
+  async function unblockThisPerson() {
+    if (!id || safetyBusy) return;
+    setSafetyBusy(true);
+    try {
+      await unblockChatUser(id);
+      setBlocked(false);
+      Alert.alert(`${firstName} is unblocked`, 'You will see what they write again.');
+    } catch (err) {
+      Alert.alert('That did not go through', friendlyError(err, 'Please try again.'));
+    } finally {
+      setSafetyBusy(false);
+    }
+  }
+
+  function openSafetySheet() {
+    if (!id || safetyBusy) return;
+    Alert.alert(
+      name,
+      'Tell a leader about this person, or stop seeing what they post.',
+      [
+        {
+          text: alreadyReported('profile', id) ? 'Already reported' : 'Report this person',
+          onPress: () => { void reportThisPerson(); },
+        },
+        { text: 'Block this person', style: 'destructive', onPress: () => { void blockThisPerson(); } },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      { cancelable: true },
+    );
+  }
+
+  function confirmUnblock() {
+    if (!id || safetyBusy) return;
+    Alert.alert(
+      `Unblock ${firstName}?`,
+      'You will start seeing their messages and their stories again.',
+      [
+        { text: 'Unblock', onPress: () => { void unblockThisPerson(); } },
+        { text: 'Keep blocked', style: 'cancel' },
+      ],
+      { cancelable: true },
+    );
   }
 
   return (
@@ -166,20 +275,59 @@ export default function PersonScreen() {
                   <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
                 </Pressable>
               ) : (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Message ${name}`}
-                  disabled={opening}
-                  onPress={startConversation}
-                  style={[styles.action, styles.actionPrimary, opening && styles.actionBusy]}
-                >
-                  {opening ? <ActivityIndicator color={theme.colors.textOnBrand} /> : <Ionicons name="chatbubbles-outline" size={20} color={theme.colors.textOnBrand} />}
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.actionTitlePrimary}>{opening ? `Opening your chat with ${firstName}…` : `Message ${firstName}`}</Text>
-                    <Text style={styles.actionSubPrimary}>A private conversation, just the two of you.</Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={theme.colors.textOnBrand} />
-                </Pressable>
+                <>
+                  {!blocked ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Message ${name}`}
+                      disabled={opening}
+                      onPress={startConversation}
+                      style={[styles.action, styles.actionPrimary, opening && styles.actionBusy]}
+                    >
+                      {opening ? <ActivityIndicator color={theme.colors.textOnBrand} /> : <Ionicons name="chatbubbles-outline" size={20} color={theme.colors.textOnBrand} />}
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.actionTitlePrimary}>{opening ? `Opening your chat with ${firstName}…` : `Message ${firstName}`}</Text>
+                        <Text style={styles.actionSubPrimary}>A private conversation, just the two of you.</Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color={theme.colors.textOnBrand} />
+                    </Pressable>
+                  ) : null}
+
+                  {/* The page says which of the two states this person is in,
+                      and the button does that one thing. Neither of them is
+                      ever shown to the person it is about. */}
+                  {blocked ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`You blocked ${name}. Unblock them.`}
+                      disabled={safetyBusy}
+                      onPress={confirmUnblock}
+                      style={[styles.action, safetyBusy && styles.actionBusy]}
+                    >
+                      <Ionicons name="hand-left-outline" size={20} color={theme.colors.accent} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.actionTitle}>You blocked {firstName}</Text>
+                        <Text style={styles.actionSub}>You do not see their messages or their stories. They are not told. Tap to undo.</Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
+                    </Pressable>
+                  ) : (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Report ${name}, or block them`}
+                      disabled={safetyBusy}
+                      onPress={openSafetySheet}
+                      style={[styles.action, safetyBusy && styles.actionBusy]}
+                    >
+                      <Ionicons name="flag-outline" size={20} color={theme.colors.accent} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.actionTitle}>Report or block</Text>
+                        <Text style={styles.actionSub}>Tell a leader about {firstName}, or stop seeing what they post.</Text>
+                      </View>
+                      <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
+                    </Pressable>
+                  )}
+                </>
               )}
             </>
           )}

@@ -1,6 +1,7 @@
 import { RealtimeChannel } from '@supabase/supabase-js';
 import { ChatRoom } from '../types/models';
 import { supabase } from './supabase';
+import { getAccessProfile } from './accessControl';
 import { FriendlyError } from './errorMessages';
 import { UploadError, bucketSizeLimit, currentUserId, formatBytes, uploadFileToBucket } from './uploadService';
 // uploadService re-exports only part of this module, so the shrink helpers are
@@ -187,6 +188,167 @@ export type ChatMember = {
   joinedAt?: string;
 };
 
+/* ---------------------------------------------------------------------------
+ * Blocking — one list, read in one place
+ *
+ * "Block this person" used to write a row into `user_blocks` that nothing ever
+ * read back, so the person stayed exactly where they were. Everything this
+ * module hands a screen now passes through `hideBlocked()` below, and that is
+ * the ONLY place the rule lives. A screen cannot forget to apply it, because a
+ * screen never applies it.
+ *
+ * Three things this must never do.
+ *
+ * It must never tell the blocked person. Their row is readable only by the
+ * person who wrote it — `using (blocker_id = auth.uid())` in
+ * supabase/release_hardening.sql — nothing is written to their account, and no
+ * screen sends them anything. From their side the conversation is unchanged:
+ * their message still posts, and they are never shown a count, a state or a
+ * refusal that would tell them somebody stopped reading.
+ *
+ * It must never blind a moderator. DO-NOT-BREAK item 5 keeps moderation working
+ * for leaders and admins, so for anyone `is_chat_moderator()` covers the filter
+ * is switched off: the block is still recorded, and the room is still whole.
+ *
+ * And it must never empty a room it cannot explain. If the `user_blocks` read
+ * itself fails — offline, or a backend that does not have the table — this
+ * fails OPEN and shows the conversation, rather than fails closed and shows a
+ * member a blank room they have no way to fix. The failure is not cached, so
+ * the very next read tries again.
+ * ------------------------------------------------------------------------- */
+
+type BlockState = {
+  userId: string;
+  blocked: Set<string>;
+};
+
+const NO_BLOCKS: BlockState = { userId: '', blocked: new Set<string>() };
+
+let blockState: BlockState | null = null;
+let blockStateInFlight: { userId: string; promise: Promise<BlockState> } | null = null;
+let moderatorAnswer: { userId: string; promise: Promise<boolean> } | null = null;
+
+/**
+ * Mirrors `public.is_chat_moderator()`, through lib/accessControl.ts.
+ *
+ * Asked ONLY when it can change the answer — that is, when this person has
+ * actually blocked somebody. A member with an empty list never pays for it, and
+ * it is never in the way of a room opening. A roles read that fails is not
+ * cached, so a moderator on a bad signal gets the right answer a moment later
+ * rather than for the rest of the session.
+ */
+async function readerIsModerator(userId: string): Promise<boolean> {
+  if (!userId) return false;
+  if (!moderatorAnswer || moderatorAnswer.userId !== userId) {
+    moderatorAnswer = {
+      userId,
+      promise: getAccessProfile()
+        .then((access) => Boolean(access.canModerateChat))
+        .catch(() => {
+          moderatorAnswer = null;
+          return false;
+        }),
+    };
+  }
+  return moderatorAnswer.promise;
+}
+
+async function readBlockState(userId: string): Promise<BlockState> {
+  const { data, error } = await supabase.from('user_blocks').select('blocked_user_id').eq('blocker_id', userId);
+  if (error) throw error;
+  return {
+    userId,
+    blocked: new Set(((data || []) as any[]).map((row) => row.blocked_user_id).filter(Boolean)),
+  };
+}
+
+/**
+ * Whoever this phone last answered for.
+ *
+ * A phone gets handed around a church. When the person changes, everything
+ * remembered about the last one goes — including what they reported, which
+ * would otherwise show the next person an "Already reported" they never did.
+ */
+let lastReader: string | null = null;
+
+function noteReader(userId: string | null) {
+  if (lastReader === userId) return;
+  lastReader = userId;
+  blockState = null;
+  blockStateInFlight = null;
+  moderatorAnswer = null;
+  reportedTargets.clear();
+}
+
+/** The blocked list for whoever is signed in, read once and kept for the session. */
+async function currentBlockState(): Promise<BlockState> {
+  if (!hasSupabase) return NO_BLOCKS;
+  const userId = await currentUserId();
+  noteReader(userId);
+  if (!userId) return NO_BLOCKS;
+  if (blockState && blockState.userId === userId) return blockState;
+  if (!blockStateInFlight || blockStateInFlight.userId !== userId) {
+    const promise = readBlockState(userId)
+      .then((state) => {
+        blockState = state;
+        return state;
+      })
+      // Deliberately NOT cached: an empty answer here means "we could not ask",
+      // not "nobody is blocked", and the next screen must be free to ask again.
+      .catch(() => ({ userId, blocked: new Set<string>() }));
+    blockStateInFlight = { userId, promise };
+    void promise.finally(() => {
+      if (blockStateInFlight && blockStateInFlight.promise === promise) blockStateInFlight = null;
+    });
+  }
+  return blockStateInFlight.promise;
+}
+
+/** Everyone this person has blocked. Empty on a signed-out phone. */
+export async function getBlockedUserIds(): Promise<string[]> {
+  const state = await currentBlockState();
+  return [...state.blocked];
+}
+
+export async function isUserBlocked(userId?: string | null): Promise<boolean> {
+  if (!userId) return false;
+  const state = await currentBlockState();
+  return state.blocked.has(userId);
+}
+
+/**
+ * Whether blocking actually hides anything for the person using this phone.
+ *
+ * False for a moderator — their block is saved, and the room stays whole so
+ * they can still do the job. Screens read this so they can say which of the two
+ * happened instead of claiming the content is gone when it is not.
+ */
+export async function blockHidesContent(): Promise<boolean> {
+  const state = await currentBlockState();
+  if (!state.userId) return true;
+  return !(await readerIsModerator(state.userId));
+}
+
+/** Drop anything written by somebody this person has blocked. */
+async function hideBlocked<T>(items: T[], authorOf: (item: T) => string | undefined): Promise<T[]> {
+  const state = await currentBlockState();
+  // Nobody blocked: the common case, and it costs one small query per session.
+  if (!state.blocked.size) return items;
+  if (await readerIsModerator(state.userId)) return items;
+  return items.filter((item) => {
+    const author = authorOf(item);
+    return !author || !state.blocked.has(author);
+  });
+}
+
+/** The same question for one item, for the live connection. */
+async function showsContentFrom(userId?: string): Promise<boolean> {
+  if (!userId) return true;
+  const state = await currentBlockState();
+  if (!state.blocked.has(userId)) return true;
+  return readerIsModerator(state.userId);
+}
+
 function normalizeRoomType(type?: string): ChatRoom['type'] {
   if (type === 'announcement' || type === 'leader' || type === 'regional' || type === 'prayer' || type === 'direct' || type === 'group' || type === 'general' || type === 'global') {
     return type;
@@ -251,7 +413,7 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean)),
     signAttachmentLinks(data.map((row: any) => row.attachment_path).filter(Boolean)),
   ]);
-  return data.reverse().map((row: any) => ({
+  const messages: ChatMessage[] = data.reverse().map((row: any) => ({
     id: row.id,
     channelId: row.channel_id,
     userId: row.user_id,
@@ -263,6 +425,8 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     attachment: rowAttachment(row, links),
     shared: row.shared_ref || undefined,
   }));
+  // The one place a room's history is filtered. See the blocking section above.
+  return hideBlocked(messages, (message) => message.userId);
 }
 
 /**
@@ -374,16 +538,23 @@ export function subscribeToChat(
             isFlagged: row.is_flagged,
             shared: row.shared_ref || undefined,
           };
-          Promise.all([
-            getProfilesByIds(row.user_id ? [row.user_id] : []),
-            signAttachmentLinks(row.attachment_path ? [row.attachment_path] : []),
-          ])
-            .then(([profiles, links]) => {
-              const profile = row.user_id ? profiles.get(row.user_id) : undefined;
-              onMessage({ ...base, displayName: profile?.displayName || base.displayName, avatarUrl: profile?.avatarUrl, attachment: rowAttachment(row, links) });
+          // A blocked person's new message must not arrive live either, or the
+          // block would hold on a refresh and break the moment they typed.
+          void showsContentFrom(row.user_id)
+            .then((show) => {
+              if (!show) return;
+              return Promise.all([
+                getProfilesByIds(row.user_id ? [row.user_id] : []),
+                signAttachmentLinks(row.attachment_path ? [row.attachment_path] : []),
+              ])
+                .then(([profiles, links]) => {
+                  const profile = row.user_id ? profiles.get(row.user_id) : undefined;
+                  onMessage({ ...base, displayName: profile?.displayName || base.displayName, avatarUrl: profile?.avatarUrl, attachment: rowAttachment(row, links) });
+                })
+                // The message itself arrived; only the name and the picture link
+                // did not. Showing it without them beats not showing it at all.
+                .catch(() => onMessage(base));
             })
-            // The message itself arrived; only the name and the picture link
-            // did not. Showing it without them beats not showing it at all.
             .catch(() => onMessage(base));
         },
       )
@@ -585,23 +756,166 @@ export async function deleteOwnChatMessage(messageId: string) {
   return data;
 }
 
-export async function reportChatMessage(messageId: string, reason = 'In-app report') {
-  if (!hasSupabase) return { id: `local-report-${Date.now()}` };
+/* ---------------------------------------------------------------------------
+ * Reporting — one queue for everything a member can report
+ *
+ * Every report goes into `public.content_reports`, in exactly the shape the
+ * database's own filter uses when it files one itself
+ * (supabase/2026-09-19-phase1-security.sql:114 and :147):
+ *
+ *   insert into public.content_reports (reporter_id, target_type, target_id,
+ *                                       reason, status)
+ *   values (..., 'app_story', new.id, 'auto-filter: ...', 'new');
+ *
+ * so a person's report and the filter's own land side by side for whoever
+ * reads that table. The write policy is `with check (reporter_id = auth.uid())`
+ * — a member may file a report and may not read anybody's, which is why the
+ * "already reported" guard below is kept on the phone: a member cannot ask the
+ * database whether they reported something, so we remember it here.
+ * ------------------------------------------------------------------------- */
+
+/** What a report points at. `chat_message` and `app_story` match the filter's. */
+export type ReportTargetType = 'chat_message' | 'app_story' | 'profile';
+
+export type ContentReportResult = {
+  id?: string;
+  /** True when this phone already reported this exact thing. Nothing was written. */
+  alreadyReported: boolean;
+};
+
+// Reported once is reported. Kept for the life of the app process, which is as
+// long as a screen can stay open, so a second tap cannot pile up rows.
+const reportedTargets = new Set<string>();
+
+const reportKey = (targetType: ReportTargetType, targetId: string) => `${targetType}:${targetId}`;
+
+/** Has this phone already reported this, in this session? Nothing is asked of the network. */
+export function alreadyReported(targetType: ReportTargetType, targetId?: string | null): boolean {
+  if (!targetId) return false;
+  return reportedTargets.has(reportKey(targetType, targetId));
+}
+
+export async function reportContent(
+  targetType: ReportTargetType,
+  targetId: string,
+  reason: string,
+): Promise<ContentReportResult> {
+  const key = reportKey(targetType, targetId);
+  if (reportedTargets.has(key)) return { alreadyReported: true };
+  if (!hasSupabase) {
+    reportedTargets.add(key);
+    return { alreadyReported: false };
+  }
   const userId = await currentUserId();
   if (!userId) throw new FriendlyError('Please sign in before reporting something.');
   const { data, error } = await supabase
     .from('content_reports')
     .insert({
       reporter_id: userId,
-      target_type: 'chat_message',
-      target_id: messageId,
+      target_type: targetType,
+      target_id: targetId,
       reason,
       status: 'new',
     })
     .select('id')
     .single();
   if (error) throw error;
-  return data;
+  // Only after the database took it. A failed report may be tried again.
+  reportedTargets.add(key);
+  return { id: data?.id as string | undefined, alreadyReported: false };
+}
+
+export function reportChatMessage(messageId: string, reason = 'In-app report') {
+  return reportContent('chat_message', messageId, reason);
+}
+
+/** A member reporting somebody's story. Same table, same queue as the filter's own. */
+export function reportStory(storyId: string, reason = 'Member report: story') {
+  return reportContent('app_story', storyId, reason);
+}
+
+/** A member reporting a person rather than one thing they posted. */
+export function reportPerson(personId: string, reason = 'Member report: profile') {
+  return reportContent('profile', personId, reason);
+}
+
+/* ---------------------------------------------------------------------------
+ * Stories get the same two rules
+ *
+ * Members publish stories now, so the story ring is user-generated content and
+ * Apple guideline 1.2 and Play's UGC policy both apply to it. The answer is
+ * given HERE, and not in app/story-viewer.tsx, for the same reason the blocking
+ * section above gives: ONE list and ONE place, so no screen can forget. It also
+ * keeps the viewer free of table names — it asks what it may show and is told.
+ *
+ * (This module is chat, plus the safety rules the whole app shares. When there
+ * is a third caller this belongs in its own lib/safetyService.ts; it is here
+ * today because splitting a shared file mid-release costs more than it buys.)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A story that is a real row in `public.app_stories`. Only those can be
+ * reported: `content_reports.target_id` is a uuid column, so a story card
+ * shared into a chat — which arrives with no row behind it — is reported on the
+ * message that carried it instead.
+ */
+const STORY_ROW_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isReportableStoryId(id?: string | null): boolean {
+  return Boolean(id && STORY_ROW_ID.test(id));
+}
+
+/** What one person may be shown of a ring of stories, and who wrote them. */
+export type StorySafety = {
+  /** Who is reading, so a screen can tell their own story from somebody else's. */
+  viewerId: string | null;
+  /** story id -> author, for every story we could resolve one for. */
+  authorById: Record<string, string>;
+  /** Stories this person must not be shown: already reported, or by somebody they blocked. */
+  hiddenStoryIds: string[];
+  /**
+   * True when we could not find out who wrote these at all.
+   *
+   * It is the difference between "this story has no author on it" and "we could
+   * not ask", and the screen needs it so that a missing Block button can be
+   * explained instead of just being missing.
+   */
+  authorsUnavailable: boolean;
+};
+
+export async function storySafetyFor(stories: { id: string; authorId?: string }[]): Promise<StorySafety> {
+  const viewerId = await currentUserId().catch(() => null);
+
+  const authorById: Record<string, string> = {};
+  for (const story of stories) if (story.authorId) authorById[story.id] = story.authorId;
+
+  // `created_by` sits on the very row a member is already allowed to read
+  // ("public reads published stories by role" in app_feature_expansion.sql),
+  // so this asks for nothing new. If it fails, the cost is only that "Block
+  // this person" has nobody to block — never the story, and never the screen.
+  let authorsUnavailable = false;
+  const ask = stories.map((story) => story.id).filter((id) => isReportableStoryId(id) && !authorById[id]);
+  if (hasSupabase && ask.length) {
+    try {
+      const { data, error } = await supabase.from('app_stories').select('id, created_by').in('id', ask);
+      if (error) authorsUnavailable = true;
+      for (const row of (data || []) as any[]) if (row.created_by) authorById[row.id] = row.created_by;
+    } catch {
+      authorsUnavailable = true;
+    }
+  }
+
+  const state = await currentBlockState();
+  const hidesBlocked = state.blocked.size ? !(await readerIsModerator(state.userId)) : false;
+  const hiddenStoryIds = stories
+    .filter(
+      (story) =>
+        alreadyReported('app_story', story.id)
+        || (hidesBlocked && state.blocked.has(authorById[story.id] || '')),
+    )
+    .map((story) => story.id);
+
+  return { viewerId, authorById, hiddenStoryIds, authorsUnavailable };
 }
 
 export async function blockChatUser(blockedUserId: string) {
@@ -615,7 +929,30 @@ export async function blockChatUser(blockedUserId: string) {
     .select('blocked_user_id')
     .single();
   if (error) throw error;
+  // The list every screen reads is updated here, so the block takes effect on
+  // the next read without waiting for the database to be asked again.
+  if (blockState && blockState.userId === userId) blockState.blocked.add(blockedUserId);
+  else blockState = null;
   return data;
+}
+
+/**
+ * Undo a block. The person comes back into the rooms they share, and nothing
+ * about either the block or the unblock was ever visible to them.
+ */
+export async function unblockChatUser(blockedUserId: string) {
+  if (!hasSupabase) return { blocked_user_id: blockedUserId };
+  const userId = await currentUserId();
+  if (!userId) throw new FriendlyError('Please sign in first.');
+  const { error } = await supabase
+    .from('user_blocks')
+    .delete()
+    .eq('blocker_id', userId)
+    .eq('blocked_user_id', blockedUserId);
+  if (error) throw error;
+  if (blockState && blockState.userId === userId) blockState.blocked.delete(blockedUserId);
+  else blockState = null;
+  return { blocked_user_id: blockedUserId };
 }
 
 /**
@@ -635,14 +972,17 @@ export async function listChatProfiles(limit = 30): Promise<ChatProfileSearchRes
     .order('display_name')
     .limit(limit);
 
-  const direct = (data || [])
-    .filter((row: any) => row.id !== me)
-    .map((row: any) => ({
-      id: row.id,
-      displayName: row.display_name || 'OGN Member',
-      avatarUrl: row.avatar_url || undefined,
-      region: row.region || undefined,
-    }));
+  const direct = await hideBlocked(
+    (data || [])
+      .filter((row: any) => row.id !== me)
+      .map((row: any) => ({
+        id: row.id,
+        displayName: row.display_name || 'OGN Member',
+        avatarUrl: row.avatar_url || undefined,
+        region: row.region || undefined,
+      })),
+    (person) => person.id,
+  );
   if (direct.length) return direct;
 
   // Nothing came back. Rather than show a member an empty list and no way to
@@ -703,7 +1043,7 @@ export async function searchChatProfiles(query: string): Promise<ChatProfileSear
       phone: row.phone || undefined,
     });
   }
-  if (found.size) return [...found.values()];
+  if (found.size) return hideBlocked([...found.values()], (person) => person.id);
 
   // Same reasoning as listChatProfiles: fall back to the people already in
   // this person's rooms so a search is never a dead end.
@@ -718,7 +1058,7 @@ export async function getChatMembers(channelId: string): Promise<ChatMember[]> {
   if (error) throw error;
   if (!data) return [];
   const profiles = await getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean));
-  return data.map((row: any) => ({
+  const members: ChatMember[] = data.map((row: any) => ({
     userId: row.user_id,
     role: row.role || 'member',
     joinedAt: row.joined_at || undefined,
@@ -726,6 +1066,9 @@ export async function getChatMembers(channelId: string): Promise<ChatMember[]> {
     phone: profiles.get(row.user_id)?.phone,
     avatarUrl: row.avatar_url || undefined,
   }));
+  // Same rule as the messages: somebody you blocked is not in your roster
+  // either. A leader's roster is never filtered — that is the leader tools.
+  return hideBlocked(members, (member) => member.userId);
 }
 
 export async function addChatMember(channelId: string, userId: string) {

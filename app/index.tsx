@@ -3,11 +3,11 @@ import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {ActivityIndicator, Alert, Animated, BackHandler, Image, KeyboardAvoidingView, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import {ActivityIndicator, Alert, Animated, BackHandler, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaFrame, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { friendlyError } from '../lib/errorMessages';
 import { supabase } from '../lib/supabase';
-import { AppTheme, themes } from '../lib/theme';
+import { AppTheme, colors, themes } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
 import { uploadPickedAsset } from '../lib/uploadService';
 
@@ -54,6 +54,23 @@ const SESSION_CHECK_TIMEOUT_MS = 8000;
 let lastHandoffAt = 0;
 const HANDOFF_COOLDOWN_MS = 3000;
 
+/**
+ * The two published documents a new member agrees to.
+ *
+ * These are the SAME two addresses the More tab already opens
+ * (app/(tabs)/profile.tsx, `privacyUrl` and `termsUrl`), quoted here rather
+ * than retyped from memory, so the signup line and the settings rows can never
+ * drift apart. Gate rule OGN-IOS-012 curls every https URL handed to
+ * Linking.openURL under app/ and asserts a final 200, so a dead link here
+ * fails the release instead of failing a store reviewer.
+ *
+ * They belong in a shared module (lib/legal.ts) so there is literally one
+ * copy. That file is outside this package's ownership today; the audit ledger
+ * carries it.
+ */
+const TERMS_URL = 'https://overcomersglobalnetwork.com/terms';
+const PRIVACY_URL = 'https://overcomersglobalnetwork.com/privacy';
+
 export default function WelcomeScreen() {
   const insets = useSafeAreaInsets();
   const frame = useSafeAreaFrame();
@@ -61,8 +78,36 @@ export default function WelcomeScreen() {
   // tightened version of the same welcome so all of it fits without scrolling.
   // Taller phones keep the roomier spacing they already have.
   const compactSplash = frame.height < 820;
-  const { theme, mode, setMode } = useAppTheme();
+  const { theme, mode, setMode, loadingTheme } = useAppTheme();
   const t = theme.colors;
+
+  /**
+   * ONE LAUNCH, NOT THREE (owner defect: "the app flashes three different
+   * screens before it opens").
+   *
+   * Cold start used to paint three different full-screen grounds in a row:
+   *   1. the native splash — a flat #071B45 with the crest
+   *      (expo-splash-screen in app.json);
+   *   2. the root layout's session view — a flat colors.deepBlue, the same
+   *      #071B45 (app/_layout.tsx);
+   *   3. THIS screen's session check — `theme.pageGradient`, painted while
+   *      `loadingTheme` was still true, so it always used the DEFAULT dark
+   *      tokens no matter which theme the member had chosen, and then
+   *      repainted again the moment AsyncStorage came back.
+   *
+   * Step 3 was the theme-blind one that showed twice: a light-theme member got
+   * navy, then a near-black gradient, then a cream one. Until the saved choice
+   * is actually known we now paint the same flat navy the first two steps
+   * paint — from the token, never a typed hex — and we read the dark token set
+   * with it, because that is the set designed to sit on that navy. The instant
+   * the preference lands, the member's own theme takes over. Three grounds
+   * become one.
+   */
+  const themeUnknown = loadingTheme;
+  const launchTheme: AppTheme = themeUnknown ? themes.dark : theme;
+  const launchGradient: [string, string, string] = themeUnknown
+    ? [colors.deepBlue, colors.deepBlue, colors.deepBlue]
+    : theme.pageGradient;
 
   const [screen, setScreen] = useState<Screen>('splash');
   const [authMode, setAuthMode] = useState<AuthMode>('signin');
@@ -278,14 +323,52 @@ export default function WelcomeScreen() {
     }
   }
 
+  /**
+   * Open one of the two published documents in the phone's browser.
+   *
+   * react-native's Linking.openURL(url: string): Promise<any>
+   * (node_modules/react-native/Libraries/Linking/Linking.d.ts:29) rejects when
+   * the phone has nothing that will open the address. A reviewer tapping a
+   * link that silently does nothing reads as "no terms shown", so a failure
+   * says so in plain words and gives the address to read another way.
+   */
+  async function openLegalDocument(url: string, name: string) {
+    try {
+      await Linking.openURL(url);
+    } catch {
+      setFormError(`We could not open the ${name} on this phone. You can read it at ${url}.`);
+    }
+  }
+
   // ─── Session check ───
   if (checking) {
     return (
-      <LinearGradient colors={theme.pageGradient} style={styles.loadingWrap}>
-        <View style={[styles.loadingCard, { paddingTop: insets.top }]}>
-          <ActivityIndicator color={t.accent} size="large" />
-          <Text style={[styles.loadingText, { color: t.textSecondary }]}>Checking your sign-in...</Text>
-        </View>
+      <LinearGradient colors={launchGradient} style={styles.splashContainer}>
+        {/* The same crest, at the same size, in the same place as the welcome
+            below — so the handover from the native splash to this screen to
+            the welcome is one picture settling, not three screens flashing.
+            Scrollable for the same reason the welcome is (owner defect O1):
+            at the largest text size on a 667pt phone the status line must
+            still be reachable. */}
+        <ScrollView
+          style={styles.splashScroll}
+          contentContainerStyle={[
+            styles.launchScrollContent,
+            {
+              paddingTop: insets.top + (compactSplash ? 14 : 20),
+              paddingBottom: Math.max(insets.bottom, 8) + (compactSplash ? 12 : 16),
+            },
+          ]}
+          showsVerticalScrollIndicator={false}
+        >
+          <LaunchCrest theme={launchTheme} compact={compactSplash} />
+          <View style={styles.launchStatusRow}>
+            <ActivityIndicator color={launchTheme.colors.accent} size="small" />
+            <Text style={[styles.loadingText, { color: launchTheme.colors.textSecondary }]}>
+              Checking your sign-in...
+            </Text>
+          </View>
+        </ScrollView>
       </LinearGradient>
     );
   }
@@ -293,7 +376,10 @@ export default function WelcomeScreen() {
   // ─── SPLASH SCREEN ───
   if (screen === 'splash') {
     return (
-      <LinearGradient colors={theme.pageGradient} style={styles.splashContainer}>
+      // Same ground rule as the session check above: if the saved theme has
+      // still not come back, hold the launch navy rather than guessing a
+      // gradient and repainting a moment later.
+      <LinearGradient colors={launchGradient} style={styles.splashContainer}>
         {/* expo-linear-gradient's iOS layer sets masksToBounds unconditionally
             (node_modules/expo-linear-gradient/ios/LinearGradientLayer.swift:20 and :26),
             so a gradient always clips its children no matter what overflow says.
@@ -324,42 +410,10 @@ export default function WelcomeScreen() {
           )}
         >
           <Animated.View style={[styles.splashInner, { opacity: fadeAnim }]}>
-            {/* OGN Logo / Seal.
-                The crest PNG is 614x614 and its artwork sits on rows 216-528, so
-                the canvas carries a lot of empty space above the seal and a little
-                below it. "contain" keeps the whole seal — the EDUCATE. EQUIP.
-                EVOLVE. ribbon and the base of the book included — and the small
-                upward nudge centres the artwork inside the plate instead of
-                centring the empty canvas. "cover" used to slice the ribbon off. */}
-            <View
-              style={[
-                styles.sealWrap,
-                compactSplash && styles.sealWrapCompact,
-                { backgroundColor: t.surface, borderColor: t.accentBorder },
-              ]}
-            >
-              <Image
-                source={require('../assets/images/ogn-logo-transparent.png')}
-                resizeMode="contain"
-                accessible={true}
-                accessibilityLabel="Overcomers Global Network crest"
-                style={[styles.sealImage, compactSplash && styles.sealImageCompact]}
-              />
-            </View>
-
-            <View style={styles.splashWordmarkTextWrap}>
-              <Text
-                numberOfLines={2}
-                adjustsFontSizeToFit={true}
-                minimumFontScale={0.75}
-                style={[styles.splashWordmarkText, compactSplash && styles.splashWordmarkTextCompact, { color: t.accent }]}
-              >
-                OVERCOMERS{'\n'}GLOBAL NETWORK
-              </Text>
-              <Text style={[styles.splashWordmarkMotto, compactSplash && styles.splashWordmarkMottoCompact, { color: t.textSecondary }]}>
-                EDUCATE. EQUIP. EVOLVE.
-              </Text>
-            </View>
+            {/* The crest and wordmark. Exactly the same component, the same
+                sizes and the same crop as the session-check screen above, so
+                nothing moves when the check finishes. */}
+            <LaunchCrest theme={launchTheme} compact={compactSplash} />
 
             {/* Divider accent */}
             <View style={[styles.splashDivider, compactSplash && styles.splashDividerCompact, { backgroundColor: t.accentSolid }]} />
@@ -391,20 +445,33 @@ export default function WelcomeScreen() {
               <View style={[styles.dot, { backgroundColor: t.border }]} />
             </View>
 
-            {/* Get Started button */}
+            {/* Get Started — off while the pull-to-refresh session check is
+                still running, and saying so in words rather than leaving a
+                live-looking button over a check that has not finished. */}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Get started"
+              accessibilityLabel={refreshing ? 'Checking your sign-in' : 'Get started'}
+              accessibilityState={{ busy: refreshing, disabled: refreshing }}
               onPress={() => setScreen('auth')}
+              disabled={refreshing}
               style={({ pressed }) => [
                 styles.getStartedBtn,
                 compactSplash && styles.getStartedBtnCompact,
                 theme.elevation.medium,
-                { backgroundColor: t.brandSolid, opacity: pressed ? 0.88 : 1 },
+                { backgroundColor: t.brandSolid, opacity: refreshing ? 0.85 : pressed ? 0.88 : 1 },
               ]}
             >
-              <Text style={[styles.getStartedText, { color: t.textOnBrand }]}>Get Started</Text>
-              <Ionicons name="arrow-forward" size={18} color={t.textOnBrand} />
+              {refreshing ? (
+                <>
+                  <ActivityIndicator color={t.textOnBrand} />
+                  <Text style={[styles.getStartedText, { color: t.textOnBrand }]}>Checking your sign-in...</Text>
+                </>
+              ) : (
+                <>
+                  <Text style={[styles.getStartedText, { color: t.textOnBrand }]}>Get Started</Text>
+                  <Ionicons name="arrow-forward" size={18} color={t.textOnBrand} />
+                </>
+              )}
             </Pressable>
           </Animated.View>
         </ScrollView>
@@ -414,6 +481,11 @@ export default function WelcomeScreen() {
 
   // ─── AUTH SCREEN ───
   const busy = Boolean(busyLabel);
+  // Every slow thing on this screen locks the same set of controls. Sending a
+  // reset link used to leave Sign In live, so a second tap could start an
+  // auth call on top of it.
+  const actionsLocked = busy || resetting;
+  const signingUp = authMode === 'signup';
   return (
     <LinearGradient colors={theme.pageGradient} style={[styles.authContainer, { paddingTop: insets.top }]}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.flex}>
@@ -440,7 +512,7 @@ export default function WelcomeScreen() {
               accessibilityRole="button"
               accessibilityLabel="Back to welcome"
               onPress={() => { setScreen('splash'); setFormError(null); }}
-              disabled={busy}
+              disabled={actionsLocked}
               hitSlop={12}
               style={styles.closeBtn}
             >
@@ -465,7 +537,7 @@ export default function WelcomeScreen() {
               accessibilityLabel="Sign in"
               accessibilityState={{ selected: authMode === 'signin' }}
               onPress={() => { setAuthMode('signin'); setFormError(null); }}
-              disabled={busy}
+              disabled={actionsLocked}
               style={[styles.segmentBtn, authMode === 'signin' && { backgroundColor: t.brandSolid }]}
             >
               <Text style={[styles.segmentLabel, { color: authMode === 'signin' ? t.textOnBrand : t.textSecondary }]}>Sign In</Text>
@@ -475,7 +547,7 @@ export default function WelcomeScreen() {
               accessibilityLabel="Create account"
               accessibilityState={{ selected: authMode === 'signup' }}
               onPress={() => { setAuthMode('signup'); setFormError(null); }}
-              disabled={busy}
+              disabled={actionsLocked}
               style={[styles.segmentBtn, authMode === 'signup' && { backgroundColor: t.brandSolid }]}
             >
               <Text style={[styles.segmentLabel, { color: authMode === 'signup' ? t.textOnBrand : t.textSecondary }]}>Create Account</Text>
@@ -488,7 +560,7 @@ export default function WelcomeScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="Choose profile picture"
                 onPress={pickSignupAvatar}
-                disabled={busy}
+                disabled={actionsLocked}
                 style={[styles.avatarPicker, { borderColor: t.accentBorder, backgroundColor: t.brandSolid }]}
               >
                 {pendingAvatar ? (
@@ -601,17 +673,54 @@ export default function WelcomeScreen() {
             </View>
           ) : null}
 
+          {/* The agreement line — create-account path only.
+              Apple's reviewers look for the terms and the privacy policy at
+              the point an account is made (App Store Review 5.1.1), and Play's
+              data-safety review expects the same. Sign-in does not show it:
+              somebody signing back in agreed the day they joined.
+              This is the plain "by continuing you agree" line rather than a
+              tick-box. Neither store requires a box to be ticked, both
+              documents are one tap away and read by a screen reader as links,
+              and a required box is one more thing between a member and their
+              account on a signup the owner already called too slow. */}
+          {signingUp ? (
+            <View style={styles.legalWrap}>
+              <Text style={[styles.legalLead, { color: t.textSecondary }]}>
+                By creating an account you agree to our
+              </Text>
+              <View style={styles.legalLinksRow}>
+                <Pressable
+                  accessibilityRole="link"
+                  accessibilityLabel="Read our Terms of Service. Opens in your browser."
+                  onPress={() => { void openLegalDocument(TERMS_URL, 'Terms of Service'); }}
+                  style={({ pressed }) => [styles.legalLinkBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                  <Text style={[styles.legalLinkText, { color: t.accent }]}>Terms of Service</Text>
+                </Pressable>
+                <Text style={[styles.legalJoin, { color: t.textSecondary }]}>and</Text>
+                <Pressable
+                  accessibilityRole="link"
+                  accessibilityLabel="Read our Privacy Policy. Opens in your browser."
+                  onPress={() => { void openLegalDocument(PRIVACY_URL, 'Privacy Policy'); }}
+                  style={({ pressed }) => [styles.legalLinkBtn, { opacity: pressed ? 0.7 : 1 }]}
+                >
+                  <Text style={[styles.legalLinkText, { color: t.accent }]}>Privacy Policy</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : null}
+
           {/* Primary action — always says what it is doing, and cannot be fired twice. */}
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`${authMode === 'signin' ? 'Sign in' : 'Create account'}${busy ? `. ${busyLabel}` : ''}`}
-            accessibilityState={{ busy, disabled: busy }}
+            accessibilityState={{ busy, disabled: actionsLocked }}
             onPress={submitAuth}
-            disabled={busy}
+            disabled={actionsLocked}
             style={({ pressed }) => [
               styles.signInBtn,
               theme.elevation.medium,
-              { backgroundColor: t.brandSolid, opacity: busy ? 0.85 : pressed ? 0.9 : 1 },
+              { backgroundColor: t.brandSolid, opacity: actionsLocked ? 0.85 : pressed ? 0.9 : 1 },
             ]}
           >
             {busy ? (
@@ -635,7 +744,7 @@ export default function WelcomeScreen() {
               accessibilityRole="button"
               accessibilityLabel={authMode === 'signin' ? 'Create account instead' : 'Sign in instead'}
               onPress={() => { setAuthMode(authMode === 'signin' ? 'signup' : 'signin'); setFormError(null); }}
-              disabled={busy}
+              disabled={actionsLocked}
               style={styles.switchBtn}
             >
               <Text style={[styles.switchLink, { color: t.accent }]}>
@@ -646,6 +755,56 @@ export default function WelcomeScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
     </LinearGradient>
+  );
+}
+
+/**
+ * The crest and the wordmark — the one piece of the launch that both the
+ * session check and the welcome show, drawn identically by both.
+ *
+ * WAVE 1 FIX PRESERVED VERBATIM (owner defect O1, "the logo is cut off at the
+ * bottom"): the crest PNG is 614x614 and its artwork sits on rows 216-528, so
+ * the canvas carries a lot of empty space above the seal and a little below
+ * it. resizeMode="contain" into a SQUARE box keeps the whole seal — the
+ * EDUCATE. EQUIP. EVOLVE. ribbon and the base of the book included — and the
+ * small upward nudge centres the artwork inside the plate instead of centring
+ * the empty canvas. "cover" used to slice the ribbon off. Do not change
+ * "contain" to "cover" and do not make the image box non-square.
+ */
+function LaunchCrest({ theme, compact }: { theme: AppTheme; compact: boolean }) {
+  const t = theme.colors;
+  return (
+    <>
+      <View
+        style={[
+          styles.sealWrap,
+          compact && styles.sealWrapCompact,
+          { backgroundColor: t.surface, borderColor: t.accentBorder },
+        ]}
+      >
+        <Image
+          source={require('../assets/images/ogn-logo-transparent.png')}
+          resizeMode="contain"
+          accessible={true}
+          accessibilityLabel="Overcomers Global Network crest"
+          style={[styles.sealImage, compact && styles.sealImageCompact]}
+        />
+      </View>
+
+      <View style={styles.splashWordmarkTextWrap}>
+        <Text
+          numberOfLines={2}
+          adjustsFontSizeToFit={true}
+          minimumFontScale={0.75}
+          style={[styles.splashWordmarkText, compact && styles.splashWordmarkTextCompact, { color: t.accent }]}
+        >
+          OVERCOMERS{'\n'}GLOBAL NETWORK
+        </Text>
+        <Text style={[styles.splashWordmarkMotto, compact && styles.splashWordmarkMottoCompact, { color: t.textSecondary }]}>
+          EDUCATE. EQUIP. EVOLVE.
+        </Text>
+      </View>
+    </>
   );
 }
 
@@ -723,8 +882,10 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
 
   // ─── Session check ───
-  loadingWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  loadingCard: { alignItems: 'center', gap: 14, paddingHorizontal: 32 },
+  // Same 32pt gutter and the same centred column as the welcome, so the crest
+  // does not shift sideways when the check finishes.
+  launchScrollContent: { flexGrow: 1, paddingHorizontal: 32, alignItems: 'center', justifyContent: 'center' },
+  launchStatusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 22, paddingHorizontal: 8 },
   loadingText: { fontSize: 15, textAlign: 'center', fontWeight: '600' },
 
   // ─── Splash ───
@@ -891,6 +1052,30 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   errorText: { flex: 1, fontSize: 14, lineHeight: 19, fontWeight: '600' },
+
+  // ─── The agreement line ───
+  // Each link is a control in its own right: 48pt tall and at least 48pt wide
+  // clears Apple's 44pt floor and Google's 48dp one, so neither needs hitSlop
+  // to make up the difference. The row wraps, so the two links stay whole at
+  // the largest text size instead of being squeezed onto one clipped line.
+  legalWrap: { marginTop: 4, marginBottom: 6, alignItems: 'center' },
+  legalLead: { fontSize: 13, lineHeight: 19, textAlign: 'center' },
+  legalLinksRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    columnGap: 4,
+  },
+  legalLinkBtn: {
+    minHeight: 48,
+    minWidth: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  legalLinkText: { fontSize: 13, lineHeight: 19, fontWeight: '800', textDecorationLine: 'underline' },
+  legalJoin: { fontSize: 13, lineHeight: 19 },
 
   signInBtn: {
     borderRadius: 16,
