@@ -14,6 +14,7 @@ import { publicEnv } from '../../lib/publicEnv';
 import { supabase } from '../../lib/supabase';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
+import { resetWelcomeTour } from '../../lib/tourPreference';
 import { UploadError, friendlyUploadError, uploadPickedAsset } from '../../lib/uploadService';
 
 type SettingsTone = 'normal' | 'danger';
@@ -578,6 +579,10 @@ export default function ProfileScreen() {
     || nameFromEmail(session?.user.email)
     || 'Member';
 
+  // Held in its own const so the walkthrough row below reads as a plain
+  // string, not a value TypeScript has to be told about twice.
+  const tourUserId = access.userId;
+
   const settings: SettingsItem[] = [
     { label: 'Account Settings', icon: 'person-outline', action: () => openSettingsDetail('account') },
     { label: 'Notifications', icon: 'notifications-outline', action: () => setShowNotificationSettings((value) => !value) },
@@ -588,6 +593,10 @@ export default function ProfileScreen() {
     { label: 'Saved Media', icon: 'bookmark-outline', action: () => openSettingsDetail('saved') },
     { label: 'Downloads', icon: 'download-outline', action: () => openSettingsDetail('downloads') },
     { label: 'Prayer History', icon: 'hand-left-outline', action: () => router.push('/prayer' as any) },
+    // Every role has a walkthrough, so this row is not role-gated. It is
+    // hidden only when there is no user id to key the flag on, because
+    // resetWelcomeTour has nothing to forget without one.
+    ...(tourUserId ? [{ label: 'Show me around again', icon: 'compass-outline' as const, action: () => { void resetWelcomeTour(tourUserId); } }] : []),
     { label: 'Support Center', icon: 'headset-outline', action: () => router.push('/support' as any) },
     { label: 'Community Standards', icon: 'people-outline', action: () => { void Linking.openURL(termsUrl); } },
     { label: 'About Overcomers Global Network', icon: 'information-circle-outline', action: () => openSettingsDetail('about') },

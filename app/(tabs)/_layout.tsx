@@ -10,6 +10,7 @@ import { useThemePreference } from '../../lib/themePreference';
 import { supabase } from '../../lib/supabase';
 import { friendlyError } from '../../lib/errorMessages';
 import { ensurePushRegistered } from '../../lib/pushBootstrap';
+import { WelcomeTour } from '../../components/WelcomeTour';
 
 /**
  * Whether this account is allowed in is a fact about the person, not about the
@@ -261,6 +262,14 @@ export default function TabLayout() {
       </Tabs.Protected>
       <Tabs.Screen name="profile" options={{ title: 'More', tabBarIcon: icon('ellipsis-horizontal-circle-outline', 'ellipsis-horizontal-circle') }} />
     </Tabs>
+    {/* The once-only walkthrough, mounted ABOVE the tabs rather than inside a
+        screen so it cannot be lost by switching tabs — and rendered after them
+        so it never delays a cold start: the tabs paint first and the
+        walkthrough decides for itself, from lib/accessControl.ts, whether
+        there is anything to say yet. It draws nothing at all until the roles
+        have settled for a signed-in person, so a member can never see it
+        flash a leader's card. */}
+    <WelcomeTour />
     </>
   );
 }
