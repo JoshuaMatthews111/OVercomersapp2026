@@ -13,9 +13,10 @@ import {
   getAppStories,
   getEvents,
   getMediaItems,
+  storyWentOut,
   subscribeToStories,
 } from '../../lib/contentService';
-import { friendlyError } from '../../lib/errorMessages';
+import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../../lib/errorMessages';
 import { publicEnv } from '../../lib/publicEnv';
 import { isStoryLive, storyRemainingLabel } from '../../lib/storyTime';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
@@ -736,6 +737,12 @@ function ShareStorySheet({
   const [problem, setProblem] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<'live' | 'waiting' | null>(null);
   const [checkNote, setCheckNote] = useState<string | null>(null);
+  /**
+   * True when a story was held back AND what was written reads unmistakably
+   * like somebody in trouble. It changes only the words and offers a way to
+   * reach a person — it decides nothing about what is posted or held.
+   */
+  const [needsCare, setNeedsCare] = useState(false);
   const abort = useRef<AbortController | null>(null);
 
   const celebrate = useRef(new Animated.Value(0)).current;
@@ -752,6 +759,7 @@ function ShareStorySheet({
     setProblem(null);
     setOutcome(null);
     setCheckNote(null);
+    setNeedsCare(false);
     celebrate.setValue(0);
     lift.setValue(0);
   }
@@ -856,10 +864,21 @@ function ShareStorySheet({
         posted.push(saved);
       }
 
-      onPosted([...posted].reverse());
-      setOutcome('live');
+      // What the server ACTUALLY saved decides what is said next. A trigger
+      // in the database can hold a story for a leader to read first, and when
+      // it does the row still comes back looking perfectly saved. Telling
+      // somebody their story is live when nobody will ever see it is the
+      // unkindest version of the silence this whole change exists to end.
+      const wentOut = posted.filter(storyWentOut);
+      const held = posted.length - wentOut.length;
+      // A held story must not join the ring as though it were out.
+      if (wentOut.length) onPosted([...wentOut].reverse());
+      setOutcome(held > 0 ? 'waiting' : 'live');
+      setNeedsCare(held > 0 && mentionsSelfHarm(note, title));
       playSuccess();
-      void confirmWithServer(posted.map((saved) => saved.id));
+      // Only when the server did not tell us at all — an older server, or a
+      // column we could not read. Then, and only then, we ask a second time.
+      if (posted.some((saved) => !saved.status)) void confirmWithServer(posted);
     } catch (error) {
       if (error instanceof UploadError && error.kind === 'cancelled') {
         setBusy(false);
@@ -873,20 +892,33 @@ function ShareStorySheet({
   }
 
   /**
-   * A story can be held back for a moderator to read before anyone else sees
-   * it. The row comes back from the insert either way, so the only honest way
-   * to tell is to ask the server what is actually live and say so plainly.
+   * The fallback, for the one case the saved row cannot answer: it came back
+   * with no status on it at all. We start from "waiting", which is the only
+   * safe thing to say when we do not know, and move to "live" only once the
+   * server has actually shown us the story among the live ones.
    */
-  async function confirmWithServer(ids: string[]) {
-    if (!ids.length) return;
+  async function confirmWithServer(candidates: AppStoryRow[]) {
+    if (!candidates.length) return;
     try {
       const live = await getAppStories();
-      const anyLive = live.some((story) => ids.includes(story.id));
-      if (!anyLive) setOutcome('waiting');
+      const liveIds = new Set(live.map((story) => story.id));
+      const out = candidates.filter((story) => liveIds.has(story.id));
+      if (out.length) {
+        onPosted([...out].reverse());
+        setOutcome('live');
+        setNeedsCare(false);
+      }
     } catch {
-      setCheckNote('We could not double-check from here. Pull down on Home to see it.');
+      setCheckNote('We could not check from here. Pull down on Home to see it.');
     }
   }
+
+  /**
+   * A gentle word BEFORE the Share button, never a gate. The database is
+   * still the only thing that decides what is held (DO-NOT-BREAK item 18);
+   * this only chooses one extra sentence, and Share stays enabled either way.
+   */
+  const warnBeforeSharing = useMemo(() => mentionsSelfHarm(note, title), [note, title]);
 
   const percent = Math.round(fraction * 100);
   const showForm = !outcome;
@@ -987,6 +1019,13 @@ function ShareStorySheet({
                   </View>
                 ) : null}
 
+                {warnBeforeSharing ? (
+                  <View style={styles.sendHint} accessibilityLiveRegion="polite">
+                    <Ionicons name="heart-outline" size={15} color={theme.colors.accent} />
+                    <Text style={styles.sendHintText}>{REVIEW_NOTICE.beforeSendStory}</Text>
+                  </View>
+                ) : null}
+
                 {problem ? <Text style={styles.sheetProblem}>{problem}</Text> : null}
 
                 <View style={styles.sheetActions}>
@@ -1011,7 +1050,11 @@ function ShareStorySheet({
                 </View>
               </ScrollView>
             ) : (
-              <View style={styles.successBody}>
+              // Scrollable, because the sheet is capped at 92% of the screen
+              // and the words said to somebody in trouble are the longest in
+              // it. On a small phone at a large font size those words must
+              // still be reachable — not cut off at the bottom edge.
+              <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.successBody}>
                 <Animated.View
                   style={[
                     styles.successMark,
@@ -1050,20 +1093,53 @@ function ShareStorySheet({
 
                 <Animated.View style={{ opacity: celebrate }}>
                   <Text style={styles.successTitle}>
-                    {outcome === 'live' ? 'Your story is live now' : 'Thank you for sharing this'}
+                    {outcome === 'live'
+                      ? 'Your story is live now'
+                      : needsCare
+                        ? REVIEW_NOTICE.careTitle
+                        : REVIEW_NOTICE.storyHeldTitle}
                   </Text>
                   <Text style={styles.successLine}>
                     {outcome === 'live'
                       ? 'It is on Home already, and it stays there for 24 hours.'
-                      : 'One of our team will read it first, and then it goes out to everyone.'}
+                      : needsCare
+                        ? REVIEW_NOTICE.careBody
+                        : REVIEW_NOTICE.storyHeldBody}
                   </Text>
+                  {outcome === 'waiting' && needsCare ? (
+                    <Text style={styles.careUrgent}>{REVIEW_NOTICE.careUrgent}</Text>
+                  ) : null}
                   {checkNote ? <Text style={styles.successLine}>{checkNote}</Text> : null}
                 </Animated.View>
+
+                {/* Somebody in trouble gets a way to reach a person, not just words. */}
+                {outcome === 'waiting' && needsCare ? (
+                  <View style={styles.careActions}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={REVIEW_NOTICE.careReachOut}
+                      onPress={() => { dismiss(); router.push('/support' as any); }}
+                      style={styles.careButton}
+                    >
+                      <Ionicons name="headset-outline" size={16} color={theme.colors.textOnAccent} />
+                      <Text style={styles.careButtonText}>{REVIEW_NOTICE.careReachOut}</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={REVIEW_NOTICE.carePrayer}
+                      onPress={() => { dismiss(); router.push('/prayer' as any); }}
+                      style={styles.careButtonQuiet}
+                    >
+                      <Ionicons name="hand-left-outline" size={16} color={theme.colors.textPrimary} />
+                      <Text style={styles.careButtonQuietText}>{REVIEW_NOTICE.carePrayer}</Text>
+                    </Pressable>
+                  </View>
+                ) : null}
 
                 <Pressable accessibilityRole="button" accessibilityLabel="Back to Home" onPress={dismiss} style={styles.primaryButton}>
                   <Text style={styles.primaryButtonText}>Done</Text>
                 </Pressable>
-              </View>
+              </ScrollView>
             )}
           </View>
         </KeyboardAvoidingView>
@@ -1526,6 +1602,43 @@ const useStyles = createThemedStyles((t: AppTheme) =>
     },
     primaryButtonBusy: { opacity: 0.85 },
     primaryButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+
+    sendHint: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 8,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderRadius: t.radius.md,
+      backgroundColor: t.colors.accentMuted,
+    },
+    sendHintText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19 },
+    careUrgent: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta, lineHeight: 20, textAlign: 'center', marginTop: 10 },
+    careActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8 },
+    careButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      minHeight: 48,
+      paddingHorizontal: 16,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+    },
+    careButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.meta },
+    careButtonQuiet: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 6,
+      minHeight: 48,
+      paddingHorizontal: 16,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.surfaceRaised,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+    },
+    careButtonQuietText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
 
     successBody: { alignItems: 'center', gap: 14, paddingHorizontal: 24, paddingTop: 22, paddingBottom: 18 },
     successMark: {

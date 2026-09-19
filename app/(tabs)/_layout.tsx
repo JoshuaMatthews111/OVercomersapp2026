@@ -4,6 +4,7 @@ import { ColorValue, Platform, ActivityIndicator, Alert, Pressable, StyleSheet, 
 import { useEffect, useState } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as NavigationBar from 'expo-navigation-bar';
+import { useAccessProfile } from '../../lib/accessControl';
 import { colors, getTheme } from '../../lib/theme';
 import { useThemePreference } from '../../lib/themePreference';
 import { supabase } from '../../lib/supabase';
@@ -19,6 +20,15 @@ import { ensurePushRegistered } from '../../lib/pushBootstrap';
  * person to sign in always gets their own check.
  */
 let accountStandingChecked = false;
+
+/**
+ * The same idea for the outreach tab. Reading the roles is a network call, so
+ * on the very first entry the answer is not back yet — and until it is, the
+ * answer is NO. A member must never see the tab flicker into view, so this
+ * fails closed and only remembers a YES that has already been proved once in
+ * this session. Cleared with the standing answer when the session ends.
+ */
+let lastKnownOutreachAccess = false;
 
 /** Icon + label + top padding. The phone's own bottom inset is added to this. */
 const TAB_BAR_CONTENT_HEIGHT = 58;
@@ -50,6 +60,13 @@ export default function TabLayout() {
   const dark = themePreference === 'dark';
   const theme = getTheme(dark);
   const insets = useSafeAreaInsets();
+  /**
+   * DO-NOT-BREAK item 2 — Evangelism is role-gated — is what decides whether
+   * the seventh tab exists at all. lib/accessControl.ts is the one place that
+   * answers it, and `canUseEvangelism` mirrors the database's own
+   * is_outreach_or_above(), so the tab and the rows it can read agree.
+   */
+  const { access, loadingAccess } = useAccessProfile();
   // Only the very first check makes anyone wait. After that we already know.
   const [checkingSession, setCheckingSession] = useState(() => !accountStandingChecked);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -128,8 +145,21 @@ export default function TabLayout() {
     return () => { mounted = false; };
   }, [sessionCheckNonce]);
 
-  // Leaving the tabs means the session ended. Forget this person's answer.
-  useEffect(() => () => { accountStandingChecked = false; }, []);
+  /**
+   * Remember a SETTLED answer about a SIGNED-IN person, so a second mount
+   * inside the same session does not make a leader watch the tab appear
+   * again. `isSignedIn` is the important half: when the roles cannot be read
+   * — a flaky moment, or an auth event that momentarily carries no session —
+   * the hook hands back the signed-out default, and that is "we do not know",
+   * not "this person is a member". Writing it down would demote a leader on a
+   * dropped packet.
+   */
+  useEffect(() => {
+    if (!loadingAccess && access.isSignedIn) lastKnownOutreachAccess = access.canUseEvangelism;
+  }, [loadingAccess, access.isSignedIn, access.canUseEvangelism]);
+
+  // Leaving the tabs means the session ended. Forget this person's answers.
+  useEffect(() => () => { accountStandingChecked = false; lastKnownOutreachAccess = false; }, []);
 
   if (checkingSession) {
     return (
@@ -166,6 +196,26 @@ export default function TabLayout() {
     );
   }
 
+  /**
+   * Fails closed while the roles are still being read, then settles on the
+   * real answer. `Tabs.Protected` does not merely hide the button: expo-router
+   * 57.0.22 collects the names inside a false guard into `protectedScreens`
+   * (node_modules/expo-router/build/layouts/withLayoutContext.js) and
+   * `useSortedScreens` drops those routes before the navigator is built
+   * (node_modules/expo-router/build/useScreens.js), so the route is not
+   * registered and an address typed or linked to it has nothing to open.
+   * `href: null` would only have set `tabBarItemStyle: { display: 'none' }`
+   * and returned null from the button — the screen would still be one
+   * router.push away.
+   *
+   * Until there is a settled answer about a signed-in person, the last one we
+   * proved stands — false on a cold start, so a member never sees it flicker
+   * in, and a leader is never thrown off the tab he is standing on because one
+   * role read did not come back.
+   */
+  const answerIsSettled = !loadingAccess && access.isSignedIn;
+  const showOutreachTab = answerIsSettled ? access.canUseEvangelism : lastKnownOutreachAccess;
+
   return (
     <>
     {/* Android is edge-to-edge under SDK 57, so the app draws behind the
@@ -199,6 +249,16 @@ export default function TabLayout() {
       <Tabs.Screen name="give" options={{ title: 'Give', tabBarIcon: giveHandsIcon }} />
       <Tabs.Screen name="community" options={{ title: 'Chat', tabBarIcon: icon('chatbox-ellipses-outline', 'chatbox-ellipses') }} />
       <Tabs.Screen name="bible" options={{ title: 'Bible', tabBarIcon: icon('book-outline', 'book') }} />
+      {/* The outreach tab sits sixth so the six tabs everyone already knows
+          keep the positions they have always had, and More stays last where a
+          thumb reaches for it. "Reach" rather than "Outreach" because seven
+          labels on a 375pt iPhone SE leave about 44pt each once the tab's own
+          padding is taken off, and the label is rendered with numberOfLines={1}
+          (node_modules/expo-router/build/react-navigation/elements/Label/Label.js)
+          — so "Outreach" would have been shown as "Outreac…". */}
+      <Tabs.Protected guard={showOutreachTab}>
+        <Tabs.Screen name="outreach" options={{ title: 'Reach', tabBarIcon: icon('map-outline', 'map') }} />
+      </Tabs.Protected>
       <Tabs.Screen name="profile" options={{ title: 'More', tabBarIcon: icon('ellipsis-horizontal-circle-outline', 'ellipsis-horizontal-circle') }} />
     </Tabs>
     </>

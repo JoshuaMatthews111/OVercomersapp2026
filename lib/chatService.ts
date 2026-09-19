@@ -265,7 +265,38 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
   }));
 }
 
-export async function sendChatMessage(channelId: string, body: string, attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number }, shared?: SharedRef) {
+/**
+ * What the server actually did with a message we just sent.
+ *
+ * `isFlagged` is the important one. A BEFORE INSERT trigger in the
+ * database can set is_flagged on a message, and the read policy then shows it
+ * only to the person who wrote it and to the leaders. The insert still
+ * succeeds and the row still comes back, so from the phone's side a held
+ * message and an ordinary one look identical unless somebody reads this.
+ *
+ * It does NOT mean rejected, removed or refused. The message is saved, the
+ * person can still see it, and a leader reads it before the room does.
+ */
+export type SentChatMessage = {
+  id: string;
+  /**
+   * True when a leader reads this before the rest of the room sees it.
+   *
+   * Named after the database column it comes from, because components/
+   * ShareToChat.tsx already reads it by that name. Everywhere it is SHOWN to
+   * a person it is described as waiting for a leader, never as flagged.
+   */
+  isFlagged: boolean;
+  /** The server's own timestamp, so the bubble is not stamped by a phone clock. */
+  createdAt: string;
+};
+
+export async function sendChatMessage(
+  channelId: string,
+  body: string,
+  attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number },
+  shared?: SharedRef,
+): Promise<SentChatMessage> {
   if (!hasSupabase) throw new FriendlyError('Chat is not available in this version of the app yet. Your message was not sent.');
   const userId = await currentUserId();
   if (!userId) throw new FriendlyError('Please sign in before posting to chat.');
@@ -283,10 +314,14 @@ export async function sendChatMessage(channelId: string, body: string, attachmen
       attachment_size: attachment?.size ?? null,
       shared_ref: shared ?? null,
     })
-    .select('id, is_flagged')
+    .select('id, is_flagged, created_at')
     .single();
   if (error) throw error;
-  return { id: data.id as string, isFlagged: Boolean(data.is_flagged) };
+  return {
+    id: data.id as string,
+    isFlagged: Boolean(data.is_flagged),
+    createdAt: (data.created_at as string) || new Date().toISOString(),
+  };
 }
 
 export async function forwardMediaToChat(input: {

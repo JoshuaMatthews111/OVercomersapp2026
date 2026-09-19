@@ -233,3 +233,89 @@ export function friendlyError(error: unknown, fallback: string = MESSAGES.generi
 
   return fallback;
 }
+
+/* ---------------------------------------------------------------------------
+ * When something a person wrote is held for a leader to read
+ * ---------------------------------------------------------------------------
+ * The ministry's sensitive-content filter lives in the DATABASE and nowhere
+ * else: two BEFORE INSERT triggers calling public.content_needs_review(text),
+ * one on chat_messages and one on app_stories. DO-NOT-BREAK item 18 says it
+ * must stay there, and it does. Nothing in this file, and nothing in any
+ * screen, decides whether anything is held.
+ *
+ * What lives here is two things, and it matters that they are not confused.
+ *
+ * 1. The words we say to a person AFTER the database has held something, so
+ *    that nobody is ever left thinking their message simply vanished. That
+ *    silence is the defect this section exists to end.
+ *
+ * 2. SELF_HARM_HINT — one narrow pattern, used only to offer somebody
+ *    something kinder. IT IS A HINT FOR THE PERSON'S BENEFIT AND NEVER A
+ *    GATE. Nothing reads it to decide whether to send, hold, hide, refuse or
+ *    delay anything. Delete it and every message still sends exactly as it
+ *    does today; the person would just get colder words.
+ *
+ * SELF_HARM_HINT is not a copy of the server's list. The server also holds
+ * profanity, slurs, threats, drug sales, scams and link shorteners — none of
+ * which are here, because none of them call for a gentle word. These five are
+ * the self-harm phrases the database holds on purpose, as a safeguarding
+ * decision, mirrored exactly so that the sentence shown BEFORE sending is
+ * true rather than a guess. If that part of the database list ever changes,
+ * change this line with it — and if the two ever disagree, the database wins,
+ * because the database is the one that actually decides.
+ * ------------------------------------------------------------------------ */
+export const SELF_HARM_HINT = /\b(?:kill myself|suicide|self[- ]harm|cut(?:ting)? myself|end my life)\b/i;
+
+/**
+ * True when what somebody has written reads unmistakably like self-harm.
+ * Only ever used to choose warmer wording and to offer a way to reach a
+ * person. Never used to stop anything being sent.
+ */
+export function mentionsSelfHarm(...parts: (string | null | undefined)[]): boolean {
+  return parts.some((part) => typeof part === 'string' && part.length > 0 && SELF_HARM_HINT.test(part));
+}
+
+/**
+ * Every sentence the app says about something being read by a leader first.
+ * Kept together so chat and stories sound like the same church.
+ *
+ * Deliberately absent from all of it: "blocked", "rejected", "violation",
+ * "flagged", "sensitive". A person who has just written the hardest sentence
+ * of their life is not a moderation queue item, and the words we show back
+ * never say they are. The matched words are never shown back either.
+ */
+export const REVIEW_NOTICE = {
+  /**
+   * After the database has held a chat message. Deliberately neutral rather
+   * than thankful: the same sentence has to sit right under a testimony and
+   * under something said in anger, and it must not scold either one.
+   */
+  chatHeldTitle: 'A leader will see this first',
+  chatHeldBody:
+    'One of our team reads this before the room does. It has not gone anywhere — it is still in the conversation above, with a small note on it.',
+
+  /** After the database has held a story. */
+  storyHeldTitle: 'Thank you for sharing this',
+  storyHeldBody: 'Your story is safely with us. One of our team will read it first, and then it goes out to everyone.',
+
+  /** Before sending, when the app can tell locally that a leader will read it first. */
+  beforeSendChat: 'One of our team will read this before the room does, so that somebody knows to walk with you. You can still send it.',
+  beforeSendStory: 'One of our team will read this before it goes out, so that somebody knows to walk with you. You can still share it.',
+
+  /**
+   * When somebody is in trouble. This must not read like moderation, because
+   * it is not moderation — it is a church answering.
+   */
+  careTitle: 'We are glad you said something',
+  careBody:
+    'You are not in trouble, and you are not on your own. A leader from the ministry will see this soon. If you would like someone with you before then, you can message the ministry, or send a prayer request — it goes straight to the prayer team and stays private.',
+  /**
+   * No phone number is written here, and none may be invented. The app does
+   * not yet carry a crisis line or a pastor's number — see the note to the
+   * owner in this release's handover. "Your local emergency number" invents
+   * nothing and is true wherever somebody is reading this.
+   */
+  careUrgent: 'If you are in danger right now, please call your local emergency number.',
+  careReachOut: 'Message the ministry',
+  carePrayer: 'Ask for prayer',
+} as const;

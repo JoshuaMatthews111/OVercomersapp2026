@@ -15,8 +15,34 @@ Copy also lives in Second Brain/OGN App/DO-NOT-BREAK.md.
 
 ## Protected behaviours — must never regress
 
-1. Six tabs, in this order: Home, Media, Give, Chat, Bible, More.
+1. **Changed 2026-09-18 at the owner's request.** His words that day: "I
+   would prefer this to have an evangelism tab. Not just in like a list
+   settings, not in the settings, but just an actual tab just for the admins."
+   The rule is now:
+   - Every member sees exactly six tabs, in this order: Home, Media, Give,
+     Chat, Bible, More. That order and those six titles do not change.
+   - An outreach leader sees a **seventh** tab, "Reach", between Bible and
+     More. Home stays first and More stays last for everybody.
+   - Who sees it is decided by `canUseEvangelism` in lib/accessControl.ts,
+     which mirrors the database's own `is_outreach_or_above()`. Nothing else
+     may decide it.
+   - A member must not see the tab at all — not greyed out, not present and
+     blocked. It is removed from the navigator with `<Tabs.Protected>` in
+     app/(tabs)/_layout.tsx, so the route is never registered and a link to
+     /outreach has nothing to open. `href: null` is NOT good enough: in
+     expo-router 57 it only hides the button and leaves the screen one
+     router.push away.
+   - The answer fails closed. While the roles are still being read, the tab is
+     hidden.
+   - app/(tabs)/outreach.tsx checks the role again itself, and must keep doing
+     so, so the two gates never depend on each other.
+   - The tab label stays short. Seven labels on a 375pt iPhone SE leave about
+     44pt each, and the label is drawn on one line, so a longer word than
+     "Reach" is shown clipped. Shorten a new label rather than dropping a tab.
 2. Evangelism and Admin are role-gated (leader/staff/admin/outreach only).
+   This matters MORE since the tab landed, not less: the tab, the map and the
+   outreach screen all read the same `canUseEvangelism` check, and the visit
+   notes and apartment numbers behind them are for the outreach team only.
 3. No unauthenticated access beyond onboarding, sign-in, create-account.
 4. Bible offers only KJV, NLT, AMP.
 5. Chat: report and block for members; moderation for leaders/admins;
@@ -93,3 +119,33 @@ These map behaviours must keep working:
 - My location, region search, zoom in/out, fit-to-region.
 - Points are stored as {latitude, longitude} and converted to [lng, lat] only
   at the MapLibre boundary. Never change the stored shape.
+
+## The Reach tab (added 2026-09-18)
+
+`app/(tabs)/outreach.tsx` is the leader's outreach home — the seventh tab
+described in item 1. It is deliberately NOT a second map. These behaviours
+must keep working:
+
+- It links into the real map (`/evangelism`, which is app/maps.native.tsx on a
+  phone and app/maps.tsx in a browser). It must never grow its own copy of the
+  map; one map, one place.
+- Region status is DERIVED. The screen calls `deriveTerritoryStatus()` from
+  lib/evangelismService.ts and never reads `territory.status` directly. A
+  region with no dated evidence behind it reads "No activity yet" in neutral
+  grey. Painting a whole state as "in progress" off a stored label was the
+  owner's complaint (M3) and must not come back here.
+- The three counts on the tab are counted from rows the team actually filed
+  (live check-ins, follow-up records, regions loaded). They must never be read
+  from `territories.reached_count` or its siblings — those still hold seeded
+  demo figures.
+- Anything the database has not been given yet degrades to a plain sentence.
+  If `public.evangelism_visits` is missing, the screen says "Visit pins are
+  not switched on yet" and carries on. If `territories.last_activity_at` or
+  the `territory_activity_status` view is missing, status falls back to the
+  activity the client can see. Neither may crash and neither may invent a
+  status.
+- A failure in the records or the live check-ins must not take the regions
+  down with it. They are fetched with `Promise.allSettled` and a partial
+  failure shows as one line of plain text plus pull-to-refresh.
+- Refresh on focus plus pull-to-refresh both stay. Coming back to the tab has
+  to show a visit logged a moment ago on the map.

@@ -52,10 +52,20 @@ async function requireUserId(action: string): Promise<string> {
   return id;
 }
 
-/** A story row, plus the two fields the screens need that AppStory lacks. */
+/** A story row, plus the fields the screens need that AppStory lacks. */
 export type AppStoryRow = AppStory & {
   createdBy?: string;
   visibilityRole?: string;
+  /**
+   * What the server actually saved, read straight back off the insert.
+   *
+   * This is the only honest way to know whether a story went out or is
+   * waiting for a leader to read it. A BEFORE INSERT trigger in the database
+   * can set this to 'draft', and when it does the row still comes back to us
+   * looking perfectly saved — because it is. Nothing may tell a person their
+   * story is live without looking at this first.
+   */
+  status?: string;
 };
 
 function mapStory(row: any): AppStoryRow {
@@ -72,11 +82,12 @@ function mapStory(row: any): AppStoryRow {
     createdAt: row.created_at || undefined,
     createdBy: row.created_by || undefined,
     visibilityRole: row.visibility_role || undefined,
+    status: row.status || undefined,
   };
 }
 
 const STORY_COLUMNS =
-  'id, title, category, body, region, image_url, action_url, published_at, expires_at, created_at, created_by, visibility_role';
+  'id, title, category, body, region, image_url, action_url, status, published_at, expires_at, created_at, created_by, visibility_role';
 
 const MEDIA_COLUMNS =
   'id, media_type, title, description, speaker, scripture_reference, thumbnail_url, file_url, external_url, duration_seconds, is_downloadable, is_featured, published_at';
@@ -584,6 +595,23 @@ async function insertStory(input: StoryInput, action: string): Promise<AppStoryR
     .single();
   if (error) throw error;
   return mapStory(data);
+}
+
+/**
+ * Did this story actually go out, or is it waiting for a leader to read it?
+ *
+ * The database is the only thing that decides. A BEFORE INSERT trigger on
+ * app_stories can set `status` to 'draft' and clear `published_at`, and the
+ * row comes back from the insert either way — which is exactly how somebody
+ * ended up being shown a success screen for a story nobody would ever see.
+ * So we ask the saved row, not our own hopes.
+ *
+ * A row with no status at all is treated as HELD rather than live. Being
+ * wrong in that direction costs a person one extra sentence; being wrong the
+ * other way tells them something untrue.
+ */
+export function storyWentOut(story: Pick<AppStoryRow, 'status'>): boolean {
+  return story.status === 'published';
 }
 
 /**

@@ -190,6 +190,14 @@ using (created_by = auth.uid());
 --     narration — which is what scripture is — passes.
 --   * `shoot (up|them)` gains `you`, so the threat above is caught.
 --   * Bare `sex(ual|y)?` is gone. `sexting` and the explicit nouns stay.
+--   * Bare `nude\w*` is gone, because it also caught the word "naked".
+--     OWNER'S INSTRUCTION, 2026-09-18: "the word naked shouldn't be blocked.
+--     We should be able to put naked in on the shame in the group chat" —
+--     Genesis 2:25, "they were both naked and were not ashamed". So the word
+--     alone now passes; only SOLICITING an image is caught: "send me nudes",
+--     "send me naked pics", "post your naked photos here", "show me ur nude
+--     pictures". Tested against all four, plus three sermon and testimony
+--     uses of "naked" that must pass, and all seven came out right.
 --   * Bare `cocaine|meth|heroin` is gone. Selling them is still caught
 --     ("cocaine for sale", "got weed hit me up", "selling percs dm me"),
 --     but surviving them is a testimony, not an offence.
@@ -220,7 +228,7 @@ language sql
 immutable
 set search_path = ''
 as $function$
-  select input is not null and input ~* $re$(\m(fuck|shit|bitch|asshole|cunt|nigg\w*|fag\w*|whore|slut|pussy|porn\w*|nude\w*|sexting|xxx|onlyfans|(i|we)\s*(a?m|are|'m)?\s*(going\s+to|gonna|gunna|will|finna)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)|(imma|ima|i'mma)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)|kill\s*your\s*self|kys|kill myself|suicide|self[- ]harm|cut(ting)? myself|end my life|bomb threat|shoot (up|them|you)|rape|molest\w*|(selling|sell|buy|got|plug for)\s+(drugs?|weed|cocaine|meth|heroin|pills|xans|percs)|(drugs?|weed|cocaine|meth|heroin|pills)\s+(for sale|4 sale)|cashapp me|send (me )?money|wire transfer|western union|bitcoin (giveaway|double)|click (this|my) link|dm me for (money|prophecy|blessing)|seed of \$?\d+|pay \$?\d+ (for|to receive))\M|https?://\S*(bit\.ly|tinyurl|t\.me/|wa\.me/))$re$;
+  select input is not null and input ~* $re$(\m(fuck|shit|bitch|asshole|cunt|nigg\w*|fag\w*|whore|slut|pussy|porn\w*|sexting|xxx|onlyfans|(send|post|want|got|show me|drop)\s+(me\s+)?(a\s+|some\s+|ur\s+|your\s+)?(nudes?|naked\s+(pic\w*|photo\w*|vid\w*)|nude\s+(pic\w*|photo\w*|vid\w*))|(i|we)\s*(a?m|are|'m)?\s*(going\s+to|gonna|gunna|will|finna)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)|(imma|ima|i'mma)\s+(kill|shoot|stab|murder|hurt)\s+(you|u|your)|kill\s*your\s*self|kys|kill myself|suicide|self[- ]harm|cut(ting)? myself|end my life|bomb threat|shoot (up|them|you)|rape|molest\w*|(selling|sell|buy|got|plug for)\s+(drugs?|weed|cocaine|meth|heroin|pills|xans|percs)|(drugs?|weed|cocaine|meth|heroin|pills)\s+(for sale|4 sale)|cashapp me|send (me )?money|wire transfer|western union|bitcoin (giveaway|double)|click (this|my) link|dm me for (money|prophecy|blessing)|seed of \$?\d+|pay \$?\d+ (for|to receive))\M|https?://\S*(bit\.ly|tinyurl|t\.me/|wa\.me/))$re$;
 $function$;
 
 -- The live function had no search_path set, which the project's own security

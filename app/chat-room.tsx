@@ -31,7 +31,7 @@ import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFi
 import { MessageBody, formatDayLabel, formatMessageTime, initials, roomIcon, roomLabel } from '../components/chatShared';
 import { SharedCard } from '../components/ShareToChat';
 import { playbackKind } from '../lib/embed';
-import { friendlyError } from '../lib/errorMessages';
+import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../lib/errorMessages';
 import { useNowPlaying } from '../lib/nowPlaying';
 import { supabase } from '../lib/supabase';
 import { currentUserId, friendlyUploadError } from '../lib/uploadService';
@@ -86,6 +86,12 @@ export default function ChatRoomScreen() {
   const [profileResults, setProfileResults] = useState<ChatProfileSearchResult[]>([]);
   const [memberSearchNote, setMemberSearchNote] = useState<string | null>(null);
   const [roomMembers, setRoomMembers] = useState<ChatMember[]>([]);
+  /**
+   * What to say to the person about their own last message being read by a
+   * leader first. Never about anybody else's message, and never a reason —
+   * the words that caused it are not shown back to them.
+   */
+  const [careNotice, setCareNotice] = useState<{ tone: 'held' | 'care' } | null>(null);
 
   useEffect(() => {
     alive.current = true;
@@ -157,6 +163,17 @@ export default function ChatRoomScreen() {
     const timer = setTimeout(() => { if (!cancelled) loadAll(); }, 0);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [loadAll]));
+
+  /**
+   * A gentle word BEFORE the send button, not a gate.
+   *
+   * The database decides what is held (DO-NOT-BREAK item 18) and this changes
+   * nothing about that: the send button stays enabled, the message still
+   * goes, and nothing about what is typed is checked anywhere but here, on
+   * this phone, to choose one sentence. See SELF_HARM_HINT in
+   * lib/errorMessages.ts.
+   */
+  const warnBeforeSending = useMemo(() => mentionsSelfHarm(body), [body]);
 
   const connectionRef = useRef<ChatConnectionState>('connecting');
   useEffect(() => { connectionRef.current = connection; }, [connection]);
@@ -248,12 +265,12 @@ export default function ChatRoomScreen() {
     try {
       const result = await sendChatMessage(roomId, text);
       setMessages((current) => [...current.filter((item) => item.id !== result.id), {
-        id: result.id, channelId: roomId, userId: userId || undefined, body: text, displayName: 'You', createdAt: new Date().toISOString(), isFlagged: result.isFlagged,
+        id: result.id, channelId: roomId, userId: userId || undefined, body: text, displayName: 'You', createdAt: result.createdAt, isFlagged: result.isFlagged,
       }]);
       setBody('');
-      if (result.isFlagged) {
-        Alert.alert('Thank you for sharing this', 'One of our team will read it first, and then it goes out to the room.');
-      }
+      // The message stays in the thread either way, so nobody is left
+      // wondering where it went. What changes is what we say about it.
+      if (result.isFlagged) setCareNotice({ tone: mentionsSelfHarm(text) ? 'care' : 'held' });
     } catch (err) {
       setError(friendlyError(err, 'Message not sent. Check your connection and try again.'));
     } finally {
@@ -295,12 +312,10 @@ export default function ChatRoomScreen() {
       const sent = await sendChatMessage(roomId, caption, uploaded);
       if (!alive.current) return;
       setMessages((current) => [...current.filter((item) => item.id !== localId && item.id !== sent.id), {
-        id: sent.id, channelId: roomId, userId: userId || undefined, body: caption, displayName: 'You', createdAt: new Date().toISOString(), isFlagged: sent.isFlagged,
+        id: sent.id, channelId: roomId, userId: userId || undefined, body: caption, displayName: 'You', createdAt: sent.createdAt, isFlagged: sent.isFlagged,
         attachment: { path: uploaded.path, url: file.uri, kind: uploaded.kind, name: uploaded.name, size: uploaded.size, width: uploaded.width, height: uploaded.height },
       }]);
-      if (sent.isFlagged) {
-        Alert.alert('Thank you for sharing this', 'One of our team will read it first, and then it goes out to the room.');
-      }
+      if (sent.isFlagged) setCareNotice({ tone: mentionsSelfHarm(caption) ? 'care' : 'held' });
     } catch (err) {
       if (!alive.current) return;
       setMessages((current) => current.filter((item) => item.id !== localId));
@@ -418,7 +433,7 @@ export default function ChatRoomScreen() {
           onLongPress={() => messageActions(message, own)}
           delayLongPress={280}
           accessibilityRole="button"
-          accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message. Hold for options.`}
+          accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message.${message.isFlagged && own ? ' Waiting for a leader to read it.' : ''} Hold for options.`}
           accessibilityActions={[{ name: 'longpress', label: 'Message options' }]}
           onAccessibilityAction={() => messageActions(message, own)}
           style={[styles.bubble, own && styles.bubbleOwn]}
@@ -437,7 +452,7 @@ export default function ChatRoomScreen() {
             {message.isFlagged && own ? (
               <View style={styles.heldPill}>
                 <Ionicons name="time-outline" size={11} color={theme.colors.accent} />
-                <Text style={styles.heldText}>Held for review</Text>
+                <Text style={styles.heldText}>Waiting for a leader</Text>
               </View>
             ) : null}
             <Text style={[styles.time, own && styles.timeOwn]}>
@@ -547,6 +562,72 @@ export default function ChatRoomScreen() {
               <Ionicons name="refresh" size={16} color={theme.colors.danger} />
               <Text style={styles.error}>{error}</Text>
             </Pressable>
+          ) : null}
+
+          {/*
+            What the app says once the database has held somebody's own
+            message. It never names a word, never says blocked or flagged,
+            and when it reads like somebody is in trouble it answers as a
+            church rather than as a moderation queue.
+          */}
+          {careNotice ? (
+            <View
+              style={[styles.careCard, careNotice.tone === 'care' && styles.careCardWarm]}
+              accessibilityLiveRegion="polite"
+            >
+              <View style={styles.careHead}>
+                <Ionicons
+                  name={careNotice.tone === 'care' ? 'heart' : 'time-outline'}
+                  size={18}
+                  color={theme.colors.accent}
+                />
+                <Text style={styles.careTitle}>
+                  {careNotice.tone === 'care' ? REVIEW_NOTICE.careTitle : REVIEW_NOTICE.chatHeldTitle}
+                </Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Close this note"
+                  onPress={() => setCareNotice(null)}
+                  hitSlop={14}
+                  style={styles.careClose}
+                >
+                  <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
+                </Pressable>
+              </View>
+              <Text style={styles.careBody}>
+                {careNotice.tone === 'care' ? REVIEW_NOTICE.careBody : REVIEW_NOTICE.chatHeldBody}
+              </Text>
+              {careNotice.tone === 'care' ? <Text style={styles.careUrgent}>{REVIEW_NOTICE.careUrgent}</Text> : null}
+              {careNotice.tone === 'care' ? (
+                <View style={styles.careActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={REVIEW_NOTICE.careReachOut}
+                    onPress={() => router.push('/support' as any)}
+                    style={styles.careButton}
+                  >
+                    <Ionicons name="headset-outline" size={16} color={theme.colors.textOnAccent} />
+                    <Text style={styles.careButtonText}>{REVIEW_NOTICE.careReachOut}</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={REVIEW_NOTICE.carePrayer}
+                    onPress={() => router.push('/prayer' as any)}
+                    style={styles.careButtonQuiet}
+                  >
+                    <Ionicons name="hand-left-outline" size={16} color={theme.colors.textPrimary} />
+                    <Text style={styles.careButtonQuietText}>{REVIEW_NOTICE.carePrayer}</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
+          {warnBeforeSending && !careNotice ? (
+            <View style={styles.sendHint} accessibilityLiveRegion="polite">
+              <Ionicons name="heart-outline" size={15} color={theme.colors.accent} />
+              <Text style={styles.sendHintText}>{REVIEW_NOTICE.beforeSendChat}</Text>
+            </View>
           ) : null}
 
           <SafeAreaView edges={['bottom']} style={styles.composerWrap}>
@@ -730,6 +811,61 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   note: { color: t.colors.textMuted, fontSize: t.type.meta, marginHorizontal: 16, marginBottom: 6 },
   errorBar: { flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch', gap: 8, minHeight: 48, marginHorizontal: 12, marginBottom: 6, paddingHorizontal: 12, borderRadius: t.radius.md, backgroundColor: t.colors.dangerMuted },
   error: { flex: 1, color: t.colors.danger, fontWeight: '700', fontSize: t.type.meta, lineHeight: 19 },
+  careCard: {
+    alignSelf: 'stretch',
+    gap: 8,
+    marginHorizontal: 12,
+    marginBottom: 6,
+    padding: 12,
+    borderRadius: t.radius.lg,
+    backgroundColor: t.colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: t.colors.accentBorder,
+    ...t.elevation.low,
+  },
+  careCardWarm: { backgroundColor: t.colors.accentMuted, borderColor: t.colors.accent },
+  careHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  careTitle: { flex: 1, color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+  careClose: { width: 32, minHeight: 32, aspectRatio: 1, alignItems: 'center', justifyContent: 'center' },
+  careBody: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 20 },
+  careUrgent: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta, lineHeight: 20 },
+  careActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 2 },
+  careButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: 48,
+    paddingHorizontal: 16,
+    borderRadius: t.radius.pill,
+    backgroundColor: t.colors.accentSolid,
+  },
+  careButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.meta },
+  careButtonQuiet: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: 48,
+    paddingHorizontal: 16,
+    borderRadius: t.radius.pill,
+    backgroundColor: t.colors.surfaceRaised,
+    borderWidth: 1,
+    borderColor: t.colors.borderStrong,
+  },
+  careButtonQuietText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+  sendHint: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginHorizontal: 12,
+    marginBottom: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: t.radius.md,
+    backgroundColor: t.colors.accentMuted,
+  },
+  sendHintText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19 },
   composerWrap: { backgroundColor: t.colors.navBar, borderTopWidth: 1, borderTopColor: t.colors.navBorder },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
   attachButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: t.colors.accentMuted, alignItems: 'center', justifyContent: 'center' },
