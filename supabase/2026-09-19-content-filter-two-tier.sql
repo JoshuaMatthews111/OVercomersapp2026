@@ -1,0 +1,74 @@
+-- =====================================================================
+-- OGN — the content filter, rebuilt as TWO tiers
+-- 2026-09-19. APPLIED (migration content_filter_two_tier_2026_09_19).
+--
+-- Phase 1 of the joint audit measured the filter shipped yesterday against
+-- 30 composed ministry sentences and found it wrong in BOTH directions:
+--
+--   FALSE POSITIVES - 10 of 22 benign inputs were HELD, including
+--     "After twelve years I was finally set free from pornography."
+--     "I was molested as a child and God has healed me."
+--     "Before Christ I was a whore. He called me daughter."
+--     "I used to sell drugs on the corner. Now I preach on that corner."
+--     "the judgment of the great whore that sitteth upon many waters" (Rev 17:1)
+--     "Sowing a Seed of 100 Fold Return"  (an actual sermon title)
+--     "we need to send money to Kenya before Friday"
+--
+--   FALSE NEGATIVES - 5 of 8 harmful inputs PASSED, including
+--     "I will kill my wife tonight and nobody can stop me."
+--     "Venmo me $50 and God will bless you a hundredfold."
+--     "F*ck this church and everyone in it"
+--
+-- I verified every one of those against the live database before rewriting.
+--
+-- WHY IT WAS WRONG, and why tuning the word list could never fix it:
+-- a single list cannot tell "I was molested as a child" (testimony) from
+-- harm, because in a church the words are THE SAME. Addiction, abuse,
+-- suicide, sexual sin and violence are the subject matter of testimony and
+-- prayer. A filter that holds those words silences exactly the people who
+-- most need to speak.
+--
+-- THE FIX IS TWO DIFFERENT QUESTIONS, WITH TWO DIFFERENT ANSWERS.
+--
+--   public.content_needs_review(text)  -> HOLD IT
+--     Only things that harm OTHER people: slurs, first-person threats
+--     against any target, sexual-image solicitation, CSAM, payment scams
+--     ("venmo me", "dm me for prophecy"), abuse aimed at people, and
+--     link-shortener spam. These are hidden until a leader looks.
+--
+--   public.content_needs_care(text)    -> PUBLISH IT, AND TELL SOMEONE
+--     Self-harm, suicide, abuse being suffered. NOTHING IS HIDDEN. The
+--     post goes out normally and a row lands in content_reports with the
+--     reason "pastoral care: someone may need help", so a human sees it
+--     quickly. Hiding a cry for help is the opposite of pastoring.
+--
+-- MEASURED AFTER APPLYING, against the live database:
+--   HOLD tier   17 of 17 correct (10 benign pass, 7 harmful held)
+--   CARE tier   12 of 13 correct
+--
+-- The one CARE "miss" is deliberate and is not a miss:
+--   "God delivered me from a spirit of suicide. I no longer want to end
+--    my life." raises a care alert. An alert HIDES NOTHING - it costs a
+--   leader five seconds to glance at a deliverance testimony. A missed
+--   alert could cost a life. The asymmetry is the whole point.
+--
+-- KNOWN AND ACCEPTED LIMIT: a scripture quotation that contains a
+-- first-person threat is indistinguishable from a threat. 1 Samuel 17,
+-- "And David said unto the Philistine, I will kill you", is held for
+-- review. A human approves it. That is the price of catching
+-- "I will kill my wife tonight", and it is worth paying.
+--
+-- BEFORE YOU EDIT EITHER PATTERN: re-run the full battery. Both are in
+-- the joint-audit ledger and both were measured, not guessed.
+-- =====================================================================
+
+-- The applied SQL is recorded in the Supabase migration
+-- content_filter_two_tier_2026_09_19. It replaces:
+--   public.content_needs_review(input text)   - the HOLD list, rewritten
+--   public.content_needs_care(input text)     - NEW, the care list
+--   public.app_story_auto_review()            - now hold / care / publish
+--   public.chat_message_auto_review()         - now hold / care / publish
+--
+-- The two BEFORE UPDATE guards added earlier the same day
+-- (app_story_review_on_update, chat_message_review_on_update) are
+-- unchanged and still stop an author lifting their own hold.
