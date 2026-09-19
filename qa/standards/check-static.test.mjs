@@ -586,8 +586,9 @@ test('the old unlimited storage permission Google Play no longer accepts', () =>
 
 // Built from pieces at run time, never written out as one literal.
 // A realistic-looking key sitting in the source is a key as far as every
-// scanner is concerned. The detector under test sees the assembled string
-// and behaves exactly the same.
+// scanner is concerned: GitHub push protection rejected this branch three
+// times over this line, and it was right to. The detector under test sees
+// the assembled string and behaves exactly the same.
 const PLANTED = ['sk', 'live', 'A'.repeat(33)].join('_');
 
 test('a key typed into the code is found', () => {
