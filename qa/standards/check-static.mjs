@@ -51,6 +51,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname, resolve, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { RULES, RULES_BY_ID, IDENTITY, THRESHOLDS, rulesFor, groupByTheme, SEVERITY_ORDER } from './rules.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -1873,9 +1874,46 @@ const NATIVE_MODULE_PURPOSE_STRINGS = {
   'expo-image-picker': ['NSCameraUsageDescription'],
 };
 
+/**
+ * A config plugin can DELETE a key you wrote in app.json.
+ *
+ * Found 2026-09-19, the hard way. app.json declared
+ * NSMotionUsageDescription, and one line below it the expo-location plugin
+ * was passed `"motionUsagePermission": false` — which strips that very key
+ * out of the merged Info.plist at prebuild. `expo config --type introspect`
+ * resolved it to undefined. So app.json said the key was there, the binary
+ * Apple received did not have it, and this rule — which read app.json —
+ * green-lit a build that earned the identical ITMS-90683 rejection.
+ *
+ * A gate that reads the author's intent instead of the built artefact is
+ * worse than no gate, because it is trusted. This now reads the RESOLVED
+ * config and falls back to app.json only when the resolver is unavailable
+ * (a fresh clone with no node_modules), saying so in the finding.
+ */
+function resolvedInfoPlist(ctx) {
+  if (ctx.__resolvedPlist !== undefined) return ctx.__resolvedPlist;
+  let plist = null;
+  try {
+    const raw = execFileSync(
+      process.execPath,
+      ['node_modules/expo/bin/cli', 'config', '--type', 'introspect', '--json'],
+      { cwd: ctx.opts.root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 120000 },
+    );
+    const parsed = JSON.parse(raw);
+    plist = (parsed && parsed.ios && parsed.ios.infoPlist) || null;
+  } catch {
+    plist = null;
+  }
+  ctx.__resolvedPlist = plist;
+  return plist;
+}
+
 D['OGN-IOS-009B'] = (ctx, rule, out) => {
   const deps = (ctx.packageJson && ctx.packageJson.dependencies) || {};
-  const plist = (ctx.appJson && ctx.appJson.expo && ctx.appJson.expo.ios && ctx.appJson.expo.ios.infoPlist) || {};
+  const resolved = resolvedInfoPlist(ctx);
+  const plist = resolved
+    ?? ((ctx.appJson && ctx.appJson.expo && ctx.appJson.expo.ios && ctx.appJson.expo.ios.infoPlist) || {});
+  const source = resolved ? 'the resolved build config' : 'app.json (the resolver was unavailable, so a plugin could still strip this)';
   for (const [pkg, keys] of Object.entries(NATIVE_MODULE_PURPOSE_STRINGS)) {
     if (!deps[pkg]) continue;
     for (const key of keys) {
@@ -1885,7 +1923,7 @@ D['OGN-IOS-009B'] = (ctx, rule, out) => {
         ? 'is missing'
         : 'is too short to explain anything to a person';
       out(rule, ctx.appJsonFile, ctx.appJsonLine('infoPlist'),
-        `${pkg} is installed and links a protected iOS framework, but ${key} ${why}. Apple rejects the upload with ITMS-90683 after the whole build has finished.`);
+        `${pkg} is installed and links a protected iOS framework, but ${key} ${why} in ${source}. Writing it in app.json is not enough — a config plugin can strip it back out at prebuild. Apple rejects the upload with ITMS-90683 after the whole build has finished.`);
     }
   }
 };

@@ -838,7 +838,12 @@ function ShareStorySheet({
           asset: item.asset,
           bucketId: 'story-media',
           purpose: 'story',
-          pathPrefix: 'stories',
+          // No pathPrefix on purpose. uploadService then files this under
+          // the member's own user id, which is the only shape the storage
+          // policy "members upload own story media" permits. A shared
+          // 'stories/' folder cannot be secured: any member could overwrite
+          // any other member's photo.
+
           relatedTable: 'app_stories',
           signal: controller.signal,
           onProgress: (part) => setFraction((index + part) / media.length),
