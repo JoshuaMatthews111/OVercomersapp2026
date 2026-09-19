@@ -10,7 +10,7 @@
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.overcomers.globalnetwork.app",
-      "buildNumber": "33",
+      "buildNumber": "34",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Overcomers uses your location on the Evangelism map to show where you are, so you can save an outreach area, a visit or a follow-up in the right place.",
         "NSCameraUsageDescription": "Overcomers opens the camera when you tap Camera in a chat, so you can take a photo or a short video and send it to the conversation.",
@@ -25,7 +25,7 @@
     },
     "android": {
       "package": "com.overcomers.globalnetwork.app",
-      "versionCode": 17,
+      "versionCode": 18,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.ACCESS_FINE_LOCATION",
