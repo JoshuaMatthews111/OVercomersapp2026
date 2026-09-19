@@ -1097,3 +1097,38 @@ export default function Other() { const { themePreference } = useThemePreference
   const hits = g.findings('AND-THEME-01').map((f) => f.detail ?? '');
   assert.ok(hits.some((m) => /two different status-bar/i.test(m)), 'two implementations really do fight');
 });
+
+test('a native module with no purpose string is caught BEFORE Apple sees it', () => {
+  // ITMS-90683, 2026-09-19. @maplibre/maplibre-react-native links CoreMotion
+  // for the map compass. NSMotionUsageDescription was missing, and Apple only
+  // said so after a full build and upload. Apple scans the linked binary, so
+  // the string is required even though the app never calls the API itself.
+  const withMap = JSON.parse(JSON.stringify(APP_JSON));
+  withMap.expo.ios = withMap.expo.ios ?? {};
+  withMap.expo.ios.infoPlist = {
+    NSLocationWhenInUseUsageDescription: 'Overcomers uses your location on the Evangelism map to show where you are.',
+  };
+  const pkg = { name: 'ogn', version: '1.0.2', dependencies: { '@maplibre/maplibre-react-native': '11.3.10' } };
+
+  const missing = gate({ 'package.json': JSON.stringify(pkg, null, 2) }, { appJson: withMap });
+  assert.equal(missing.fires('OGN-IOS-009B'), true, 'the map library is installed and the motion string is absent');
+  assert.match(missing.findings('OGN-IOS-009B')[0].detail, /NSMotionUsageDescription/);
+
+  const fixed = JSON.parse(JSON.stringify(withMap));
+  fixed.expo.ios.infoPlist.NSMotionUsageDescription =
+    'Overcomers uses motion only to point the compass on the Evangelism map, so the map can turn the way you are facing.';
+  const ok = gate({ 'package.json': JSON.stringify(pkg, null, 2) }, { appJson: fixed });
+  assert.equal(ok.fires('OGN-IOS-009B'), false, 'with the string present it must pass');
+});
+
+test('a purpose string too short to explain anything still fails', () => {
+  const withMap = JSON.parse(JSON.stringify(APP_JSON));
+  withMap.expo.ios = withMap.expo.ios ?? {};
+  withMap.expo.ios.infoPlist = {
+    NSMotionUsageDescription: 'Motion access.',
+    NSLocationWhenInUseUsageDescription: 'Overcomers uses your location on the Evangelism map to show where you are.',
+  };
+  const pkg = { name: 'ogn', version: '1.0.2', dependencies: { '@maplibre/maplibre-react-native': '11.3.10' } };
+  const g = gate({ 'package.json': JSON.stringify(pkg, null, 2) }, { appJson: withMap });
+  assert.equal(g.fires('OGN-IOS-009B'), true, 'a stub string is not an explanation');
+});

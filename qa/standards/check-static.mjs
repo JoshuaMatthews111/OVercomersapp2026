@@ -1858,6 +1858,38 @@ D['OGN-IOS-009'] = (ctx, rule, out) => {
   }
 };
 
+/**
+ * Apple scans the LINKED BINARY, not your call sites. A library you never call
+ * still needs its purpose string, and the rejection only arrives after a full
+ * build and upload. ITMS-90683 cost this project one round trip on 2026-09-19:
+ * @maplibre/maplibre-react-native links CoreMotion for the map compass and
+ * NSMotionUsageDescription was missing.
+ *
+ * Add a row here whenever a native module is added to the project.
+ */
+const NATIVE_MODULE_PURPOSE_STRINGS = {
+  '@maplibre/maplibre-react-native': ['NSMotionUsageDescription', 'NSLocationWhenInUseUsageDescription'],
+  'expo-location': ['NSLocationWhenInUseUsageDescription'],
+  'expo-image-picker': ['NSCameraUsageDescription'],
+};
+
+D['OGN-IOS-009B'] = (ctx, rule, out) => {
+  const deps = (ctx.packageJson && ctx.packageJson.dependencies) || {};
+  const plist = (ctx.appJson && ctx.appJson.expo && ctx.appJson.expo.ios && ctx.appJson.expo.ios.infoPlist) || {};
+  for (const [pkg, keys] of Object.entries(NATIVE_MODULE_PURPOSE_STRINGS)) {
+    if (!deps[pkg]) continue;
+    for (const key of keys) {
+      const value = plist[key];
+      if (typeof value === 'string' && value.trim().length >= 40) continue;
+      const why = value === undefined
+        ? 'is missing'
+        : 'is too short to explain anything to a person';
+      out(rule, ctx.appJsonFile, ctx.appJsonLine('infoPlist'),
+        `${pkg} is installed and links a protected iOS framework, but ${key} ${why}. Apple rejects the upload with ITMS-90683 after the whole build has finished.`);
+    }
+  }
+};
+
 D['OGN-IOS-010'] = (ctx, rule, out) => {
   for (const f of ctx.files) {
     for (const m of f.masked.matchAll(/requestMediaLibraryPermissionsAsync|from\s*['"]expo-media-library['"]/g)) {
