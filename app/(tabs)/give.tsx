@@ -377,7 +377,7 @@ export default function GiveScreen() {
           <View style={styles.customCard}>
             <View style={styles.customHeader}>
               <Ionicons name="card-outline" size={22} color={theme.colors.accent} />
-              <Text style={styles.customTitle}>Tithe, offering or another amount</Text>
+              <Text style={styles.customTitle}>Seed offering, tithe or any amount</Text>
             </View>
             <View style={styles.customInputRow}>
               <Text style={styles.dollarSign}>$</Text>

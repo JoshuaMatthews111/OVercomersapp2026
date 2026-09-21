@@ -40,6 +40,7 @@ import {
 import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../components/ChatAttachments';
 import { ChatActionSheet, ChatSheetAction, MessageBody, RoomBadge, formatDayLabel, formatMessageTime, initials, roomLabel } from '../components/chatShared';
 import { SharedCard } from '../components/ShareToChat';
+import { GIVE_SHARED, mentionsGiving } from '../lib/givingNudge';
 import { playbackKind } from '../lib/embed';
 import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../lib/errorMessages';
 import { useNowPlaying } from '../lib/nowPlaying';
@@ -78,6 +79,9 @@ export default function ChatRoomScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [body, setBody] = useState('');
+  /** The church's Give card rides along with the next message when this is on. */
+  const [attachGive, setAttachGive] = useState(false);
+  const [giveNudgeDismissed, setGiveNudgeDismissed] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
@@ -289,11 +293,14 @@ export default function ChatRoomScreen() {
     setError(null);
     setSending(true);
     try {
-      const result = await sendChatMessage(roomId, text);
+      const shared = attachGive ? GIVE_SHARED : undefined;
+      const result = await sendChatMessage(roomId, text, undefined, shared);
       setMessages((current) => [...current.filter((item) => item.id !== result.id), {
-        id: result.id, channelId: roomId, userId: userId || undefined, body: text, displayName: 'You', createdAt: result.createdAt, isFlagged: result.isFlagged,
+        id: result.id, channelId: roomId, userId: userId || undefined, body: text, displayName: 'You', createdAt: result.createdAt, isFlagged: result.isFlagged, shared,
       }]);
       setBody('');
+      setAttachGive(false);
+      setGiveNudgeDismissed(false);
       // The message stays in the thread either way, so nobody is left
       // wondering where it went. What changes is what we say about it.
       if (result.isFlagged) setCareNotice({ tone: mentionsSelfHarm(text) ? 'care' : 'held' });
@@ -363,6 +370,7 @@ export default function ChatRoomScreen() {
   }
 
   function openShared(shared: SharedRef) {
+    if (shared.kind === 'give') return router.push('/(tabs)/give' as any);
     if (shared.kind === 'scripture' && shared.scripture) {
       const verse = shared.scripture;
       return router.push({ pathname: '/(tabs)/bible', params: { bookId: verse.bookId, chapter: String(verse.chapter), verse: String(verse.verse), version: verse.version } });
@@ -919,6 +927,33 @@ export default function ChatRoomScreen() {
             </View>
           ) : null}
 
+          {attachGive ? (
+            <View style={styles.giveAttached}>
+              <Ionicons name="heart" size={15} color={theme.colors.accent} />
+              <Text style={styles.giveAttachedText}>The church's Give card will go with this message.</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Remove the Give card" hitSlop={12} onPress={() => setAttachGive(false)} style={styles.giveNudgeClose}>
+                <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
+              </Pressable>
+            </View>
+          ) : !giveNudgeDismissed && mentionsGiving(body) ? (
+            <View style={styles.giveNudge}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Add the church's Give link to this message"
+                accessibilityHint="Members can tap it to open the Give tab"
+                onPress={() => setAttachGive(true)}
+                hitSlop={8}
+                style={styles.giveNudgeMain}
+              >
+                <Ionicons name="heart-outline" size={16} color={theme.colors.accent} />
+                <Text style={styles.giveNudgeText}>Add the church's Give link</Text>
+              </Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Not now" hitSlop={12} onPress={() => setGiveNudgeDismissed(true)} style={styles.giveNudgeClose}>
+                <Ionicons name="close" size={18} color={theme.colors.textSecondary} />
+              </Pressable>
+            </View>
+          ) : null}
+
           <SafeAreaView edges={['bottom']} style={styles.composerWrap}>
             <View style={styles.composer}>
               <Pressable accessibilityRole="button" accessibilityLabel="Add a photo, video or file" disabled={sendingFile} onPress={() => setAttachOpen(true)} style={styles.attachButton}>
@@ -1206,6 +1241,12 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
     backgroundColor: t.colors.accentMuted,
   },
   sendHintText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19 },
+  giveNudge: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', marginHorizontal: 12, marginBottom: 6, borderRadius: t.radius.pill, borderWidth: 1, borderColor: t.colors.accentBorder, backgroundColor: t.colors.accentMuted },
+  giveNudgeMain: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, minWidth: 48, paddingLeft: 14, paddingRight: 6, flexShrink: 1 },
+  giveNudgeText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta, flexShrink: 1 },
+  giveNudgeClose: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
+  giveAttached: { flexDirection: 'row', alignItems: 'center', gap: 8, marginHorizontal: 12, marginBottom: 6, paddingLeft: 12, borderRadius: t.radius.md, backgroundColor: t.colors.accentMuted },
+  giveAttachedText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19 },
   composerWrap: { backgroundColor: t.colors.navBar, borderTopWidth: 1, borderTopColor: t.colors.navBorder },
   composer: { flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
   attachButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: t.colors.accentMuted, alignItems: 'center', justifyContent: 'center' },

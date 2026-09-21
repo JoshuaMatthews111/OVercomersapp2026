@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -48,6 +48,11 @@ export default function CommunityScreen() {
   const styles = useStyles(theme);
 
   const [chatTab, setChatTab] = useState<ChatTab>('groups');
+  // A tapped notice notification lands here with section=notices.
+  const { section } = useLocalSearchParams<{ section?: string }>();
+  useEffect(() => {
+    if (section === 'notices') setChatTab('announcements');
+  }, [section]);
   const [rooms, setRooms] = useState<ChatRoom[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [loading, setLoading] = useState(true);

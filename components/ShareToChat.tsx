@@ -180,7 +180,7 @@ export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; d
           <Text numberOfLines={2} style={styles.cardTitle}>{shared.title}</Text>
           <Text numberOfLines={1} style={styles.cardMeta}>{labelFor(shared.kind)}{shared.speaker ? ` • ${shared.speaker}` : ''}</Text>
         </View>
-        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' ? 'open-outline' : 'play-circle'} size={24} color={theme.colors.accent} />
+        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' || shared.kind === 'give' ? 'open-outline' : 'play-circle'} size={24} color={theme.colors.accent} />
       </View>
       {shared.scripture ? (
         <>
@@ -193,6 +193,7 @@ export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; d
 }
 
 function iconFor(kind: SharedRef['kind']): keyof typeof Ionicons.glyphMap {
+  if (kind === 'give') return 'heart';
   if (kind === 'scripture') return 'book';
   if (kind === 'music') return 'musical-notes';
   if (kind === 'video') return 'videocam';
@@ -201,6 +202,7 @@ function iconFor(kind: SharedRef['kind']): keyof typeof Ionicons.glyphMap {
   return 'mic';
 }
 function labelFor(kind: SharedRef['kind']) {
+  if (kind === 'give') return 'Give · opens the Give tab';
   if (kind === 'scripture') return 'Scripture';
   return kind === 'music' ? 'Song' : kind === 'video' ? 'Video' : kind === 'story' ? 'Story' : kind === 'article' ? 'Article' : 'Sermon';
 }

@@ -149,3 +149,29 @@ must keep working:
   failure shows as one line of plain text plus pull-to-refresh.
 - Refresh on focus plus pull-to-refresh both stay. Coming back to the tab has
   to show a visit logged a moment ago on the map.
+
+## Added 2026-09-21 (owner's build-34 list and route-map decisions)
+
+23. Give presets are $25/$50/$250/$500 and each opens the ministry's own locked
+    Stripe link. A typed amount goes through the create-gift-checkout edge
+    function, which refuses any Stripe key that does not own the ministry's
+    donate links. The $350 1-on-1 link is a service and never appears in Give.
+24. YouTube plays inside the app (HTML source with a real baseUrl/origin).
+    The player never uses a full-screen transparent Modal; minimised, it is a
+    bar that does not cover the chat composer or the keyboard.
+25. Media shows the channel's real teachings (sermons table, 59 on this date).
+    News/political clips, promos and Shorts stay out.
+26. The blog reads the website's public Firestore `blogs` collection live.
+27. The Gospel of Salvation reader lives at /book and stays word-for-word with
+    the PDF (qa/book-fidelity test).
+28. Members MAY encourage giving to the ministry (seed, tithe, offering). When a
+    chat message talks about giving, the composer offers the church's Give card
+    (SharedRef kind 'give', opens the Give tab). Money to a person ("Venmo me")
+    stays held by the database filter.
+29. Chat: Delete for me / Delete for everyone / admin Hold; group pictures;
+    leaders and admins can create groups.
+30. A tapped notification opens its chat room, or Chat > Notices for a notice.
+31. Community Standards is an in-app page (/community-standards), readable
+    before sign-in. More > Language is hidden until a second language exists.
+32. The evangelism map shows only real counts. Seeded demo totals were zeroed
+    on 2026-09-21; the old values are in public.territories_seed_backup_2026_09_21.

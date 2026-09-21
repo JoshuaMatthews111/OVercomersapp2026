@@ -11,6 +11,7 @@ import { supabase } from '../../lib/supabase';
 import { friendlyError } from '../../lib/errorMessages';
 import { ensurePushRegistered } from '../../lib/pushBootstrap';
 import { WelcomeTour } from '../../components/WelcomeTour';
+import { useNotificationRouting } from '../../lib/notificationRouting';
 
 /**
  * Whether this account is allowed in is a fact about the person, not about the
@@ -57,6 +58,8 @@ function giveHandsIcon({ color, size, focused }: { color: ColorValue; size: numb
 }
 
 export default function TabLayout() {
+  // A tapped notification opens what it was about (chat room or Notices).
+  useNotificationRouting();
   const { themePreference } = useThemePreference();
   const dark = themePreference === 'dark';
   const theme = getTheme(dark);

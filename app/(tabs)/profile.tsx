@@ -593,7 +593,7 @@ export default function ProfileScreen() {
   const settings: SettingsItem[] = [
     { label: 'Account Settings', icon: 'person-outline', action: () => openSettingsDetail('account') },
     { label: 'Notifications', icon: 'notifications-outline', action: () => setShowNotificationSettings((value) => !value) },
-    { label: 'Language', icon: 'globe-outline', value: 'English', action: () => openSettingsDetail('language') },
+    // Language is hidden until a second language ships (owner decision 2026-09-21).
     { label: 'Theme', icon: 'contrast-outline', value: dark ? 'Dark' : 'Light', action: () => { void setThemeMode(dark ? 'light' : 'dark'); } },
     ...(access.canUseEvangelism ? [{ label: 'Evangelism Dashboard', icon: 'map-outline' as const, action: () => router.push('/evangelism' as any) }] : []),
     ...(access.canManageContent ? [{ label: 'Admin Dashboard', icon: 'shield-checkmark-outline' as const, action: () => router.push('/admin' as any) }] : []),
@@ -605,7 +605,7 @@ export default function ProfileScreen() {
     // resetWelcomeTour has nothing to forget without one.
     ...(tourUserId ? [{ label: 'Show me around again', icon: 'compass-outline' as const, action: () => { void resetWelcomeTour(tourUserId); } }] : []),
     { label: 'Support Center', icon: 'headset-outline', action: () => router.push('/support' as any) },
-    { label: 'Community Standards', icon: 'people-outline', action: () => { void Linking.openURL(termsUrl); } },
+    { label: 'Community Standards', icon: 'people-outline', action: () => router.push('/community-standards' as any) },
     { label: 'About Overcomers Global Network', icon: 'information-circle-outline', action: () => openSettingsDetail('about') },
     // Both pages are live on the ministry site; the stores ask for them too.
     { label: 'Privacy Policy', icon: 'shield-checkmark-outline', action: () => { void Linking.openURL(privacyUrl); } },

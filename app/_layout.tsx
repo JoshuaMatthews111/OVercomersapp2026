@@ -155,6 +155,8 @@ export default function RootLayout() {
           <Stack.Screen name="index" />
           <Stack.Screen name="reset-password" />
           <Stack.Screen name="+not-found" />
+          {/* Readable before sign-in: the rules should be visible to anyone deciding whether to join. */}
+          <Stack.Screen name="community-standards" />
           {/* The one place that decides whether the signed-in app exists. */}
           <Stack.Protected guard={Boolean(session)}>
             <Stack.Screen name="(tabs)" />
@@ -168,7 +170,6 @@ export default function RootLayout() {
             <Stack.Screen name="maps" />
             <Stack.Screen name="person" />
             <Stack.Screen name="prayer" />
-            <Stack.Screen name="story-detail" />
             <Stack.Screen name="story-viewer" />
             <Stack.Screen name="support" />
           </Stack.Protected>

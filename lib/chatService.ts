@@ -25,7 +25,7 @@ export type ChatAttachment = {
 
 // A card for something shared from the app into a chat.
 export type SharedRef = {
-  kind: 'sermon' | 'music' | 'video' | 'story' | 'article' | 'scripture';
+  kind: 'sermon' | 'music' | 'video' | 'story' | 'article' | 'scripture' | 'give';
   scripture?: { bookId: string; chapter: number; verse: number; version: 'KJV' | 'NLT' | 'AMP'; text: string; copyright?: string };
   title: string;
   speaker?: string;
