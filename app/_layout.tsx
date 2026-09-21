@@ -159,6 +159,9 @@ export default function RootLayout() {
           <Stack.Protected guard={Boolean(session)}>
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="admin" />
+            <Stack.Screen name="blog" />
+            {/* The Gospel of Salvation book: app/book/ (its own small stack). */}
+            <Stack.Screen name="book" />
             <Stack.Screen name="chat-room" />
             <Stack.Screen name="event-detail" />
             <Stack.Screen name="evangelism" />

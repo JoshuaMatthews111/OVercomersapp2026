@@ -400,7 +400,7 @@ export default function MapsWebScreen() {
               <Text style={styles.levelText}>{selected.level}</Text>
             </View>
             <View style={styles.mapCanvas}>
-              {[selected, ...children].slice(0, 8).map((territory, index) => {
+              {[selected, ...children].slice(0, 24).map((territory) => {
                 const shade = shadeFor(statusOf(territory));
                 const active = territory.id === selected.id;
                 return (
@@ -410,22 +410,18 @@ export default function MapsWebScreen() {
                     accessibilityLabel={`${territory.name} — ${statusOf(territory).label}`}
                     accessibilityState={{ selected: active }}
                     onPress={() => focusTerritory(territory)}
-                    style={[
-                      styles.mapMarker,
-                      active && styles.mapMarkerOn,
-                      {
-                        borderColor: shade,
-                        left: `${10 + ((index * 29) % 66)}%`,
-                        top: `${14 + ((index * 23) % 58)}%`
-                      }
-                    ]}
+                    // Laid out in rows, not scattered: scattered markers overlapped
+                    // and a click landed on the wrong region.
+                    style={[styles.mapMarker, { borderColor: shade }, active && styles.mapMarkerOn]}
                   >
                     <View style={[styles.dot, { backgroundColor: shade }]} />
-                    <Text numberOfLines={1} style={styles.markerText}>{territory.name}</Text>
+                    <Text numberOfLines={1} style={[styles.markerText, active && styles.markerTextOn]}>{territory.name}</Text>
+                    {active ? <Ionicons name="checkmark-circle" size={16} color={theme.colors.accent} /> : null}
                   </Pressable>
                 );
               })}
             </View>
+            <Text style={styles.webHint}>{children.length ? 'Click a region to select it. The selected one has a gold edge.' : 'This is the region you picked. Use "Zoom out" to choose another.'}</Text>
             <Text style={styles.webNote}>The live map with real outlines, my-location and visit pins is in the phone app. This browser view keeps your regions, records and follow-ups in front of you on a big screen.</Text>
           </View>
 
@@ -654,10 +650,12 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   statusChipText: { fontWeight: '900', fontSize: t.type.meta },
   levelText: { color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6 },
 
-  mapCanvas: { flex: 1, minHeight: 295, marginTop: 14, borderRadius: t.radius.md, overflow: 'hidden', backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.border, position: 'relative' },
-  mapMarker: { position: 'absolute', maxWidth: 170, minHeight: 48, borderWidth: 1.5, borderRadius: t.radius.md, paddingHorizontal: 16, backgroundColor: t.colors.surfaceRaised, flexDirection: 'row', alignItems: 'center', gap: 8, ...t.elevation.low },
-  mapMarkerOn: { borderWidth: 2.5 },
-  markerText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta, maxWidth: 120 },
+  mapCanvas: { flex: 1, minHeight: 295, marginTop: 14, padding: 12, borderRadius: t.radius.md, overflow: 'hidden', backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.border, flexDirection: 'row', flexWrap: 'wrap', alignContent: 'flex-start', gap: 10 },
+  mapMarker: { maxWidth: 220, minHeight: 48, borderWidth: 1.5, borderRadius: t.radius.md, paddingHorizontal: 16, backgroundColor: t.colors.surfaceRaised, flexDirection: 'row', alignItems: 'center', gap: 8, ...t.elevation.low },
+  mapMarkerOn: { borderWidth: 3, borderColor: t.colors.accentBorder, backgroundColor: t.colors.accentMuted },
+  markerText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta, maxWidth: 150 },
+  markerTextOn: { fontWeight: '900' },
+  webHint: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19, marginTop: 10, fontWeight: '700' },
   webNote: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 19, marginTop: 12 },
 
   dot: { width: 10, height: 10, borderRadius: 5 },

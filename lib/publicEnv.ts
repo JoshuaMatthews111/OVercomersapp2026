@@ -97,3 +97,21 @@ export const GIVING_PAGE_URL =
 /** The card-payment page. Set EXPO_PUBLIC_GIVING_CARD_URL to change it. */
 export const GIVING_CARD_URL =
   publicEnv('EXPO_PUBLIC_GIVING_CARD_URL') || 'https://donate.stripe.com/9B64gA2lAfhT63T1Fvco00b';
+
+/**
+ * One Stripe donate link per preset gift amount, each locked to that amount on
+ * Stripe's side. Verified 2026-09-21: read from the live page
+ * overcomersglobalnetwork.com/give AND opened on Stripe, whose summary showed
+ * the same amount. The Give screen opens these directly — no website hop.
+ * A giving_links row labelled with the amount (e.g. "$25") and a Stripe URL
+ * overrides one of these without a new build (see lib/givingService.ts).
+ * NEVER add the website's $350 card: it is a paid 1-on-1 session, not a gift.
+ */
+export const GIVING_PRESET_LINKS: Readonly<Record<number, string>> = {
+  25: 'https://donate.stripe.com/14A3cw6BQ6Ln0Jz4RHco007',
+  50: 'https://donate.stripe.com/bJeeVe8JY9Xz63T1Fvco005',
+  100: 'https://donate.stripe.com/00w9AUf8m7Pr77Xbg5co006',
+  250: 'https://donate.stripe.com/dRm6oIgcq2v763Tac1co009',
+  500: 'https://donate.stripe.com/aFadRa6BQ7Pr8c1fwlco00a',
+  1000: 'https://donate.stripe.com/6oU5kEgcqglXfEt6ZPco008',
+};

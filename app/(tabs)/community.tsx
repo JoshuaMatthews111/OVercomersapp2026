@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useFocusEffect, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -6,12 +7,13 @@ import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Linking, Modal, 
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
 import { Announcement, getAnnouncements, subscribeToAnnouncements } from '../../lib/announcementsService';
-import { ChatProfileSearchResult, NewChatRoom, chatRoomTitle, createChatRoom, getChatRooms, openDirectChannel, searchChatProfiles } from '../../lib/chatService';
+import { ChatProfileSearchResult, NewChatRoom, chatRoomTitle, createChatGroup, createChatRoom, getChatRooms, openDirectChannel, searchChatProfiles, uploadChatGroupPicture } from '../../lib/chatService';
 import { friendlyError } from '../../lib/errorMessages';
+import { friendlyUploadError } from '../../lib/uploadService';
 import { AppTheme, createThemedStyles, getTheme } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
 import { ChatRoom } from '../../types/models';
-import { formatDayLabel, formatMessageTime, initials, roomIcon, roomLabel } from '../../components/chatShared';
+import { RoomBadge, formatDayLabel, formatMessageTime, initials, roomLabel } from '../../components/chatShared';
 
 /**
  * The Chat tab is a list. Tap a room and it opens full screen, the way a chat
@@ -25,6 +27,7 @@ import { formatDayLabel, formatMessageTime, initials, roomIcon, roomLabel } from
 type ChatTab = 'private' | 'groups' | 'announcements';
 
 const NEW_CHAT_SUB = 'Message one person, or start a group.';
+const NEW_GROUP_SUB = 'Name, picture, public or private.';
 
 const art = {
   seal: require('../../assets/images/ogn-logo-transparent.png'),
@@ -51,6 +54,9 @@ export default function CommunityScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newGroupOpen, setNewGroupOpen] = useState(false);
+  /** Leaders, staff, moderators and admins get a full "New group" form. */
+  const canCreateGroups = access.canModerateChat;
   const loadedOnce = useRef(false);
 
   const load = useCallback(async () => {
@@ -98,6 +104,7 @@ export default function CommunityScreen() {
 
   function onRoomCreated(room: ChatRoom) {
     setNewChatOpen(false);
+    setNewGroupOpen(false);
     setRooms((current) => (current.some((r) => r.id === room.id) ? current : [...current, room]));
     setChatTab(room.type === 'direct' ? 'private' : 'groups');
     openRoom(room);
@@ -147,6 +154,22 @@ export default function CommunityScreen() {
             <Ionicons name="chevron-forward" size={18} color={theme.colors.textOnBrand} />
           </Pressable>
 
+          {canCreateGroups ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`New group. ${NEW_GROUP_SUB}`}
+              onPress={() => setNewGroupOpen(true)}
+              style={({ pressed }) => [styles.newGroup, pressed && styles.newChatPressed]}
+            >
+              <View style={styles.newGroupIcon}><Ionicons name="people" size={19} color={theme.colors.textOnBrand} /></View>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.newGroupTitle}>New group</Text>
+                <Text style={styles.newGroupSub}>{NEW_GROUP_SUB}</Text>
+              </View>
+              <Ionicons name="add-circle-outline" size={22} color={theme.colors.accent} />
+            </Pressable>
+          ) : null}
+
           <View style={styles.tabRow}>
             {tabs.map((tab) => {
               const active = chatTab === tab.key;
@@ -185,12 +208,14 @@ export default function CommunityScreen() {
                     onPress={() => openRoom(room)}
                     style={({ pressed }) => [styles.roomRow, index < visibleRooms.length - 1 && styles.roomBorder, pressed && styles.roomRowPressed]}
                   >
-                    <View style={[styles.avatar, room.type === 'leader' && styles.avatarLeader, room.type === 'prayer' && styles.avatarPrayer]}>
-                      <Ionicons name={roomIcon(room.type)} size={21} color={room.type === 'prayer' ? theme.colors.textOnAccent : theme.colors.textOnBrand} />
-                    </View>
+                    <RoomBadge room={{ type: room.type, avatarUrl: room.avatarUrl, name: chatRoomTitle(room, access.displayName) }} size={50} dark={dark} />
                     <View style={{ flex: 1, minWidth: 0 }}>
                       <Text numberOfLines={1} style={styles.roomName}>{chatRoomTitle(room, access.displayName)}</Text>
-                      <Text numberOfLines={1} style={styles.roomPreview}>{room.type === 'direct' ? roomLabel(room.type) : `${roomLabel(room.type)} • ${room.region || 'Global'}`}</Text>
+                      <Text numberOfLines={1} style={styles.roomPreview}>
+                        {room.type === 'direct'
+                          ? roomLabel(room.type)
+                          : room.description || `${roomLabel(room.type)} • ${room.region || 'Global'}`}
+                      </Text>
                     </View>
                     <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
                   </Pressable>
@@ -270,6 +295,14 @@ export default function CommunityScreen() {
         onClose={() => setNewChatOpen(false)}
         onCreated={onRoomCreated}
       />
+      {canCreateGroups ? (
+        <NewGroupSheet
+          visible={newGroupOpen}
+          dark={dark}
+          onClose={() => setNewGroupOpen(false)}
+          onCreated={onRoomCreated}
+        />
+      ) : null}
     </LinearGradient>
   );
 }
@@ -462,6 +495,257 @@ function NewChatSheet({ visible, dark, onClose, onCreated }: { visible: boolean;
   );
 }
 
+/**
+ * A leader starts a group properly: a name, a line about what it is for, an
+ * optional picture, public or private, and the first people in it.
+ *
+ * Public means anyone in the network sees it under Groups and can join it.
+ * Private means only the people added here (and anyone added later from the
+ * group's leader tools). The leader who creates it is always a member.
+ */
+function NewGroupSheet({ visible, dark, onClose, onCreated }: { visible: boolean; dark: boolean; onClose: () => void; onCreated: (room: ChatRoom) => void }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
+  const [isPublic, setIsPublic] = useState(false);
+  const [picture, setPicture] = useState<ImagePicker.ImagePickerAsset | null>(null);
+  const [query, setQuery] = useState('');
+  const [people, setPeople] = useState<ChatProfileSearchResult[]>([]);
+  const [chosen, setChosen] = useState<ChatProfileSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const pendingRoom = useRef<NewChatRoom | null>(null);
+  const pendingNote = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    setName('');
+    setDescription('');
+    setIsPublic(false);
+    setPicture(null);
+    setQuery('');
+    setChosen([]);
+    setProblem(null);
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    let active = true;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      searchChatProfiles(query)
+        .then((results) => { if (active) setPeople(results); })
+        .catch((err) => { if (active) setProblem(friendlyError(err, 'We could not load the list of people. Please try again.')); })
+        .finally(() => { if (active) setSearching(false); });
+    }, 250);
+    return () => { active = false; clearTimeout(timer); };
+  }, [query, visible]);
+
+  function toggle(person: ChatProfileSearchResult) {
+    setProblem(null);
+    setChosen((current) => (current.some((p) => p.id === person.id) ? current.filter((p) => p.id !== person.id) : [...current, person]));
+  }
+
+  async function pickPicture() {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      allowsMultipleSelection: false,
+      aspect: [1, 1],
+      quality: 0.86,
+    });
+    if (!result.canceled && result.assets[0]) setPicture(result.assets[0]);
+  }
+
+  function flushPending() {
+    const room = pendingRoom.current;
+    const note = pendingNote.current;
+    pendingRoom.current = null;
+    pendingNote.current = null;
+    if (!room) return;
+    onCreated(room);
+    if (note) Alert.alert('Your group is open', note);
+  }
+
+  async function create() {
+    if (working) return;
+    const cleanName = name.trim();
+    if (!cleanName) return setProblem('Give the group a name so people know what it is.');
+    if (!isPublic && !chosen.length) return setProblem('A private group needs at least one other person. Add someone below, or make it public.');
+    setWorking(true);
+    setProblem(null);
+    try {
+      const room = await createChatGroup({ name: cleanName, description, isPublic, memberIds: chosen.map((p) => p.id) });
+      const notes: string[] = [];
+      if (room.notAdded) notes.push(`${room.notAdded} ${room.notAdded === 1 ? 'person' : 'people'} could not be added just yet. You can add them from the group's leader tools.`);
+      let made: NewChatRoom = room;
+      if (picture) {
+        try {
+          const url = await uploadChatGroupPicture(room.id, {
+            uri: picture.uri,
+            mimeType: picture.mimeType,
+            width: picture.width,
+            height: picture.height,
+            fileName: picture.fileName,
+          });
+          made = { ...room, avatarUrl: url };
+        } catch (err) {
+          notes.push(`The picture did not upload (${friendlyUploadError(err, 'please try again')}). Tap the group's name inside the chat to add it.`);
+        }
+      }
+      pendingRoom.current = made;
+      pendingNote.current = notes.length ? notes.join('\n\n') : null;
+      onClose();
+      // iOS normally runs this from onDismiss; the timer is the safety net if
+      // onDismiss never fires, so the new group always opens. It runs once.
+      if (Platform.OS !== 'ios') flushPending();
+      else setTimeout(flushPending, 700);
+    } catch (err) {
+      setProblem(friendlyError(err, 'The group could not be made just now. Please try again.'));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose} onDismiss={flushPending}>
+      <SafeAreaView style={styles.sheetRoot}>
+        <KeyboardAvoidingView style={styles.safe} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+          <View style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle} accessibilityRole="header">New group</Text>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close new group" disabled={working} onPress={onClose} style={styles.sheetClose}>
+              <Ionicons name="close" size={24} color={theme.colors.textPrimary} />
+            </Pressable>
+          </View>
+
+          <ScrollView contentContainerStyle={styles.peopleList} keyboardShouldPersistTaps="handled">
+            <View style={styles.groupPictureRow}>
+              <Pressable accessibilityRole="button" accessibilityLabel={picture ? 'Change the group picture' : 'Add a group picture'} onPress={pickPicture} style={styles.groupPicture}>
+                {picture
+                  ? <Image source={{ uri: picture.uri }} accessibilityLabel="The picture you chose" style={styles.personAvatarImage} resizeMode="cover" />
+                  : <Ionicons name="camera-outline" size={28} color={theme.colors.accent} />}
+              </Pressable>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <Text style={styles.personName}>{picture ? 'Picture chosen' : 'Group picture'}</Text>
+                <Text style={styles.personMeta}>{picture ? 'Tap it to choose a different one.' : 'Optional. Tap the circle to choose one.'}</Text>
+                {picture ? (
+                  <Pressable accessibilityRole="button" accessibilityLabel="Do not use a picture" onPress={() => setPicture(null)} style={styles.linkButton}>
+                    <Text style={styles.linkButtonText}>No picture</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            </View>
+
+            <Text style={styles.fieldLabel}>Name</Text>
+            <TextInput
+              value={name}
+              onChangeText={(text) => { setName(text); setProblem(null); }}
+              placeholder="For example: Men's Prayer Breakfast"
+              accessibilityLabel="Group name"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[styles.searchInput, styles.fieldInput]}
+              maxLength={80}
+            />
+            <Text style={styles.fieldLabel}>What is it for?</Text>
+            <TextInput
+              value={description}
+              onChangeText={setDescription}
+              placeholder="One or two lines people see before they join"
+              accessibilityLabel="Group description"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[styles.searchInput, styles.fieldInput, styles.fieldMultiline]}
+              multiline
+              maxLength={300}
+            />
+
+            <Text style={styles.fieldLabel}>Who can join</Text>
+            <View style={styles.choiceRow} accessibilityRole="radiogroup">
+              {[
+                { value: false, title: 'Private', body: 'Only people you add', icon: 'lock-closed-outline' as const },
+                { value: true, title: 'Public', body: 'Anyone can find and join', icon: 'globe-outline' as const },
+              ].map((option) => {
+                const on = isPublic === option.value;
+                return (
+                  <Pressable
+                    key={option.title}
+                    accessibilityRole="radio"
+                    accessibilityState={{ checked: on }}
+                    accessibilityLabel={`${option.title}. ${option.body}.`}
+                    onPress={() => { setIsPublic(option.value); setProblem(null); }}
+                    style={[styles.choice, on && styles.personRowOn]}
+                  >
+                    <Ionicons name={option.icon} size={20} color={on ? theme.colors.accent : theme.colors.textSecondary} />
+                    <Text style={styles.personName}>{option.title}</Text>
+                    <Text style={styles.personMeta}>{option.body}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Text style={styles.fieldLabel}>{isPublic ? 'Add people now (optional)' : 'Add people'}{chosen.length ? ` • ${chosen.length} chosen` : ''}</Text>
+            <TextInput
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search by name"
+              accessibilityLabel="Search people to add by name"
+              placeholderTextColor={theme.colors.textMuted}
+              style={[styles.searchInput, styles.fieldInput]}
+              autoCapitalize="words"
+              autoCorrect={false}
+            />
+            {people.map((person) => {
+              const picked = chosen.some((p) => p.id === person.id);
+              return (
+                <Pressable
+                  key={person.id}
+                  accessibilityRole="checkbox"
+                  accessibilityLabel={`${person.displayName}, ${person.region || 'Overcomers Global Network'}`}
+                  accessibilityState={{ checked: picked }}
+                  onPress={() => toggle(person)}
+                  style={[styles.personRow, picked && styles.personRowOn]}
+                >
+                  <View style={styles.personAvatar}>
+                    {person.avatarUrl
+                      ? <Image source={{ uri: person.avatarUrl }} accessibilityLabel={`${person.displayName}'s picture`} style={styles.personAvatarImage} resizeMode="cover" />
+                      : <Text style={styles.personInitials}>{initials(person.displayName)}</Text>}
+                  </View>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <Text numberOfLines={1} style={styles.personName}>{person.displayName}</Text>
+                    <Text numberOfLines={1} style={styles.personMeta}>{person.region || 'Overcomers Global Network'}</Text>
+                  </View>
+                  <Ionicons name={picked ? 'checkmark-circle' : 'ellipse-outline'} size={24} color={picked ? theme.colors.accent : theme.colors.textMuted} />
+                </Pressable>
+              );
+            })}
+            {!people.length ? (
+              <View style={styles.emptyState}>
+                {searching ? <ActivityIndicator color={theme.colors.accent} /> : <Text style={styles.emptyBody}>Nobody matches that name yet.</Text>}
+              </View>
+            ) : null}
+          </ScrollView>
+
+          {problem ? <Text style={styles.problemText}>{problem}</Text> : null}
+
+          <View style={styles.sheetFooter}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Create this group"
+              disabled={working}
+              onPress={create}
+              style={[styles.startButton, working && styles.startButtonIdle]}
+            >
+              {working ? <ActivityIndicator color={theme.colors.textOnAccent} /> : <Ionicons name="people" size={18} color={theme.colors.textOnAccent} />}
+              <Text style={styles.startText}>{working ? 'Making the group…' : 'Create group'}</Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   root: { flex: 1 },
   safe: { flex: 1 },
@@ -482,6 +766,13 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   newChatIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center' },
   newChatTitle: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.cardTitle },
   newChatSub: { color: t.colors.textOnBrand, opacity: 0.82, fontSize: t.type.meta, marginTop: 2 },
+  newGroup: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'stretch', gap: 12, minHeight: 60, paddingHorizontal: 14, paddingVertical: 10,
+    borderRadius: t.radius.lg, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.accentBorder, marginTop: -4, marginBottom: 14, ...t.elevation.low,
+  },
+  newGroupIcon: { width: 40, height: 40, borderRadius: 20, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center' },
+  newGroupTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+  newGroupSub: { color: t.colors.textSecondary, fontSize: t.type.meta, marginTop: 2 },
 
   tabRow: { flexDirection: 'row', marginBottom: 12, borderBottomWidth: 1, borderBottomColor: t.colors.border },
   tab: { flex: 1, flexDirection: 'row', gap: 6, alignItems: 'center', minHeight: 48, justifyContent: 'center' },
@@ -546,4 +837,20 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   startButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, minHeight: 54, borderRadius: t.radius.lg, backgroundColor: t.colors.accentSolid },
   startButtonIdle: { opacity: 0.55 },
   startText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+
+  groupPictureRow: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingVertical: 4 },
+  groupPicture: {
+    width: 76, height: 76, borderRadius: 38, overflow: 'hidden', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderStyle: 'dashed', borderColor: t.colors.accentBorder,
+  },
+  linkButton: { minHeight: 48, minWidth: 48, justifyContent: 'center', alignSelf: 'flex-start' },
+  linkButtonText: { color: t.colors.accent, fontWeight: '800', fontSize: t.type.meta },
+  fieldLabel: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 6 },
+  fieldInput: { marginHorizontal: 0, marginBottom: 0 },
+  fieldMultiline: { minHeight: 72, paddingTop: 12, textAlignVertical: 'top' },
+  choiceRow: { flexDirection: 'row', gap: 8 },
+  choice: {
+    flex: 1, gap: 4, minHeight: 88, padding: 12, borderRadius: t.radius.md,
+    backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.border,
+  },
 }));

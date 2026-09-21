@@ -5,8 +5,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Image, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
+import { BlogPost, formatBlogDate, getBlogPosts, readingMinutes } from '../../lib/blogService';
 import { getMediaItems, getMessageLibrary, getUserDownloads, recordDownloadIntent, subscribeToMediaItems } from '../../lib/contentService';
-import { playbackKind, thumbnailFromUrl } from '../../lib/embed';
+import { playbackKind, thumbnailFromUrl, youtubeVideoId } from '../../lib/embed';
 import { friendlyError } from '../../lib/errorMessages';
 import { useNowPlaying } from '../../lib/nowPlaying';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
@@ -19,10 +20,12 @@ type SavedItem = { id: string; title: string; mediaType?: string; fileUrl?: stri
 const MINISTRY = 'Overcomers Global Network';
 const ADMIN_TITLE = 'Media Command Center';
 const ADMIN_BODY = 'Post sermons, articles, videos and music, and set the cover picture people see.';
+/** How many cards a shelf shows before "See all". */
+const SHELF_SIZE = 10;
 
 const tabs: { key: MediaTab; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
-  { key: 'sermons', label: 'Sermons', icon: 'pulse' },
-  { key: 'articles', label: 'Articles', icon: 'document-text-outline' },
+  { key: 'sermons', label: 'Teachings', icon: 'pulse' },
+  { key: 'articles', label: 'Blog', icon: 'newspaper-outline' },
   { key: 'videos', label: 'Videos', icon: 'play-circle-outline' },
   { key: 'music', label: 'Music', icon: 'musical-notes-outline' },
   { key: 'downloads', label: 'Downloads', icon: 'download-outline' },
@@ -36,6 +39,8 @@ const art = {
   // behind the real one. This copy is cropped past it.
   heroGlobeDark: require('../../assets/images/ogn-layers/media-hero-globe-dark-clean.png'),
   heroGlobeLight: require('../../assets/images/ogn-layers/media-hero-globe-light.png'),
+  // The owner's book. The reader lives at /book.
+  bookCover: require('../../assets/images/book/gospel-of-salvation-cover.png'),
 };
 
 /**
@@ -48,7 +53,22 @@ function coverFor(item: MediaItem): string | undefined {
 }
 
 function sermonCover(sermon: Sermon): string | undefined {
-  return thumbnailFromUrl(sermon.videoUrl || '') || undefined;
+  return sermon.thumbnailUrl || thumbnailFromUrl(sermon.videoUrl || '') || undefined;
+}
+
+/** The YouTube id behind a link, used to spot the same video posted twice. */
+function videoKey(url?: string): string | null {
+  return url ? youtubeVideoId(url) : null;
+}
+
+/**
+ * Teachings inside one series. A series told in parts reads Part 1 first;
+ * anything else (Sunday services, Bible studies) reads newest first.
+ */
+function orderForSeries(list: Sermon[]): Sermon[] {
+  const inParts = list.some((sermon) => /\bpart\s*\d/i.test(sermon.title));
+  const time = (sermon: Sermon) => Date.parse(sermon.publishedAt || '') || 0;
+  return [...list].sort((a, b) => (inParts ? time(a) - time(b) : time(b) - time(a)));
 }
 
 export default function MediaScreen() {
@@ -61,6 +81,8 @@ export default function MediaScreen() {
   const [sermons, setSermons] = useState<Sermon[]>([]);
   const [mediaItems, setMediaItems] = useState<MediaItem[]>([]);
   const [downloads, setDownloads] = useState<SavedItem[]>([]);
+  const [posts, setPosts] = useState<BlogPost[]>([]);
+  const [blogNote, setBlogNote] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -69,6 +91,7 @@ export default function MediaScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [openSeriesId, setOpenSeriesId] = useState<string | null>(null);
+  const [showAllLatest, setShowAllLatest] = useState(false);
   const { play: setNowPlaying } = useNowPlaying();
 
   // One loader for the whole screen. "pull" drives the pull-to-refresh wheel;
@@ -82,18 +105,29 @@ export default function MediaScreen() {
     // appears if the check is still running after a moment — and then it stays
     // until the answer is in, so nobody is left wondering.
     const slowCheck = mode === 'quiet' ? setTimeout(() => setChecking(true), 400) : null;
-    const [library, media, saved] = await Promise.allSettled([getMessageLibrary(), getMediaItems(), getUserDownloads()]);
+    const [library, media, saved, blog] = await Promise.allSettled([getMessageLibrary(), getMediaItems(), getUserDownloads(), getBlogPosts()]);
     if (slowCheck) clearTimeout(slowCheck);
 
     const missing: string[] = [];
     if (library.status === 'fulfilled') {
       setSeries(library.value.series);
       setSermons(library.value.sermons);
-    } else missing.push('the sermon library');
+    } else missing.push('the teaching library');
     if (media.status === 'fulfilled') setMediaItems(media.value);
-    else missing.push('videos, articles and music');
+    else missing.push('videos and music');
     if (saved.status === 'fulfilled') setDownloads(saved.value);
     else missing.push('your saved items');
+
+    // The blog lives on the ministry website, not in the app's database, so it
+    // fails and recovers on its own. It never takes the teachings down with it.
+    if (blog.status === 'fulfilled') {
+      setPosts(blog.value.posts);
+      setBlogNote(blog.value.source === 'saved'
+        ? 'You are offline, so this is the copy of the blog saved on your phone. Pull down to check for new posts.'
+        : '');
+    } else {
+      setBlogNote(friendlyError(blog.reason, 'We could not reach the Overcomers blog just now. Pull down to try again.'));
+    }
 
     if (missing.length) {
       const failed = [library, media, saved].find((result) => result.status === 'rejected');
@@ -117,6 +151,7 @@ export default function MediaScreen() {
 
   useEffect(() => {
     if (params.tab === 'downloads') setActiveTab('downloads');
+    if (params.tab === 'blog') setActiveTab('articles');
   }, [params.tab]);
 
   const matches = useCallback((...fields: (string | undefined)[]) => {
@@ -125,26 +160,43 @@ export default function MediaScreen() {
     return fields.some((field) => (field || '').toLowerCase().includes(needle));
   }, [query]);
 
+  const seriesById = useMemo(() => new Map(series.map((item) => [item.id, item])), [series]);
+  const sermonVideoKeys = useMemo(
+    () => new Set(sermons.map((sermon) => videoKey(sermon.videoUrl)).filter(Boolean) as string[]),
+    [sermons]
+  );
+
   const heroMedia = useMemo(() => mediaItems.find((item) => item.isFeatured) ?? null, [mediaItems]);
-  const heroSermon = useMemo(() => sermons.find((sermon) => sermon.isFeatured) ?? null, [sermons]);
-  // Only a deliberately featured item may headline the Media screen, and the
-  // card must play the very thing it is showing. Falling back to "whatever was
-  // uploaded last" put an internal smoke-test upload on the banner for every
-  // member, and then played a different item again when it was tapped.
+  // A deliberately featured item headlines the screen. With none, the newest
+  // real teaching does — it is on the ministry's own channel, so it is never a
+  // test upload. The card always plays the very thing it shows.
+  const heroSermon = useMemo(
+    () => (heroMedia ? null : sermons.find((sermon) => sermon.isFeatured) ?? sermons[0] ?? null),
+    [heroMedia, sermons]
+  );
+  const heroIsFeatured = Boolean(heroMedia || heroSermon?.isFeatured);
   const heroTarget = heroMedia?.externalUrl || heroMedia?.fileUrl || heroSermon?.videoUrl || heroSermon?.audioUrl || '';
   const heroCover = heroMedia ? coverFor(heroMedia) : heroSermon ? sermonCover(heroSermon) : undefined;
 
-  const seriesList = useMemo(
-    () => series.filter((item) => matches(item.title, item.subtitle)),
-    [series, matches]
-  );
   const openSeries = useMemo(() => series.find((item) => item.id === openSeriesId) ?? null, [series, openSeriesId]);
-  const sermonList = useMemo(
-    () => sermons
-      .filter((sermon) => (openSeriesId ? sermon.seriesId === openSeriesId : true))
-      .filter((sermon) => matches(sermon.title, sermon.speaker, sermon.scriptureReference)),
-    [sermons, openSeriesId, matches]
+  const searching = query.trim().length > 0;
+
+  const sermonMatches = useCallback(
+    (sermon: Sermon) => matches(sermon.title, sermon.speaker, sermon.scriptureReference, seriesById.get(sermon.seriesId)?.title),
+    [matches, seriesById]
   );
+  const searchResults = useMemo(() => sermons.filter(sermonMatches), [sermons, sermonMatches]);
+  const openSeriesList = useMemo(
+    () => (openSeriesId ? orderForSeries(sermons.filter((sermon) => sermon.seriesId === openSeriesId)) : []),
+    [sermons, openSeriesId]
+  );
+  const shelves = useMemo(
+    () => series
+      .map((item) => ({ series: item, list: orderForSeries(sermons.filter((sermon) => sermon.seriesId === item.id)) }))
+      .filter((shelf) => shelf.list.length > 0),
+    [series, sermons]
+  );
+
   const byKind = useCallback(
     (kinds: string[]) => mediaItems
       .filter((item) => kinds.includes(item.mediaType))
@@ -154,9 +206,17 @@ export default function MediaScreen() {
   const articleItems = useMemo(() => byKind(['article']), [byKind]);
   const videoItems = useMemo(() => byKind(['video', 'live']), [byKind]);
   const musicItems = useMemo(() => byKind(['music']), [byKind]);
-  const sermonMediaItems = useMemo(() => byKind(['sermon', 'devotional']), [byKind]);
+  // Messages posted straight into the app. One that is the same YouTube video
+  // as a library teaching is not listed twice.
+  const sermonMediaItems = useMemo(
+    () => byKind(['sermon', 'devotional']).filter((item) => {
+      const key = videoKey(item.externalUrl || item.fileUrl);
+      return !key || !sermonVideoKeys.has(key);
+    }),
+    [byKind, sermonVideoKeys]
+  );
   const savedItems = useMemo(() => downloads.filter((row) => matches(row.title, row.mediaType)), [downloads, matches]);
-  const searching = query.trim().length > 0;
+  const postList = useMemo(() => posts.filter((post) => matches(post.title, post.author, post.excerpt, post.category)), [posts, matches]);
 
   async function openExternally(url: string) {
     try {
@@ -187,12 +247,16 @@ export default function MediaScreen() {
       void openExternally(heroTarget);
       return;
     }
+    if (heroSermon) {
+      playSermon(heroSermon);
+      return;
+    }
     setNowPlaying({
-      title: heroMedia?.title || heroSermon?.title || 'OGN Media',
-      speaker: heroMedia?.speaker || heroSermon?.speaker,
+      title: heroMedia?.title || 'OGN Media',
+      speaker: heroMedia?.speaker,
       artwork: heroCover,
       url: heroTarget,
-      type: playbackKind(heroTarget, heroMedia?.mediaType === 'video' || heroSermon?.videoUrl ? 'video' : 'audio'),
+      type: playbackKind(heroTarget, heroMedia?.mediaType === 'video' || heroMedia?.mediaType === 'live' || heroMedia?.mediaType === 'sermon' ? 'video' : 'audio'),
     });
   }
 
@@ -233,6 +297,10 @@ export default function MediaScreen() {
     });
   }
 
+  function openPost(post: BlogPost) {
+    router.push({ pathname: '/blog/[slug]', params: { slug: post.slug } } as any);
+  }
+
   async function saveForLater(item: MediaItem) {
     const fileUrl = item.fileUrl || item.externalUrl;
     if (!fileUrl) {
@@ -265,12 +333,43 @@ export default function MediaScreen() {
     body: `Try another word, or clear the search to see every ${thing} again.`,
   });
 
+  const sermonRow = (sermon: Sermon, showSeries: boolean) => {
+    const seriesTitle = showSeries ? seriesById.get(sermon.seriesId)?.title : undefined;
+    return (
+      <Pressable
+        key={sermon.id}
+        accessibilityRole="button"
+        accessibilityLabel={`Play ${sermon.title} by ${sermon.speaker}`}
+        onPress={() => playSermon(sermon)}
+        style={styles.sermonRow}
+      >
+        <Cover theme={theme} styles={styles} box="sermonThumb" uri={sermonCover(sermon)} label={`Cover for ${sermon.title}`} glyph="play" />
+        <View style={{ flex: 1 }}>
+          <Text style={styles.sermonTitle} numberOfLines={3}>{sermon.title}</Text>
+          <Text style={styles.sermonMeta} numberOfLines={1}>{sermon.speaker} • {formatDuration(sermon.durationSeconds)}</Text>
+          {sermon.scriptureReference || seriesTitle ? (
+            <Text style={styles.sermonRef} numberOfLines={1}>{sermon.scriptureReference || seriesTitle}</Text>
+          ) : null}
+        </View>
+        <Ionicons name="play-circle-outline" size={24} color={theme.colors.accent} />
+      </Pressable>
+    );
+  };
+
+  const blogNotice = blogNote ? (
+    <View style={styles.inlineNote}>
+      <Ionicons name={posts.length ? 'cloud-offline-outline' : 'alert-circle-outline'} size={18} color={theme.colors.warning} />
+      <Text style={styles.inlineNoteText}>{blogNote}</Text>
+    </View>
+  ) : null;
+
   return (
     <LinearGradient colors={theme.pageGradient} style={styles.root}>
       <SafeAreaView style={styles.safe}>
         <ScrollView
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
           refreshControl={
             <RefreshControl refreshing={refreshing} onRefresh={() => { void load('pull'); }} tintColor={theme.colors.accent} colors={[theme.colors.accent]} />
           }
@@ -279,7 +378,7 @@ export default function MediaScreen() {
             <Image source={art.seal} style={styles.seal} resizeMode="contain" accessibilityLabel="Overcomers Global Network crest" />
             <View style={styles.headerCopy}>
               <Text style={styles.title}>Media</Text>
-              <Text style={styles.subtitle}>Sermons. Articles. Videos. Music.</Text>
+              <Text style={styles.subtitle}>Teachings. Blog. Videos. Music.</Text>
             </View>
             <View style={styles.headerActions}>
               <Pressable
@@ -314,14 +413,15 @@ export default function MediaScreen() {
             <View style={styles.searchRow}>
               <Ionicons name="search-outline" size={18} color={theme.colors.textMuted} />
               <TextInput
-                accessibilityLabel="Search sermons, videos, articles and music"
+                accessibilityLabel="Search teachings, blog posts, videos and music"
                 value={query}
                 onChangeText={setQuery}
-                placeholder="Search by title, speaker or scripture"
+                placeholder="Search by title, speaker or series"
                 placeholderTextColor={theme.colors.textMuted}
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="search"
+                autoFocus
                 style={styles.searchInput}
               />
               {searching ? (
@@ -372,117 +472,147 @@ export default function MediaScreen() {
             </View>
           ) : null}
 
-          <HeroCard
-            theme={theme}
-            styles={styles}
-            dark={dark}
-            title={heroMedia?.title || heroSermon?.title || 'Messages from OGN'}
-            speaker={heroMedia?.speaker || heroSermon?.speaker || MINISTRY}
-            overline={heroTarget ? 'FEATURED MESSAGE' : 'MEDIA LIBRARY'}
-            cover={heroCover}
-            onPlay={heroTarget ? playFeatured : null}
-          />
+          {activeTab === 'sermons' && !searching && !openSeries ? (
+            <HeroCard
+              theme={theme}
+              styles={styles}
+              dark={dark}
+              title={heroMedia?.title || heroSermon?.title || 'Messages from OGN'}
+              speaker={heroMedia?.speaker || heroSermon?.speaker || MINISTRY}
+              overline={heroTarget ? (heroIsFeatured ? 'FEATURED MESSAGE' : 'LATEST TEACHING') : 'MEDIA LIBRARY'}
+              cover={heroCover}
+              onPlay={heroTarget ? playFeatured : null}
+            />
+          ) : null}
 
           {loading ? (
             <View style={styles.loadingCard}>
               <ActivityIndicator color={theme.colors.accent} />
-              <Text style={styles.loadingText}>Getting the latest messages for you…</Text>
+              <Text style={styles.loadingText}>Getting the latest teachings for you…</Text>
             </View>
           ) : null}
 
-          {!loading && activeTab === 'sermons' ? (
+          {!loading && activeTab === 'sermons' && searching ? (
             <>
-              <SectionHeader
-                styles={styles}
-                title={openSeries ? openSeries.title : 'Sermon Series'}
-                meta={openSeries
-                  ? (openSeries.messageCount === 1 ? '1 message' : `${openSeries.messageCount} messages`)
-                  : (seriesList.length === 1 ? '1 series' : `${seriesList.length} series`)}
-              />
-              {openSeries ? (
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Show every series again instead of ${openSeries.title}`}
-                  onPress={() => setOpenSeriesId(null)}
-                  style={styles.clearFilter}
-                >
-                  <Ionicons name="arrow-back" size={16} color={theme.colors.accent} />
-                  <Text style={styles.clearFilterText}>Back to all series</Text>
-                </Pressable>
-              ) : seriesList.length ? (
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.seriesRow}>
-                  {seriesList.map((item) => (
-                    <SeriesCard
-                      key={item.id}
-                      theme={theme}
-                      styles={styles}
-                      title={item.title}
-                      count={item.messageCount === 1 ? '1 Sermon' : `${item.messageCount} Sermons`}
-                      cover={item.coverUrl}
-                      onPress={() => setOpenSeriesId(item.id)}
-                    />
-                  ))}
-                </ScrollView>
+              <SectionHeader styles={styles} title="Teachings" meta={searchResults.length === 1 ? '1 match' : `${searchResults.length} matches`} />
+              <View style={styles.sermonList}>
+                {searchResults.map((sermon) => sermonRow(sermon, true))}
+                {sermonMediaItems.map((item) => (
+                  <MediaListCard key={item.id} theme={theme} styles={styles} item={item} busy={saving === item.id} onPress={() => openMediaItem(item)} onSave={() => { void saveForLater(item); }} />
+                ))}
+                {!searchResults.length && !sermonMediaItems.length ? <EmptyState styles={styles} {...emptyBecauseOfSearch('teaching')} /> : null}
+              </View>
+              {postList.length ? (
+                <>
+                  <SectionHeader styles={styles} title="From the blog" meta={postList.length === 1 ? '1 match' : `${postList.length} matches`} />
+                  <View style={styles.sermonList}>
+                    {postList.map((post) => <BlogRow key={post.id} post={post} theme={theme} styles={styles} onPress={() => openPost(post)} />)}
+                  </View>
+                </>
+              ) : null}
+            </>
+          ) : null}
+
+          {!loading && activeTab === 'sermons' && !searching && openSeries ? (
+            <>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Back to every series instead of ${openSeries.title}`}
+                onPress={() => setOpenSeriesId(null)}
+                style={styles.clearFilter}
+              >
+                <Ionicons name="arrow-back" size={16} color={theme.colors.accent} />
+                <Text style={styles.clearFilterText}>All teachings</Text>
+              </Pressable>
+              <SeriesBanner theme={theme} styles={styles} series={openSeries} onPlay={openSeriesList[0] ? () => playSermon(openSeriesList[0]) : null} />
+              <View style={styles.sermonList}>
+                {openSeriesList.map((sermon) => sermonRow(sermon, false))}
+              </View>
+            </>
+          ) : null}
+
+          {!loading && activeTab === 'sermons' && !searching && !openSeries ? (
+            <>
+              <BookCard theme={theme} styles={styles} />
+
+              {sermons.length ? (
+                <>
+                  <ShelfHeader
+                    styles={styles}
+                    theme={theme}
+                    title="Latest teachings"
+                    meta={`${sermons.length} teachings`}
+                    actionLabel={showAllLatest ? 'Show less' : 'See all'}
+                    onAction={() => setShowAllLatest((open) => !open)}
+                  />
+                  {showAllLatest ? (
+                    <View style={styles.sermonList}>{sermons.map((sermon) => sermonRow(sermon, true))}</View>
+                  ) : (
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
+                      {sermons.slice(0, SHELF_SIZE).map((sermon) => (
+                        <TeachingCard key={sermon.id} theme={theme} styles={styles} sermon={sermon} onPress={() => playSermon(sermon)} />
+                      ))}
+                    </ScrollView>
+                  )}
+                </>
               ) : (
-                <EmptyState
-                  styles={styles}
-                  {...(searching
-                    ? emptyBecauseOfSearch('series')
-                    : { title: 'No sermon series yet', body: 'A series shows up here the moment one is created.' })}
-                />
+                <EmptyState styles={styles} title="No teachings here yet" body="A teaching shows up here the moment it is posted." />
               )}
 
-              <SectionHeader
-                styles={styles}
-                title="Latest Sermons"
-                meta={`${sermonList.length + sermonMediaItems.length} available`}
-              />
-              <View style={styles.sermonList}>
-                {sermonList.map((sermon) => (
-                  <Pressable
-                    key={sermon.id}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Play ${sermon.title} by ${sermon.speaker}`}
-                    onPress={() => playSermon(sermon)}
-                    style={styles.sermonRow}
-                  >
-                    <Cover theme={theme} styles={styles} box="sermonThumb" uri={sermonCover(sermon)} label={`Cover for ${sermon.title}`} glyph="play" />
-                    <View style={{ flex: 1 }}>
-                      <Text style={styles.sermonTitle}>{sermon.title}</Text>
-                      <Text style={styles.sermonMeta}>{sermon.speaker} • {formatDuration(sermon.durationSeconds)}</Text>
-                      <Text style={styles.sermonRef}>{sermon.scriptureReference || 'Sermon'}</Text>
-                    </View>
-                    <Ionicons name="play-circle-outline" size={22} color={theme.colors.accent} />
-                  </Pressable>
-                ))}
-                {sermonMediaItems.map((item) => (
-                  <MediaListCard
-                    key={item.id}
+              {sermonMediaItems.length ? (
+                <>
+                  <SectionHeader styles={styles} title="Posted in the app" meta={`${sermonMediaItems.length} available`} />
+                  <View style={styles.sermonList}>
+                    {sermonMediaItems.map((item) => (
+                      <MediaListCard key={item.id} theme={theme} styles={styles} item={item} busy={saving === item.id} onPress={() => openMediaItem(item)} onSave={() => { void saveForLater(item); }} />
+                    ))}
+                  </View>
+                </>
+              ) : null}
+
+              {posts.length ? (
+                <>
+                  <ShelfHeader styles={styles} theme={theme} title="From the blog" meta={`${posts.length} posts`} actionLabel="See all" onAction={() => setActiveTab('articles')} />
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
+                    {posts.slice(0, 6).map((post) => (
+                      <BlogShelfCard key={post.id} post={post} theme={theme} styles={styles} onPress={() => openPost(post)} />
+                    ))}
+                  </ScrollView>
+                </>
+              ) : null}
+
+              {shelves.map(({ series: item, list }) => (
+                <View key={item.id}>
+                  <ShelfHeader
+                    styles={styles}
                     theme={theme}
-                    styles={styles}
-                    item={item}
-                    busy={saving === item.id}
-                    onPress={() => openMediaItem(item)}
-                    onSave={() => { void saveForLater(item); }}
+                    title={item.title}
+                    meta={list.length === 1 ? '1 teaching' : `${list.length} teachings`}
+                    actionLabel={list.length > 1 ? 'See all' : undefined}
+                    onAction={() => setOpenSeriesId(item.id)}
                   />
-                ))}
-                {!sermonList.length && !sermonMediaItems.length ? (
-                  <EmptyState
-                    styles={styles}
-                    {...(searching
-                      ? emptyBecauseOfSearch('message')
-                      : { title: 'No sermons here yet', body: 'A message shows up here the moment it is posted.' })}
-                  />
-                ) : null}
-              </View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
+                    {list.slice(0, SHELF_SIZE).map((sermon) => (
+                      <TeachingCard key={sermon.id} theme={theme} styles={styles} sermon={sermon} onPress={() => playSermon(sermon)} />
+                    ))}
+                  </ScrollView>
+                </View>
+              ))}
             </>
           ) : null}
 
           {!loading && activeTab === 'articles' ? (
             <>
-              <SectionHeader styles={styles} title="Articles" meta={`${articleItems.length} available`} />
+              <SectionHeader styles={styles} title="Blog" meta={postList.length === 1 ? '1 post' : `${postList.length} posts`} />
+              <Text style={styles.sectionLead}>Articles from overcomersglobalnetwork.com. New posts on the website appear here by themselves.</Text>
+              {blogNotice}
               <View style={styles.mediaGrid}>
-                {articleItems.length ? articleItems.map((article) => (
+                {postList.map((post, index) => (
+                  index === 0 && !searching
+                    ? <BlogFeatureCard key={post.id} post={post} theme={theme} styles={styles} onPress={() => openPost(post)} />
+                    : <BlogRow key={post.id} post={post} theme={theme} styles={styles} onPress={() => openPost(post)} />
+                ))}
+                {articleItems.map((article) => (
                   <MediaListCard
                     key={article.id}
                     theme={theme}
@@ -492,14 +622,15 @@ export default function MediaScreen() {
                     onPress={() => openMediaItem(article)}
                     onSave={() => { void saveForLater(article); }}
                   />
-                )) : (
+                ))}
+                {!postList.length && !articleItems.length ? (
                   <EmptyState
                     styles={styles}
                     {...(searching
-                      ? emptyBecauseOfSearch('article')
-                      : { title: 'No articles here yet', body: 'Teaching articles show up here the moment they are posted.' })}
+                      ? emptyBecauseOfSearch('post')
+                      : { title: 'No blog posts to show', body: blogNote ? 'Pull down to try again when you have a signal.' : 'Posts from the ministry website show up here the moment they are published.' })}
                   />
-                )}
+                ) : null}
               </View>
             </>
           ) : null}
@@ -523,7 +654,7 @@ export default function MediaScreen() {
                     styles={styles}
                     {...(searching
                       ? emptyBecauseOfSearch('video')
-                      : { title: 'No videos here yet', body: 'A video shows up here the moment it is posted — you do not have to close the app.' })}
+                      : { title: 'No other videos yet', body: 'Every teaching from the ministry YouTube channel is under Teachings. Other videos show up here the moment they are posted.' })}
                   />
                 )}
               </View>
@@ -678,6 +809,7 @@ function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay
   const fadeLayer = (
     <LinearGradient
       colors={[theme.colors.scrim, theme.colors.scrim, 'transparent']}
+      locations={[0, 0.62, 1]}
       start={{ x: 0, y: 0.5 }}
       end={{ x: 1, y: 0.5 }}
       style={styles.heroFade}
@@ -724,32 +856,176 @@ function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay
   );
 }
 
-function SeriesCard({ theme, styles, title, count, cover, onPress }: {
-  theme: AppTheme;
-  styles: Styles;
+function ShelfHeader({ title, meta, actionLabel, onAction, styles, theme }: {
   title: string;
-  count: string;
-  cover?: string;
-  onPress: () => void;
+  meta: string;
+  actionLabel?: string;
+  onAction: () => void;
+  styles: Styles;
+  theme: AppTheme;
 }) {
+  return (
+    <View style={styles.shelfHeader}>
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        <Text style={styles.sectionMeta}>{meta}</Text>
+      </View>
+      {actionLabel ? (
+        <Pressable accessibilityRole="button" accessibilityLabel={`${actionLabel}: ${title}`} onPress={onAction} style={styles.shelfAction}>
+          <Text style={styles.shelfActionText}>{actionLabel}</Text>
+          <Ionicons name="chevron-forward" size={16} color={theme.colors.accent} />
+        </Pressable>
+      ) : null}
+    </View>
+  );
+}
+
+/** One teaching on a shelf: the video's own picture, its length, its title. */
+function TeachingCard({ sermon, onPress, styles, theme }: { sermon: Sermon; onPress: () => void; styles: Styles; theme: AppTheme }) {
   const [failed, setFailed] = useState(false);
+  const cover = sermonCover(sermon);
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open the series ${title}, ${count}`}
+      accessibilityLabel={`Play ${sermon.title} by ${sermon.speaker}${sermon.durationSeconds ? `, ${formatDuration(sermon.durationSeconds)} long` : ''}`}
       onPress={onPress}
-      style={styles.seriesCard}
+      style={styles.teachingCard}
     >
-      {cover && !failed ? (
-        <Image source={{ uri: cover }} style={styles.seriesArt} resizeMode="cover" accessibilityLabel={`Cover for ${title}`} onError={() => setFailed(true)} />
-      ) : (
-        <LinearGradient colors={theme.pageGradient} style={styles.seriesArt} accessibilityLabel={`${title} has no cover picture yet`} />
-      )}
-      <LinearGradient colors={['transparent', theme.colors.scrim]} style={styles.seriesScrim} />
-      <View style={styles.seriesCopy}>
-        <Text style={styles.seriesTitle} numberOfLines={3} adjustsFontSizeToFit minimumFontScale={0.7}>{title}</Text>
-        <Text style={styles.seriesCount}>{count}</Text>
+      <View style={styles.teachingArtWrap}>
+        {cover && !failed ? (
+          <Image source={{ uri: cover }} style={styles.teachingArt} resizeMode="cover" accessible={false} onError={() => setFailed(true)} />
+        ) : (
+          <LinearGradient colors={theme.pageGradient} style={[styles.teachingArt, styles.centered]}>
+            <Image source={art.seal} style={styles.fallbackSeal} resizeMode="contain" accessible={false} />
+          </LinearGradient>
+        )}
+        <View style={styles.teachingPlay}>
+          <Ionicons name="play" size={16} color={theme.colors.textOnAccent} />
+        </View>
+        {sermon.durationSeconds ? (
+          <View style={styles.durationBadge}>
+            <Text style={styles.durationText}>{formatDuration(sermon.durationSeconds)}</Text>
+          </View>
+        ) : null}
       </View>
+      <Text style={styles.teachingTitle} numberOfLines={2}>{sermon.title}</Text>
+      <Text style={styles.teachingMeta} numberOfLines={1}>{sermon.speaker}</Text>
+    </Pressable>
+  );
+}
+
+/** The top of an opened series: its cover, its name and a play-first button. */
+function SeriesBanner({ series, onPlay, styles, theme }: { series: Series; onPlay: (() => void) | null; styles: Styles; theme: AppTheme }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <View style={styles.seriesBanner}>
+      {series.coverUrl && !failed ? (
+        <Image source={{ uri: series.coverUrl }} style={styles.seriesBannerArt} resizeMode="cover" accessible={false} onError={() => setFailed(true)} />
+      ) : (
+        <LinearGradient colors={theme.pageGradient} style={styles.seriesBannerArt} />
+      )}
+      <LinearGradient colors={['transparent', theme.colors.scrim, theme.colors.scrim]} locations={[0, 0.3, 1]} style={styles.seriesBannerScrim} />
+      <View style={styles.seriesBannerCopy}>
+        <Text style={styles.heroOverline}>SERIES</Text>
+        <Text style={styles.seriesBannerTitle}>{series.title}</Text>
+        {series.subtitle ? <Text style={styles.seriesBannerBody}>{series.subtitle}</Text> : null}
+        <View style={styles.seriesBannerRow}>
+          <Text style={styles.sectionMeta}>{series.messageCount === 1 ? '1 teaching' : `${series.messageCount} teachings`}</Text>
+          {onPlay ? (
+            <Pressable accessibilityRole="button" accessibilityLabel={`Play ${series.title} from the start`} onPress={onPlay} style={styles.playFirst}>
+              <Ionicons name="play" size={16} color={theme.colors.textOnAccent} />
+              <Text style={styles.playFirstText}>Play</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+const BOOK_TITLE = 'The Gospel of Salvation';
+const BOOK_AUTHOR = 'Prophet Joshua Matthews';
+
+/** The owner's free book. The reader itself lives at /book. */
+function BookCard({ styles, theme }: { styles: Styles; theme: AppTheme }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Free book: ${BOOK_TITLE}, by ${BOOK_AUTHOR}. Read now.`}
+      onPress={() => router.push('/book' as any)}
+      style={styles.bookCard}
+    >
+      <Image source={art.bookCover} style={styles.bookCover} resizeMode="cover" accessible={false} />
+      <View style={styles.bookCopy}>
+        <Text style={styles.heroOverline}>FREE BOOK</Text>
+        <Text style={styles.bookTitle}>{BOOK_TITLE}</Text>
+        <Text style={styles.bookAuthor}>{`by ${BOOK_AUTHOR}`}</Text>
+        <View style={styles.bookButton}>
+          <Ionicons name="book-outline" size={16} color={theme.colors.textOnAccent} />
+          <Text style={styles.bookButtonText}>Read now</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+/**
+ * A blog post's cover, or — when the website gave none, or the picture will
+ * not load — the ministry's crest on the page colours. Never a grey box.
+ */
+function BlogCover({ post, style, styles, theme }: { post: BlogPost; style: object; styles: Styles; theme: AppTheme }) {
+  const [failed, setFailed] = useState(false);
+  if (post.coverImage && !failed) {
+    return <Image source={{ uri: post.coverImage }} style={style} resizeMode="cover" accessible={false} onError={() => setFailed(true)} />;
+  }
+  return (
+    <LinearGradient colors={theme.pageGradient} style={[style, styles.centered]}>
+      <Image source={art.seal} style={styles.fallbackSeal} resizeMode="contain" accessible={false} />
+    </LinearGradient>
+  );
+}
+
+function blogByline(post: BlogPost) {
+  return [post.author, formatBlogDate(post.publishedAt)].filter(Boolean).join(' • ');
+}
+
+function BlogShelfCard({ post, onPress, styles, theme }: { post: BlogPost; onPress: () => void; styles: Styles; theme: AppTheme }) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={`Read ${post.title}${post.author ? ` by ${post.author}` : ''}`} onPress={onPress} style={styles.blogShelfCard}>
+      <BlogCover post={post} style={styles.blogShelfArt} styles={styles} theme={theme} />
+      <View style={styles.blogShelfCopy}>
+        {post.category ? <Text style={styles.blogCategory}>{post.category.toUpperCase()}</Text> : null}
+        <Text style={styles.teachingTitle} numberOfLines={2}>{post.title}</Text>
+        <Text style={styles.teachingMeta} numberOfLines={1}>{blogByline(post)}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function BlogFeatureCard({ post, onPress, styles, theme }: { post: BlogPost; onPress: () => void; styles: Styles; theme: AppTheme }) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={`Read the newest post, ${post.title}`} onPress={onPress} style={styles.blogFeature}>
+      <BlogCover post={post} style={styles.blogFeatureArt} styles={styles} theme={theme} />
+      <View style={styles.blogFeatureCopy}>
+        <Text style={styles.blogCategory}>{`NEWEST${post.category ? ` • ${post.category.toUpperCase()}` : ''}`}</Text>
+        <Text style={styles.blogFeatureTitle}>{post.title}</Text>
+        {post.excerpt ? <Text style={styles.blogExcerpt} numberOfLines={3}>{post.excerpt}</Text> : null}
+        <Text style={styles.teachingMeta}>{`${blogByline(post)} • ${readingMinutes(post)} min read`}</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function BlogRow({ post, onPress, styles, theme }: { post: BlogPost; onPress: () => void; styles: Styles; theme: AppTheme }) {
+  return (
+    <Pressable accessibilityRole="button" accessibilityLabel={`Read ${post.title}${post.author ? ` by ${post.author}` : ''}`} onPress={onPress} style={styles.mediaCard}>
+      <BlogCover post={post} style={styles.blogRowArt} styles={styles} theme={theme} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.mediaTitle} numberOfLines={2}>{post.title}</Text>
+        <Text style={styles.mediaArtist} numberOfLines={1}>{blogByline(post)}</Text>
+        <Text style={styles.mediaLength}>{`${readingMinutes(post)} min read`}</Text>
+      </View>
+      <Ionicons name="chevron-forward" size={20} color={theme.colors.accent} />
     </Pressable>
   );
 }
@@ -904,13 +1180,16 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     ...t.elevation.high,
   },
   heroArt: { position: 'absolute', right: 0, top: 0, bottom: 0, width: '62%', height: '100%' },
-  heroFade: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '80%' },
-  heroCopy: { flex: 1, paddingVertical: 18, paddingLeft: 18, paddingRight: 4, zIndex: 2 },
+  // The words sit wholly on the solid part of the scrim (the left 62%), so a
+  // busy YouTube thumbnail behind a long title never costs contrast.
+  heroFade: { position: 'absolute', left: 0, top: 0, bottom: 0, width: '100%' },
+  heroCopy: { flex: 1, maxWidth: '62%', paddingVertical: 18, paddingLeft: 18, paddingRight: 4, zIndex: 2 },
   heroOverlineRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   heroOverline: { color: t.colors.accent, fontWeight: '800', fontSize: 12, letterSpacing: 1.2 },
   heroTitle: { color: t.colors.textPrimary, fontSize: 21, lineHeight: 26, fontWeight: '900', marginTop: 8 },
   heroSpeaker: { color: t.colors.textSecondary, fontWeight: '700', fontSize: t.type.meta, marginTop: 8 },
   heroPlay: {
+    marginLeft: 'auto',
     minWidth: 58,
     minHeight: 58,
     borderRadius: 29,
@@ -980,6 +1259,55 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   emptyState: { borderRadius: t.radius.lg, borderWidth: 1, borderColor: t.colors.border, backgroundColor: t.colors.surface, padding: 18, ...t.elevation.low },
   emptyTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
   emptyBody: { color: t.colors.textSecondary, marginTop: 6, lineHeight: 21, fontSize: t.type.body },
+
+  centered: { alignItems: 'center', justifyContent: 'center' },
+  fallbackSeal: { width: '42%', height: '60%', opacity: 0.9 },
+  sectionLead: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 21, marginBottom: 12 },
+  inlineNote: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 12, marginBottom: 12, borderRadius: t.radius.md, backgroundColor: t.colors.warningMuted, borderWidth: 1, borderColor: t.colors.accentBorder },
+  inlineNoteText: { flex: 1, color: t.colors.warning, fontSize: t.type.meta, lineHeight: 19, fontWeight: '700' },
+
+  shelfHeader: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 22, marginBottom: 10 },
+  shelfAction: { minHeight: 48, minWidth: 48, flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 12, borderRadius: t.radius.pill, borderWidth: 1, borderColor: t.colors.accentBorder, backgroundColor: t.colors.accentMuted },
+  shelfActionText: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.meta },
+  shelfRow: { gap: 12, paddingRight: 12, paddingBottom: 4 },
+
+  teachingCard: { width: 224, minHeight: 190, borderRadius: t.radius.md, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.border, overflow: 'hidden', paddingBottom: 12, ...t.elevation.low },
+  teachingArtWrap: { width: '100%', aspectRatio: 16 / 9, backgroundColor: t.colors.surfaceSunken },
+  teachingArt: { width: '100%', height: '100%' },
+  teachingPlay: { position: 'absolute', left: 10, bottom: 10, width: 34, height: 34, borderRadius: 17, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center' },
+  durationBadge: { position: 'absolute', right: 8, bottom: 8, paddingHorizontal: 7, paddingVertical: 3, borderRadius: t.radius.sm, backgroundColor: t.colors.brandSolid },
+  durationText: { color: t.colors.textOnBrand, fontSize: 12, fontWeight: '800' },
+  teachingTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 15, lineHeight: 20, marginTop: 10, paddingHorizontal: 12 },
+  teachingMeta: { color: t.colors.textSecondary, fontSize: 12, marginTop: 4, paddingHorizontal: 12 },
+
+  seriesBanner: { minHeight: 200, borderRadius: t.radius.lg, overflow: 'hidden', justifyContent: 'flex-end', marginBottom: 14, borderWidth: 1, borderColor: t.colors.accentBorder, ...t.elevation.medium },
+  seriesBannerArt: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
+  seriesBannerScrim: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },
+  seriesBannerCopy: { padding: 16, paddingTop: 70, gap: 4 },
+  seriesBannerTitle: { color: t.colors.textPrimary, fontSize: 24, lineHeight: 29, fontWeight: '900' },
+  seriesBannerBody: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 20 },
+  seriesBannerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 },
+  playFirst: { minHeight: 48, minWidth: 96, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 18, borderRadius: t.radius.pill, backgroundColor: t.colors.accentSolid },
+  playFirstText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+
+  bookCard: { alignSelf: 'stretch', minHeight: 154, flexDirection: 'row', gap: 14, padding: 14, marginTop: 4, borderRadius: t.radius.lg, backgroundColor: t.colors.surfaceRaised, borderWidth: 1, borderColor: t.colors.accentBorder, ...t.elevation.medium },
+  bookCover: { width: 84, height: 126, borderRadius: 6, backgroundColor: t.colors.surfaceSunken },
+  bookCopy: { flex: 1, justifyContent: 'center', gap: 4 },
+  bookTitle: { color: t.colors.textPrimary, fontSize: 20, lineHeight: 25, fontWeight: '900' },
+  bookAuthor: { color: t.colors.textSecondary, fontSize: t.type.meta, fontWeight: '700' },
+  bookButton: { alignSelf: 'flex-start', minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 16, marginTop: 8, borderRadius: t.radius.pill, backgroundColor: t.colors.accentSolid },
+  bookButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
+
+  blogShelfCard: { width: 260, minHeight: 220, borderRadius: t.radius.md, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.border, overflow: 'hidden', paddingBottom: 12, ...t.elevation.low },
+  blogShelfArt: { width: '100%', aspectRatio: 16 / 9 },
+  blogShelfCopy: { paddingTop: 10 },
+  blogCategory: { color: t.colors.accent, fontSize: t.type.overline, fontWeight: '900', letterSpacing: 1, paddingHorizontal: 12 },
+  blogFeature: { minHeight: 280, borderRadius: t.radius.lg, backgroundColor: t.colors.surfaceRaised, borderWidth: 1, borderColor: t.colors.accentBorder, overflow: 'hidden', ...t.elevation.medium },
+  blogFeatureArt: { width: '100%', aspectRatio: 16 / 9 },
+  blogFeatureCopy: { paddingVertical: 14, gap: 6 },
+  blogFeatureTitle: { color: t.colors.textPrimary, fontSize: 22, lineHeight: 27, fontWeight: '900', paddingHorizontal: 12 },
+  blogExcerpt: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 21, paddingHorizontal: 12 },
+  blogRowArt: { width: 88, height: 66, borderRadius: t.radius.sm, overflow: 'hidden' },
 
   adminCard: {
     marginTop: 22,

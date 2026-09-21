@@ -48,6 +48,14 @@ export type ChatRoom = {
   members: number;
   unread: number;
   type: 'global' | 'regional' | 'leader' | 'prayer' | 'announcement' | 'direct' | 'group' | 'general';
+  /** Group picture (chat_channels.avatar_url). Absent for a one-to-one chat. */
+  avatarUrl?: string;
+  /** Who started the room. The creator may change its picture. */
+  createdBy?: string;
+  /** A group's own description. Never set for a one-to-one chat. */
+  description?: string;
+  /** Anyone in the network can find and join a public group. */
+  isPublic?: boolean;
 };
 
 export type OutreachStatus = 'untapped' | 'in_progress' | 'covered' | 'follow_up_due' | 'new_believer' | 'discipled';

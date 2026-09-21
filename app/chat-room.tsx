@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -13,16 +14,20 @@ import {
   SharedRef,
   addChatMember,
   alreadyReported,
+  announceChatChange,
   blockChatUser,
   blockHidesContent,
+  chatAuthorIsAdmin,
   chatRoomTitle,
-  deleteOwnChatMessage,
+  clearChatGroupPicture,
+  deleteChatMessageForEveryone,
   getChatMembers,
   getChatMessages,
   getChatRooms,
+  hideChatMessageForMe,
+  holdChatMessage,
   isUserBlocked,
   joinChatRoom,
-  moderateChatMessage,
   removeChatMember,
   reportChatMessage,
   searchChatProfiles,
@@ -30,9 +35,10 @@ import {
   subscribeToChat,
   unblockChatUser,
   uploadChatAttachment,
+  uploadChatGroupPicture,
 } from '../lib/chatService';
 import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../components/ChatAttachments';
-import { MessageBody, formatDayLabel, formatMessageTime, initials, roomIcon, roomLabel } from '../components/chatShared';
+import { ChatActionSheet, ChatSheetAction, MessageBody, RoomBadge, formatDayLabel, formatMessageTime, initials, roomLabel } from '../components/chatShared';
 import { SharedCard } from '../components/ShareToChat';
 import { playbackKind } from '../lib/embed';
 import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../lib/errorMessages';
@@ -96,6 +102,9 @@ export default function ChatRoomScreen() {
    * the words that caused it are not shown back to them.
    */
   const [careNotice, setCareNotice] = useState<{ tone: 'held' | 'care' } | null>(null);
+  /** The long-press menu that is open, if any. */
+  const [sheet, setSheet] = useState<{ title: string; subtitle?: string; actions: ChatSheetAction[] } | null>(null);
+  const [pictureBusy, setPictureBusy] = useState(false);
 
   useEffect(() => {
     alive.current = true;
@@ -181,6 +190,8 @@ export default function ChatRoomScreen() {
 
   const connectionRef = useRef<ChatConnectionState>('connecting');
   useEffect(() => { connectionRef.current = connection; }, [connection]);
+  /** The room's live channel, so a delete or hold can tell the other phones. */
+  const liveChannel = useRef<ReturnType<typeof subscribeToChat>>(undefined);
 
   /**
    * One live connection, opened once for this room and closed when the room
@@ -189,11 +200,20 @@ export default function ChatRoomScreen() {
   useEffect(() => {
     if (!roomId) return;
     let cancelled = false;
+    // Another phone deleted or held a message: read the room again, at most
+    // once every few seconds however many signals arrive.
+    let changeTimer: ReturnType<typeof setTimeout> | null = null;
+    const onChanged = () => {
+      if (cancelled || changeTimer) return;
+      changeTimer = setTimeout(() => { changeTimer = null; if (!cancelled) catchUp(); }, 1500);
+    };
     const channel = subscribeToChat(
       roomId,
       (message) => { if (!cancelled) setMessages((current) => [...current.filter((item) => item.id !== message.id), message]); },
       (state) => { if (!cancelled) setConnection(state); },
+      onChanged,
     );
+    liveChannel.current = channel;
     if (!channel) setConnection('reconnecting');
 
     const catchUp = () => {
@@ -210,6 +230,8 @@ export default function ChatRoomScreen() {
       cancelled = true;
       foreground.remove();
       clearInterval(poll);
+      if (changeTimer) clearTimeout(changeTimer);
+      liveChannel.current = undefined;
       if (channel) supabase.removeChannel(channel);
     };
   }, [loadMessages, roomId]);
@@ -427,42 +449,208 @@ export default function ChatRoomScreen() {
     }
   }
 
+  /** Everyone else in the room now sees "This message was deleted". */
+  function markDeleted(messageId: string) {
+    setMessages((current) => current.map((item) => (item.id === messageId
+      ? { ...item, deleted: true, body: '', attachment: undefined, shared: undefined, isFlagged: false }
+      : item)));
+  }
+
+  function confirmDeleteForEveryone(message: ChatMessage, own: boolean) {
+    Alert.alert(
+      'Delete for everyone?',
+      own
+        ? 'Everyone in this chat will see "This message was deleted" instead of what you wrote.'
+        : `Everyone in this chat will see "This message was deleted" instead of what ${message.displayName} wrote.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await deleteChatMessageForEveryone(message.id);
+              markDeleted(message.id);
+              void announceChatChange(liveChannel.current);
+            } catch (err) {
+              Alert.alert('Message not deleted', friendlyError(err, 'Please try again.'));
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  async function deleteForMe(message: ChatMessage) {
+    try {
+      await hideChatMessageForMe(message.id);
+      setMessages((current) => current.filter((item) => item.id !== message.id));
+    } catch (err) {
+      Alert.alert('That did not work', friendlyError(err, 'Please try again.'));
+    }
+  }
+
+  async function holdForReview(message: ChatMessage) {
+    try {
+      await holdChatMessage(message.id);
+      setMessages((current) => current.map((item) => (item.id === message.id ? { ...item, isFlagged: true } : item)));
+      void announceChatChange(liveChannel.current);
+      Alert.alert(
+        'Held for review',
+        `Only ${message.displayName} and the leaders can see this message now. It is waiting in Admin, under Needs your look. Approve it there to put it back.`,
+      );
+    } catch (err) {
+      Alert.alert('Message not held', friendlyError(err, 'Please try again.'));
+    }
+  }
+
+  /**
+   * What a long press offers.
+   *
+   *   Your own message       Delete for everyone, Delete for me
+   *   Somebody else's        Delete for me, Report, Block
+   *   ...and for a leader    Delete for everyone and Hold for review as well,
+   *                          except on an admin's message (DO-NOT-BREAK #5)
+   *   A deleted message      Delete for me (to clear the line away)
+   *
+   * Every one of these is checked again by the database; the menu only
+   * decides what is worth offering.
+   */
   async function messageActions(message: ChatMessage, own: boolean) {
     if (message.sendingProgress !== undefined) return;
-    const buttons: { text: string; style?: 'cancel' | 'destructive'; onPress?: () => void }[] = [];
-    if (own) {
-      buttons.push({ text: 'Delete my message', style: 'destructive', onPress: async () => {
-        try { await deleteOwnChatMessage(message.id); setMessages((current) => current.filter((item) => item.id !== message.id)); }
-        catch (err) { Alert.alert('Message not deleted', friendlyError(err, 'Please try again.')); }
-      } });
+    const actions: ChatSheetAction[] = [];
+    const forMe: ChatSheetAction = {
+      key: 'hide',
+      label: 'Delete for me',
+      icon: 'eye-off-outline',
+      hint: 'Only you stop seeing it. Everyone else still does.',
+      onPress: () => { void deleteForMe(message); },
+    };
+
+    if (message.deleted) {
+      actions.push(forMe);
+    } else if (own) {
+      actions.push({
+        key: 'delete-all',
+        label: 'Delete for everyone',
+        icon: 'trash-outline',
+        destructive: true,
+        onPress: () => confirmDeleteForEveryone(message, true),
+      });
+      actions.push(forMe);
     } else {
       const personId = message.userId;
-      // Asked before the sheet opens so the button says which way it goes. A
-      // member only ever sees "Block" here, because somebody they have already
-      // blocked has no message left on this screen to hold down.
-      const blocked = personId ? await isUserBlocked(personId) : false;
-      buttons.push({
-        text: alreadyReported('chat_message', message.id) ? 'Already reported' : 'Report this message',
+      // Asked before the sheet opens so the menu is right the first time.
+      const [blocked, writerIsAdmin] = await Promise.all([
+        personId ? isUserBlocked(personId) : Promise.resolve(false),
+        personId && (access.canRemoveChatMessages || access.canModerateChat) ? chatAuthorIsAdmin(personId) : Promise.resolve(false),
+      ]);
+      // A leader may not remove or hold an admin's message. An admin may.
+      const outranked = writerIsAdmin && access.level !== 'super_admin';
+      if (access.canRemoveChatMessages && !outranked) {
+        actions.push({
+          key: 'delete-all',
+          label: 'Delete for everyone',
+          icon: 'trash-outline',
+          destructive: true,
+          onPress: () => confirmDeleteForEveryone(message, false),
+        });
+      }
+      if (access.canModerateChat && !outranked && !message.isFlagged) {
+        actions.push({
+          key: 'hold',
+          label: 'Hold for review',
+          icon: 'pause-circle-outline',
+          hint: 'Hidden from the room until a leader approves it.',
+          onPress: () => { void holdForReview(message); },
+        });
+      }
+      actions.push(forMe);
+      actions.push({
+        key: 'report',
+        label: alreadyReported('chat_message', message.id) ? 'Already reported' : 'Report this message',
+        icon: 'flag-outline',
         onPress: () => { void reportMessage(message); },
       });
-      if (personId && !blocked) buttons.push({
-        text: 'Block this person',
-        style: 'destructive',
-        onPress: () => { void blockPerson(personId, message.displayName); },
-      });
-      if (personId && blocked) buttons.push({
-        text: 'Unblock this person',
-        onPress: () => { void unblockPerson(personId, message.displayName); },
-      });
-      // Removing someone else's message is a staff action; the database says so
-      // too, so a moderator who cannot do it is never offered the button.
-      if (access.canRemoveChatMessages) buttons.push({ text: 'Remove for everyone', style: 'destructive', onPress: async () => {
-        try { await moderateChatMessage(message.id, 'remove'); setMessages((current) => current.filter((item) => item.id !== message.id)); }
-        catch (err) { Alert.alert('Message not removed', friendlyError(err, 'Check leader permissions and try again.')); }
-      } });
+      if (personId && !blocked) {
+        actions.push({
+          key: 'block',
+          label: 'Block this person',
+          icon: 'hand-left-outline',
+          destructive: true,
+          onPress: () => { void blockPerson(personId, message.displayName); },
+        });
+      }
+      if (personId && blocked) {
+        actions.push({
+          key: 'unblock',
+          label: 'Unblock this person',
+          icon: 'person-add-outline',
+          onPress: () => { void unblockPerson(personId, message.displayName); },
+        });
+      }
     }
-    buttons.push({ text: 'Cancel', style: 'cancel' });
-    Alert.alert(own ? 'Your message' : message.displayName, message.body ? message.body.slice(0, 140) : undefined, buttons);
+
+    setSheet({
+      title: message.deleted ? 'Deleted message' : own ? 'Your message' : message.displayName,
+      subtitle: message.deleted ? undefined : message.body ? message.body.slice(0, 140) : undefined,
+      actions,
+    });
+  }
+
+  /** The room's creator and the leaders may change a group's picture. */
+  const canManageRoom = Boolean(
+    room && room.type !== 'direct' && (access.canModerateChat || (userId && room.createdBy === userId)),
+  );
+
+  async function changeGroupPicture() {
+    if (!room || pictureBusy) return;
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      allowsMultipleSelection: false,
+      aspect: [1, 1],
+      quality: 0.86,
+    });
+    if (result.canceled || !result.assets[0]) return;
+    const asset = result.assets[0];
+    setPictureBusy(true);
+    try {
+      const url = await uploadChatGroupPicture(room.id, {
+        uri: asset.uri,
+        mimeType: asset.mimeType,
+        width: asset.width,
+        height: asset.height,
+        fileName: asset.fileName,
+      });
+      setRoom((current) => (current ? { ...current, avatarUrl: url } : current));
+    } catch (err) {
+      Alert.alert('The picture did not change', friendlyUploadError(err, 'Please choose another picture and try again.'));
+    } finally {
+      setPictureBusy(false);
+    }
+  }
+
+  function removeGroupPicture() {
+    if (!room || pictureBusy) return;
+    Alert.alert('Remove the group picture?', 'The group goes back to its plain badge. You can add a new picture any time.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: async () => {
+          setPictureBusy(true);
+          try {
+            await clearChatGroupPicture(room.id);
+            setRoom((current) => (current ? { ...current, avatarUrl: undefined } : current));
+          } catch (err) {
+            Alert.alert('The picture was not removed', friendlyError(err, 'Please try again.'));
+          } finally {
+            setPictureBusy(false);
+          }
+        },
+      },
+    ]);
   }
 
   async function updateRoomMember(action: 'add' | 'remove', overrideUserId?: string) {
@@ -490,6 +678,26 @@ export default function ChatRoomScreen() {
     }
     const message = item.message;
     const own = Boolean((userId && message.userId === userId) || message.sendingProgress !== undefined);
+    if (message.deleted) {
+      return (
+        <View style={[styles.messageRow, own && styles.messageRowOwn]}>
+          {!own ? <View style={styles.avatarSpacer} /> : null}
+          <Pressable
+            onLongPress={() => { void messageActions(message, own); }}
+            delayLongPress={280}
+            accessibilityRole="button"
+            accessibilityLabel={`${own ? 'You' : message.displayName} deleted this message. Hold for options.`}
+            accessibilityActions={[{ name: 'longpress', label: 'Options' }]}
+            onAccessibilityAction={() => { void messageActions(message, own); }}
+            style={styles.deletedBubble}
+          >
+            <Ionicons name="ban-outline" size={15} color={theme.colors.textSecondary} />
+            <Text style={styles.deletedText}>{own ? 'You deleted this message' : 'This message was deleted'}</Text>
+            <Text style={styles.time}>{formatMessageTime(message.createdAt)}</Text>
+          </Pressable>
+        </View>
+      );
+    }
     return (
       <View style={[styles.messageRow, own && styles.messageRowOwn]}>
         {!own ? (
@@ -509,8 +717,8 @@ export default function ChatRoomScreen() {
           onLongPress={() => { void messageActions(message, own); }}
           delayLongPress={280}
           accessibilityRole="button"
-          accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message.${message.isFlagged && own ? ' Waiting for a leader to read it.' : ''} Hold to report or block.`}
-          accessibilityActions={[{ name: 'longpress', label: 'Report or block' }]}
+          accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message.${message.isFlagged && own ? ' Only you can see this. It is waiting for an admin to review it.' : message.isFlagged ? ' Held for review.' : ''} Hold for options.`}
+          accessibilityActions={[{ name: 'longpress', label: 'Message options' }]}
           onAccessibilityAction={() => { void messageActions(message, own); }}
           style={[styles.bubble, own && styles.bubbleOwn]}
         >
@@ -524,13 +732,20 @@ export default function ChatRoomScreen() {
             <AttachmentBubble attachment={message.attachment} dark={dark} own={own} sendingProgress={message.sendingProgress} onOpen={openAttachment} />
           ) : null}
           {message.body ? <MessageBody message={message.body} dark={dark} own={own} onOpenUrl={openExternalUrl} /> : null}
+          {/*
+            DO-NOT-BREAK #18: a held message is visible only to its writer and
+            the leaders. The writer is told exactly that, in plain words, on
+            the message itself — not in a banner that scrolls away.
+          */}
+          {message.isFlagged ? (
+            <View style={styles.heldNote}>
+              <Ionicons name={own ? 'eye-outline' : 'pause-circle-outline'} size={14} color={theme.colors.accent} />
+              <Text style={styles.heldText}>
+                {own ? 'Only you can see this. It is waiting for an admin to review it.' : 'Held for review. Only the sender and leaders can see this.'}
+              </Text>
+            </View>
+          ) : null}
           <View style={styles.bubbleFoot}>
-            {message.isFlagged && own ? (
-              <View style={styles.heldPill}>
-                <Ionicons name="time-outline" size={11} color={theme.colors.accent} />
-                <Text style={styles.heldText}>Waiting for a leader</Text>
-              </View>
-            ) : null}
             <Text style={[styles.time, own && styles.timeOwn]}>
               {message.sendingProgress !== undefined ? 'Sending…' : formatMessageTime(message.createdAt)}
             </Text>
@@ -539,7 +754,7 @@ export default function ChatRoomScreen() {
       </View>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, dark, styles, theme, access.canRemoveChatMessages]);
+  }, [userId, dark, styles, theme, access.canRemoveChatMessages, access.canModerateChat, access.level]);
 
   return (
     <View style={styles.root}>
@@ -548,9 +763,7 @@ export default function ChatRoomScreen() {
           <Pressable accessibilityRole="button" accessibilityLabel="Back to chats" onPress={() => (router.canGoBack() ? router.back() : router.replace('/community' as any))} style={styles.headerButton} hitSlop={8}>
             <Ionicons name="chevron-back" size={26} color={theme.colors.accent} />
           </Pressable>
-          <View style={[styles.headerAvatar, room?.type === 'announcement' && styles.headerAvatarGold]}>
-            <Ionicons name={roomIcon(room?.type || 'general')} size={18} color={room?.type === 'announcement' ? theme.colors.textOnAccent : theme.colors.textOnBrand} />
-          </View>
+          <RoomBadge room={{ type: room?.type || 'general', avatarUrl: room?.avatarUrl, name: title }} size={40} dark={dark} />
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`${title}. Open group information and members.`}
@@ -744,6 +957,14 @@ export default function ChatRoomScreen() {
         onSend={sendAttachment}
       />
       <PhotoViewer url={photoUrl} onClose={() => setPhotoUrl(null)} />
+      <ChatActionSheet
+        visible={Boolean(sheet)}
+        title={sheet?.title || ''}
+        subtitle={sheet?.subtitle}
+        actions={sheet?.actions || []}
+        dark={dark}
+        onClose={() => setSheet(null)}
+      />
 
       <Modal visible={membersOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setMembersOpen(false)}>
         <SafeAreaView style={[styles.sheet, styles.root]}>
@@ -753,6 +974,31 @@ export default function ChatRoomScreen() {
               <Ionicons name="close" size={24} color={theme.colors.textPrimary} />
             </Pressable>
           </View>
+          {room && room.type !== 'direct' ? (
+            <View style={styles.groupHead}>
+              <RoomBadge room={{ type: room.type, avatarUrl: room.avatarUrl, name: title }} size={88} dark={dark} />
+              {room.description ? <Text style={styles.groupDescription}>{room.description}</Text> : null}
+              {canManageRoom ? (
+                <View style={styles.groupPictureActions}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={room.avatarUrl ? 'Change the group picture' : 'Add a group picture'}
+                    disabled={pictureBusy}
+                    onPress={() => { void changeGroupPicture(); }}
+                    style={[styles.groupPictureButton, pictureBusy && styles.sendButtonIdle]}
+                  >
+                    {pictureBusy ? <ActivityIndicator color={theme.colors.textOnBrand} /> : <Ionicons name="camera-outline" size={17} color={theme.colors.textOnBrand} />}
+                    <Text style={styles.groupPictureButtonText}>{pictureBusy ? 'Saving…' : room.avatarUrl ? 'Change picture' : 'Add a picture'}</Text>
+                  </Pressable>
+                  {room.avatarUrl && !pictureBusy ? (
+                    <Pressable accessibilityRole="button" accessibilityLabel="Remove the group picture" onPress={removeGroupPicture} style={styles.groupPictureQuiet}>
+                      <Text style={styles.groupPictureQuietText}>Remove</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+          ) : null}
           <Text style={styles.sheetSub}>{roomMembers.length} {roomMembers.length === 1 ? 'member' : 'members'} • Share encouragement, scripture, photos and videos.</Text>
           <FlatList
             data={roomMembers}
@@ -872,8 +1118,26 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   bubbleFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
   time: { color: t.colors.textMuted, fontSize: t.type.overline, fontWeight: '700' },
   timeOwn: { color: t.dark ? t.colors.textMuted : t.colors.textOnBrand, opacity: t.dark ? 1 : 0.8 },
-  heldPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 3, borderRadius: t.radius.pill, backgroundColor: t.colors.accentMuted },
-  heldText: { color: t.colors.accent, fontSize: t.type.overline, fontWeight: '800' },
+  // Its own small card, so the words read the same on a navy, gold or white
+  // bubble in either theme.
+  heldNote: {
+    flexDirection: 'row', alignItems: 'flex-start', gap: 6, marginTop: 8, paddingHorizontal: 10, paddingVertical: 8,
+    borderRadius: t.radius.md, backgroundColor: t.colors.surfaceRaised, borderWidth: 1, borderColor: t.colors.accentBorder,
+  },
+  heldText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.meta, fontWeight: '700', lineHeight: 18 },
+  avatarSpacer: { width: 36 },
+  deletedBubble: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, minWidth: 160, paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: t.radius.lg, borderWidth: 1, borderStyle: 'dashed', borderColor: t.colors.borderStrong, backgroundColor: t.colors.surface,
+  },
+  deletedText: { color: t.colors.textSecondary, fontStyle: 'italic', fontSize: t.type.meta, fontWeight: '600' },
+  groupHead: { alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingTop: 6, paddingBottom: 12 },
+  groupDescription: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 21, textAlign: 'center' },
+  groupPictureActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  groupPictureButton: { flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 48, paddingHorizontal: 16, borderRadius: t.radius.pill, backgroundColor: t.colors.brandSolid },
+  groupPictureButtonText: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.meta },
+  groupPictureQuiet: { minHeight: 48, minWidth: 48, paddingHorizontal: 14, alignItems: 'center', justifyContent: 'center', borderRadius: t.radius.pill, borderWidth: 1, borderColor: t.colors.borderStrong },
+  groupPictureQuietText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24, gap: 6, transform: [{ scaleY: -1 }] },
   emptyTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle, marginTop: 8 },
   emptyBody: { color: t.colors.textSecondary, textAlign: 'center', marginTop: 4, lineHeight: 20, fontSize: t.type.body },

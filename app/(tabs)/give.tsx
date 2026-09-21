@@ -6,22 +6,35 @@ import { ActivityIndicator, Alert, Image, Linking, Pressable, RefreshControl, Sc
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { getGivingLinks, recordGivingSelection } from '../../lib/contentService';
 import { friendlyError } from '../../lib/errorMessages';
-import { publicEnv, GIVING_PAGE_URL, GIVING_CARD_URL } from '../../lib/publicEnv';
+import {
+  GIVING_PRESETS,
+  createPrefilledCheckout,
+  formatDollars,
+  isPrefilledCheckoutReady,
+  isStripeHttps,
+  parseGiftAmount,
+  presetUrl,
+} from '../../lib/givingService';
+import { GIVING_PAGE_URL, GIVING_CARD_URL, GIVING_PRESET_LINKS, hasSupabase } from '../../lib/publicEnv';
+import { supabase } from '../../lib/supabase';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
 import { GivingLink } from '../../types/models';
 
-const presetAmounts = [25, 50, 100, 500];
-
 /**
- * Where giving happens. In order: whatever the ministry has published in the
- * giving table, then the address baked into this build, then the address the
- * app has always shipped with. The last one stays until the published setting
- * is confirmed present in every store build — losing it would break the one
- * thing the owner says already works (DO-NOT-BREAK: Give opens the giving page).
+ * Where giving happens.
+ * - Each preset opens the Stripe page made for exactly that amount
+ *   (lib/givingService.ts has the verified list). No website hop, no retyping.
+ * - A custom amount opens a Stripe Checkout page with that amount already set,
+ *   once the server has its Stripe key. Until then it opens the "any amount"
+ *   Stripe link and says plainly, before the person leaves, what to enter.
+ * The giving_links table can still override any of these without a new build.
  */
 const givingPageUrl = GIVING_PAGE_URL;
 const customStripeUrl = GIVING_CARD_URL;
+
+const invokeFunction = (name: string, options: { body: Record<string, unknown> }) =>
+  supabase.functions.invoke(name, options) as Promise<{ data: any; error: any }>;
 
 const art = {
   seal: require('../../assets/images/ogn-logo-transparent.png'),
@@ -37,24 +50,39 @@ export default function GiveScreen() {
   const [linksError, setLinksError] = useState<string | null>(null);
   const [loadedOnce, setLoadedOnce] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [selectedAmount, setSelectedAmount] = useState(50);
   const [customAmount, setCustomAmount] = useState('');
-  const [opening, setOpening] = useState<'preset' | 'custom' | null>(null);
+  const [opening, setOpening] = useState<number | 'custom' | null>(null);
   const [historyNote, setHistoryNote] = useState<string | null>(null);
+  // Can the server open Stripe with the amount already filled in? Starts false
+  // so the screen never promises a prefilled page it has not confirmed.
+  const [prefillReady, setPrefillReady] = useState(false);
 
   const firstFocusRef = useRef(true);
+  // A second tap inside the same frame would pass the `opening` state check
+  // before React re-renders, opening Stripe twice. This ref closes that gap.
+  const busyRef = useRef(false);
   const requestRef = useRef(0);
 
   /* ---------------------------------------------------------------- *
    * The giving links are read again every time the tab is opened and
    * on pull-to-refresh, so a link the ministry changed this morning is
-   * the link this phone uses this afternoon.
+   * the link this phone uses this afternoon. The same moment we ask the
+   * server whether custom amounts can be prefilled yet.
    * ---------------------------------------------------------------- */
   const loadLinks = useCallback(async (options?: { keepVisible?: boolean }) => {
     const ticket = requestRef.current + 1;
     requestRef.current = ticket;
     if (!options?.keepVisible) setLoadingLinks(true);
     setLinksError(null);
+    if (hasSupabase) {
+      // Never throws (it answers false on any failure), so the honest
+      // "enter this amount" wording stays until the server confirms.
+      isPrefilledCheckoutReady(invokeFunction)
+        .then((ready) => {
+          if (requestRef.current === ticket) setPrefillReady(ready);
+        })
+        .catch(() => setPrefillReady(false));
+    }
     try {
       const rows = await getGivingLinks();
       if (requestRef.current !== ticket) return;
@@ -98,27 +126,41 @@ export default function GiveScreen() {
     }
   }
 
-  const customLink = links.find((link) => /custom/i.test(link.label))?.url || customStripeUrl;
+  // A giving_links override for the custom link is honoured only if it is a
+  // Stripe page, because the copy below promises the person lands on Stripe.
+  const customOverride = links.find((link) => /custom/i.test(link.label))?.url;
+  const customLink = isStripeHttps(customOverride) ? customOverride.trim() : customStripeUrl;
   const websiteLink = links.find((link) => /online|give/i.test(link.label))?.url || givingPageUrl;
 
-  async function openGiving(amount?: number, custom = false) {
-    if (opening) return;
-    const parsedCustom = Number(customAmount.replace(/[^0-9.]/g, ''));
-    const finalAmount = custom ? (Number.isFinite(parsedCustom) && parsedCustom > 0 ? parsedCustom : undefined) : amount;
-    const cleanWebsiteLink = websiteLink.replace(/\/?$/, '/');
-    const url = custom ? customLink : `${cleanWebsiteLink}${finalAmount ? `?amount=${encodeURIComponent(String(finalAmount))}` : ''}`;
+  const parsedCustom = parseGiftAmount(customAmount);
+  const customCents = 'cents' in parsedCustom ? parsedCustom.cents : null;
+  const customProblem = 'problem' in parsedCustom ? parsedCustom.problem : null;
 
-    setOpening(custom ? 'custom' : 'preset');
+  const hasCustom = customCents !== null;
+  const customHint = !hasCustom
+    ? 'Type any amount from $1.00.'
+    : prefillReady
+      ? `Stripe will open with ${formatDollars(customCents)} already set.`
+      : `Stripe will ask for the amount. Enter ${formatDollars(customCents)} there.`;
+  const customButtonText =
+    opening === 'custom' ? 'Opening Stripe' : hasCustom ? `Give ${formatDollars(customCents)}` : 'Give';
+  const customButtonLabel = hasCustom
+    ? `Give ${formatDollars(customCents)} on Stripe`
+    : 'Give another amount. Type an amount first.';
+
+  async function noteSelection(amountCents: number, url: string) {
     let historyMissed = false;
     try {
-      await recordGivingSelection({ amountCents: finalAmount ? Math.round(finalAmount * 100) : undefined, checkoutUrl: url });
+      await recordGivingSelection({ amountCents, checkoutUrl: url });
     } catch {
       // Giving must never wait on our own record-keeping. We note it and say so
       // quietly underneath, rather than stopping the person from giving.
       historyMissed = true;
     }
     setHistoryNote(historyMissed ? 'We could not add this to your giving history. Your gift itself is not affected.' : null);
+  }
 
+  async function openUrl(url: string) {
     try {
       const canOpen = await Linking.canOpenURL(url);
       if (!canOpen) throw new Error('This phone cannot open the giving page.');
@@ -126,9 +168,80 @@ export default function GiveScreen() {
     } catch {
       Alert.alert(
         'We could not open the giving page',
-        `Please open this address in your browser and you can still give:\n\n${url}`
+        `Please open this address in your browser and you can still give:\n\n${url}\n\nOr visit ${websiteLink}`
       );
+    }
+  }
+
+  /** A preset goes straight to the Stripe page locked to that amount. */
+  async function givePreset(amount: number) {
+    if (opening !== null || busyRef.current) return;
+    busyRef.current = true;
+    setOpening(amount);
+    try {
+      const url = presetUrl(amount, GIVING_PRESET_LINKS, links);
+      if (url) {
+        await noteSelection(amount * 100, url);
+        await openUrl(url);
+        return;
+      }
+      // No locked page for this amount (should not happen with the verified
+      // table). Never send them to the any-amount page believing it is set.
+      await askThenOpenManual(amount * 100);
     } finally {
+      busyRef.current = false;
+      setOpening(null);
+    }
+  }
+
+  /** Tell the person, before they leave, that Stripe will ask for the amount. */
+  function askThenOpenManual(cents: number, reason?: string) {
+    const amountText = formatDollars(cents);
+    return new Promise<void>((resolve) => {
+      Alert.alert(
+        'Stripe will ask for the amount',
+        `${reason ? `${reason} ` : ''}Stripe's page will ask how much to give. Enter ${amountText} there.`,
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve() },
+          { text: 'Open Stripe', onPress: () => void openManualCustom(cents).finally(resolve) },
+        ],
+        { cancelable: true, onDismiss: () => resolve() }
+      );
+    });
+  }
+
+  /** The "any amount" Stripe link, where the person types the amount themselves. */
+  async function openManualCustom(cents: number) {
+    await noteSelection(cents, customLink);
+    await openUrl(customLink);
+  }
+
+  async function giveCustom() {
+    if (opening !== null || busyRef.current || customCents === null) return;
+    busyRef.current = true;
+    setOpening('custom');
+    try {
+      if (prefillReady) {
+        let checkoutUrl: string | null = null;
+        try {
+          checkoutUrl = await createPrefilledCheckout(invokeFunction, customCents);
+        } catch {
+          checkoutUrl = null;
+        }
+        if (checkoutUrl) {
+          await noteSelection(customCents, checkoutUrl);
+          await openUrl(checkoutUrl);
+          return;
+        }
+        // The prefilled page could not be made just now. Say so and let the
+        // person choose; never send them off believing the amount is set.
+        setPrefillReady(false);
+        await askThenOpenManual(customCents, `We could not set ${formatDollars(customCents)} for you just now.`);
+        return;
+      }
+      await openManualCustom(customCents);
+    } finally {
+      busyRef.current = false;
       setOpening(null);
     }
   }
@@ -142,6 +255,8 @@ export default function GiveScreen() {
           contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          automaticallyAdjustKeyboardInsets
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -184,7 +299,7 @@ export default function GiveScreen() {
 
           <View style={styles.securityRow}>
             <Ionicons name="lock-closed" size={16} color={theme.colors.accent} />
-            <Text style={styles.securityText}>Secure checkout on the ministry giving page</Text>
+            <Text style={styles.securityText}>Secure checkout on Stripe, the ministry's payment service</Text>
           </View>
 
           {loadingLinks && !loadedOnce ? (
@@ -198,7 +313,7 @@ export default function GiveScreen() {
             <View style={styles.statusCard}>
               <Ionicons name="cloud-offline-outline" size={20} color={theme.colors.accent} />
               <Text style={styles.statusCardText}>
-                {linksError} The buttons below still open the ministry giving page.
+                {linksError} The amounts below still open Stripe's secure giving page.
               </Text>
               <Pressable
                 accessibilityRole="button"
@@ -215,80 +330,93 @@ export default function GiveScreen() {
             <View style={styles.statusRow}>
               <Ionicons name="information-circle-outline" size={18} color={theme.colors.accent} />
               <Text style={styles.statusText}>
-                No extra giving options are listed yet. The buttons below open the ministry giving page.
+                No extra giving options are listed yet. The amounts below open Stripe's secure giving page.
               </Text>
             </View>
           ) : null}
 
           <Text style={styles.sectionTitle}>Choose an amount</Text>
-          <View style={styles.amountGrid}>
-            {presetAmounts.map((amount) => (
-              <Pressable
-                key={amount}
-                accessibilityRole="button"
-                accessibilityLabel={`Give ${amount} dollars`}
-                accessibilityState={{ selected: selectedAmount === amount }}
-                onPress={() => setSelectedAmount(amount)}
-                style={[styles.amountCard, selectedAmount === amount && styles.amountCardActive]}
-              >
-                <Text style={[styles.amountText, selectedAmount === amount && styles.amountTextActive]}>${amount}</Text>
-              </Pressable>
-            ))}
-          </View>
-
           <Text style={styles.handoffNote}>
-            The amount you choose is carried over to the ministry giving page, where the gift is completed securely.
+            Tap an amount to open Stripe&apos;s secure page with that amount already set. You will not need to type it again.
           </Text>
-
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`Give ${selectedAmount} dollars on the ministry giving page`}
-            accessibilityState={{ busy: opening === 'preset' }}
-            onPress={() => openGiving(selectedAmount)}
-            disabled={opening !== null}
-            style={[styles.primaryGiveButton, opening !== null && styles.primaryGiveButtonBusy]}
-          >
-            {opening === 'preset' ? (
-              <ActivityIndicator color={theme.colors.textOnAccent} />
-            ) : (
-              <Ionicons name="heart" size={22} color={theme.colors.textOnAccent} />
-            )}
-            <Text style={styles.primaryGiveText}>
-              {opening === 'preset' ? 'Opening giving page' : `Give $${selectedAmount}`}
-            </Text>
-            <Ionicons name="open-outline" size={19} color={theme.colors.textOnAccent} />
-          </Pressable>
+          <View style={styles.amountGrid}>
+            {GIVING_PRESETS.map((preset) => {
+              const busy = opening === preset.amount;
+              return (
+                <Pressable
+                  key={preset.amount}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Give $${preset.amount.toLocaleString('en-US')}. ${preset.caption}. Opens Stripe with this amount set.`}
+                  accessibilityState={{ busy, disabled: opening !== null }}
+                  onPress={() => givePreset(preset.amount)}
+                  disabled={opening !== null}
+                  style={({ pressed }) => [
+                    styles.amountCard,
+                    (pressed || busy) && styles.amountCardActive,
+                    opening !== null && !busy && styles.primaryGiveButtonBusy,
+                  ]}
+                >
+                  <View style={styles.amountTopRow}>
+                    <Text style={[styles.amountText, busy && styles.amountTextActive]}>
+                      ${preset.amount.toLocaleString('en-US')}
+                    </Text>
+                    {busy ? (
+                      <ActivityIndicator color={theme.colors.accent} />
+                    ) : (
+                      <Ionicons name="open-outline" size={17} color={theme.colors.accent} />
+                    )}
+                  </View>
+                  <Text style={styles.amountCaption}>{preset.caption}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
 
           {historyNote ? <Text style={styles.historyNote}>{historyNote}</Text> : null}
 
-          <View style={styles.customButton}>
-            <Ionicons name="card-outline" size={22} color={theme.colors.accent} />
-            <View style={styles.customCopy}>
-              <Text style={styles.customTitle}>Another amount</Text>
+          <View style={styles.customCard}>
+            <View style={styles.customHeader}>
+              <Ionicons name="card-outline" size={22} color={theme.colors.accent} />
+              <Text style={styles.customTitle}>Tithe, offering or another amount</Text>
+            </View>
+            <View style={styles.customInputRow}>
+              <Text style={styles.dollarSign}>$</Text>
               <TextInput
                 value={customAmount}
                 onChangeText={setCustomAmount}
                 keyboardType="decimal-pad"
-                accessibilityLabel="Type the amount you would like to give"
-                placeholder="Enter amount"
+                accessibilityLabel="Type the amount you would like to give, in dollars"
+                placeholder="0.00"
                 placeholderTextColor={theme.colors.textMuted}
                 style={styles.customInput}
+                returnKeyType="done"
+                onSubmitEditing={() => void giveCustom()}
               />
-              <Text style={styles.customBody}>Confirm this amount again on the secure checkout page.</Text>
             </View>
+            {customProblem ? (
+              <Text style={styles.customProblem} accessibilityLiveRegion="polite">
+                {customProblem}
+              </Text>
+            ) : (
+              <Text style={styles.customBody} accessibilityLiveRegion="polite">
+                {customHint}
+              </Text>
+            )}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Give another amount"
-              accessibilityState={{ busy: opening === 'custom' }}
-              onPress={() => openGiving(undefined, true)}
-              disabled={opening !== null}
-              style={[styles.customOpenButton, opening !== null && styles.primaryGiveButtonBusy]}
+              accessibilityLabel={customButtonLabel}
+              accessibilityState={{ busy: opening === 'custom', disabled: opening !== null || !hasCustom }}
+              onPress={() => void giveCustom()}
+              disabled={opening !== null || !hasCustom}
+              style={[styles.primaryGiveButton, (opening !== null || !hasCustom) && styles.primaryGiveButtonBusy]}
             >
               {opening === 'custom' ? (
                 <ActivityIndicator color={theme.colors.textOnAccent} />
               ) : (
-                <Ionicons name="chevron-forward" size={20} color={theme.colors.textOnAccent} />
+                <Ionicons name="heart" size={22} color={theme.colors.textOnAccent} />
               )}
+              <Text style={styles.primaryGiveText}>{customButtonText}</Text>
+              <Ionicons name="open-outline" size={19} color={theme.colors.textOnAccent} />
             </Pressable>
           </View>
 
@@ -407,20 +535,24 @@ const useStyles = createThemedStyles((t: AppTheme) =>
     amountCard: {
       flexBasis: '45%',
       flexGrow: 1,
-      minHeight: 80,
+      minWidth: 140,
+      minHeight: 96,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
       borderRadius: t.radius.lg,
       borderWidth: 2,
       borderColor: t.colors.border,
       backgroundColor: t.colors.surface,
-      alignItems: 'center',
-      justifyContent: 'center',
+      justifyContent: 'flex-start',
       ...t.elevation.medium,
     },
+    amountTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 },
+    amountCaption: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 18, marginTop: 4 },
     amountCardActive: { backgroundColor: t.colors.accentMuted, borderColor: t.colors.accentBorder },
     amountText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 27 },
     amountTextActive: { color: t.colors.accent },
 
-    handoffNote: { color: t.colors.textSecondary, lineHeight: 21, marginTop: 12, fontWeight: '700' },
+    handoffNote: { color: t.colors.textSecondary, lineHeight: 21, marginBottom: 12, fontWeight: '700' },
 
     primaryGiveButton: {
       marginTop: 18,
@@ -435,46 +567,35 @@ const useStyles = createThemedStyles((t: AppTheme) =>
       ...t.elevation.high,
     },
     primaryGiveButtonBusy: { opacity: 0.7 },
-    primaryGiveText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: 20 },
+    primaryGiveText: { flexShrink: 1, color: t.colors.textOnAccent, fontWeight: '900', fontSize: 20, textAlign: 'center' },
     historyNote: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 20, marginTop: 10 },
 
-    customButton: {
-      marginTop: 13,
-      minHeight: 84,
+    customCard: {
+      marginTop: 18,
       borderRadius: t.radius.lg,
       backgroundColor: t.colors.surface,
       borderWidth: 1,
       borderColor: t.colors.borderStrong,
-      paddingHorizontal: 14,
-      paddingVertical: 12,
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 13,
+      padding: 14,
       ...t.elevation.medium,
     },
-    customCopy: { flex: 1 },
-    customTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 17 },
-    customBody: { color: t.colors.textSecondary, marginTop: 4, lineHeight: 19 },
-    customInput: {
-      marginTop: 8,
-      minHeight: 46,
+    customHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+    customTitle: { flex: 1, color: t.colors.textPrimary, fontWeight: '900', fontSize: 17 },
+    customInputRow: {
+      marginTop: 12,
+      flexDirection: 'row',
+      alignItems: 'center',
+      minHeight: 52,
       borderRadius: t.radius.md,
       borderWidth: 1,
       borderColor: t.colors.borderStrong,
       backgroundColor: t.colors.surfaceSunken,
-      color: t.colors.textPrimary,
       paddingHorizontal: 12,
-      fontWeight: '800',
     },
-    customOpenButton: {
-      width: 48,
-      height: 48,
-      borderRadius: 24,
-      backgroundColor: t.colors.accentSolid,
-      alignItems: 'center',
-      justifyContent: 'center',
-      ...t.elevation.low,
-    },
+    dollarSign: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 22, marginRight: 4 },
+    customInput: { flex: 1, minHeight: 50, color: t.colors.textPrimary, fontWeight: '800', fontSize: 22 },
+    customBody: { color: t.colors.textSecondary, marginTop: 8, lineHeight: 20, fontWeight: '700' },
+    customProblem: { color: t.colors.danger, marginTop: 8, lineHeight: 20, fontWeight: '800' },
 
     impactCard: {
       marginTop: 20,

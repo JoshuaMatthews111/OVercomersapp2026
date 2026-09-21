@@ -150,7 +150,8 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
       .select('id, series_id, title, speaker, scripture_reference, description, thumbnail_url, video_url, audio_url, duration_seconds, published_at, is_featured')
       .eq('status', 'published')
       .order('published_at', { ascending: false })
-      .limit(80)
+      // The whole YouTube teaching library (55 on 2026-09-21) plus room to grow.
+      .limit(250)
   ]);
 
   if (seriesError) throw seriesError;
@@ -189,6 +190,35 @@ export async function getMessageLibrary(): Promise<{ series: Series[]; sermons: 
   });
 
   return { series: mappedSeries, sermons: mappedSermons };
+}
+
+/**
+ * The newest teachings only, for Home. Same rules as the library: published
+ * rows, real covers, never a sample. Throws on failure like every other read.
+ */
+export async function getLatestSermons(limit = 6): Promise<Sermon[]> {
+  if (!hasSupabase) notConnected();
+  const { data, error } = await supabase
+    .from('sermons')
+    .select('id, series_id, title, speaker, scripture_reference, description, thumbnail_url, video_url, audio_url, duration_seconds, published_at, is_featured')
+    .eq('status', 'published')
+    .order('published_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data || []).map((row) => ({
+    id: row.id,
+    seriesId: row.series_id,
+    title: row.title,
+    speaker: row.speaker || 'Overcomers Global Network',
+    scriptureReference: row.scripture_reference || '',
+    description: row.description || '',
+    thumbnailUrl: row.thumbnail_url || (row.video_url ? youtubeThumbnailUrl(row.video_url) || undefined : undefined),
+    videoUrl: row.video_url || undefined,
+    audioUrl: row.audio_url || undefined,
+    durationSeconds: row.duration_seconds || undefined,
+    publishedAt: row.published_at,
+    isFeatured: row.is_featured
+  }));
 }
 
 export async function getEvents(): Promise<Event[]> {

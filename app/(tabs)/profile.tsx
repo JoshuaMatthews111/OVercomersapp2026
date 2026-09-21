@@ -474,14 +474,21 @@ export default function ProfileScreen() {
         onProgress: setUploadFraction,
         signal: controller.signal,
       });
-      await supabase.from('profiles').upsert({
+      // The photo only counts as saved once the profile row says so: that row
+      // is what chat bubbles, member lists and this header all read. This
+      // result used to be ignored, so a refused write still said "saved" here
+      // while everyone else kept seeing initials.
+      const { error: saveError } = await supabase.from('profiles').upsert({
         id: session.user.id,
         display_name: displayName.trim() || session.user.user_metadata?.display_name || access.displayName || session.user.email,
         avatar_url: upload.publicUrl,
       });
-      await supabase.auth.updateUser({ data: { avatar_url: upload.publicUrl } });
+      if (saveError) throw saveError;
       setAvatarUrl(upload.publicUrl);
-      setNotice('Your new photo is saved.');
+      // The copy on the sign-in record is a convenience only. If it fails the
+      // photo is still saved where everyone reads it.
+      await supabase.auth.updateUser({ data: { avatar_url: upload.publicUrl } }).catch(() => undefined);
+      setNotice('Your new photo is saved. It now shows in chat and member lists.');
     } catch (err) {
       if (err instanceof UploadError && err.kind === 'cancelled') {
         setNotice('Photo upload stopped. Nothing was changed.');

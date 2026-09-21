@@ -738,3 +738,30 @@ export function progressBarStyles(theme: AppTheme, height = 10) {
     },
   };
 }
+
+/**
+ * The Sepia page: the book reader's paper look. The app itself has no sepia theme, so
+ * only app/book reads these, through `SEPIA` in lib/bookReader.ts. Each ratio below is
+ * WCAG 2.x, computed against `page` (#F5ECD7) and against `raised` (#EFE3C8);
+ * qa/book-reader.test.mjs recomputes them from this very object.
+ *
+ *   text          #3A2E1F   11.23:1 on page, 10.37:1 on raised   (body, AA 4.5)
+ *   textSecondary #5E4B33    7.06:1 on page,  6.52:1 on raised
+ *   accent        #7A3E0E    7.08:1 on page,  6.54:1 on raised   (scripture)
+ *   border        #8A7355    3.83:1 on page,  3.54:1 on raised   (1.4.11, 3:1)
+ *   progressFill  #7A3E0E    on progressTrack #D9C9A6 — see the test
+ *   onAccent      #FFF8EA    on accentSolid #7A3E0E
+ */
+export const sepiaReader = {
+  page: '#F5ECD7',
+  raised: '#EFE3C8',
+  text: '#3A2E1F',
+  textSecondary: '#5E4B33',
+  accent: '#7A3E0E',
+  border: '#8A7355',
+  progressTrack: '#D9C9A6',
+  progressFill: '#7A3E0E',
+  accentSolid: '#7A3E0E',
+  onAccent: '#FFF8EA',
+  overlay: 'rgba(58,46,31,0.45)',
+} as const;

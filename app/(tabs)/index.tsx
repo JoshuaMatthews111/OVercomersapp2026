@@ -12,17 +12,20 @@ import {
   deleteMyStory,
   getAppStories,
   getEvents,
+  getLatestSermons,
   getMediaItems,
   storyWentOut,
   subscribeToStories,
 } from '../../lib/contentService';
+import { fileKind, playbackKind, thumbnailFromUrl, youtubeVideoId } from '../../lib/embed';
 import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../../lib/errorMessages';
+import { useNowPlaying } from '../../lib/nowPlaying';
 import { publicEnv } from '../../lib/publicEnv';
 import { isStoryLive, storyRemainingLabel } from '../../lib/storyTime';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
 import { UploadError, friendlyUploadError, uploadPickedAsset } from '../../lib/uploadService';
-import { Event, MediaItem } from '../../types/models';
+import { Event, MediaItem, Sermon } from '../../types/models';
 import { StorySlide, openStoryPlaylist } from '../story-viewer';
 
 /* ---------------------------------------------------------------------------
@@ -52,11 +55,16 @@ import { StorySlide, openStoryPlaylist } from '../story-viewer';
 const GLOBE_SOURCE_WIDTH = 1448;
 const GLOBE_SOURCE_HEIGHT = 1086;
 
+const BOOK_TITLE = 'The Gospel of Salvation';
+const BOOK_AUTHOR = 'Prophet Joshua Matthews';
+
 const art = {
   seal: require('../../assets/images/ogn-logo-transparent.png'),
   heroGlobeDark: require('../../assets/images/ogn-layers/home-globe-dark.png'),
   heroGlobeLight: require('../../assets/images/ogn-layers/home-globe-light.png'),
   prayerHands: require('../../assets/images/ogn-prayer-hands-v5.png'),
+  // The owner's free book; the reader lives at /book.
+  bookCover: require('../../assets/images/book/gospel-of-salvation-cover.png'),
 };
 
 type GlobeArt = {
@@ -138,7 +146,7 @@ export default function HomeScreen() {
   const canManage = canReachContentTools(access);
 
   const [events, setEvents] = useState<Event[]>([]);
-  const [latestMessage, setLatestMessage] = useState<MediaItem | null>(null);
+  const [latestMessage, setLatestMessage] = useState<LatestMessage | null>(null);
   const [remoteStories, setRemoteStories] = useState<AppStoryRow[]>([]);
   const [loadingStories, setLoadingStories] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -171,14 +179,15 @@ export default function HomeScreen() {
     loading.current = true;
     if (mode === 'pull') setRefreshing(true);
     try {
-      const [stories, upcoming, media] = await Promise.all([
+      const [stories, upcoming, media, teachings] = await Promise.all([
         getAppStories(),
         getEvents().catch(() => [] as Event[]),
         getMediaItems({ limit: 8 }).catch(() => [] as MediaItem[]),
+        getLatestSermons(1).catch(() => [] as Sermon[]),
       ]);
       setRemoteStories(stories);
       setEvents(upcoming);
-      setLatestMessage(pickLatestMessage(media));
+      setLatestMessage(pickLatestMessage(media, teachings));
       setBanner((current) => (current?.tone === 'problem' ? null : current));
     } catch (error) {
       setBanner({ text: friendlyError(error, 'We could not load the latest just now. Pull down to try again.'), tone: 'problem' });
@@ -386,6 +395,21 @@ export default function HomeScreen() {
 
           <LatestMessageCard item={latestMessage} styles={styles} theme={theme} />
 
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Free book: Read ${BOOK_TITLE}, by ${BOOK_AUTHOR}. Start reading.`}
+            onPress={() => router.push('/book' as any)}
+            style={styles.bookCard}
+          >
+            <Image source={art.bookCover} accessible={false} resizeMode="cover" style={styles.bookCover} />
+            <View style={styles.bookCopy}>
+              <Text style={styles.bookOverline}>FREE BOOK</Text>
+              <Text style={styles.bookTitle}>{`Read ${BOOK_TITLE}`}</Text>
+              <Text style={styles.bookBody}>{`A free book by ${BOOK_AUTHOR}.`}</Text>
+              <Text style={styles.bookLink}>Start reading →</Text>
+            </View>
+          </Pressable>
+
           <View style={styles.sectionHeader}>
             <Text numberOfLines={1} adjustsFontSizeToFit={true} minimumFontScale={0.75} style={styles.sectionTitle}>
               Stories Around the World
@@ -511,16 +535,40 @@ export default function HomeScreen() {
 
 /* --- pieces ------------------------------------------------------------- */
 
-function LatestMessageCard({ item, styles, theme }: { item: MediaItem | null; styles: Styles; theme: AppTheme }) {
+/**
+ * What the Home card shows: a featured post, or else the newest real teaching.
+ * `url` is set only when the thing can play in the app's own player (a
+ * YouTube/Vimeo link or an audio/video file); anything else opens Media.
+ */
+type LatestMessage = { title: string; speaker?: string; cover?: string; featured: boolean; url?: string; fallbackKind: 'audio' | 'video' };
+
+/** A link the in-app player can play: a file it knows, or a YouTube video. Documents and web pages are not. */
+function inAppPlayable(url?: string): string | undefined {
+  if (!url) return undefined;
+  return fileKind(url) || youtubeVideoId(url) ? url : undefined;
+}
+
+function LatestMessageCard({ item, styles, theme }: { item: LatestMessage | null; styles: Styles; theme: AppTheme }) {
   const [coverFailed, setCoverFailed] = useState(false);
-  const cover = item?.thumbnailUrl;
+  const { play } = useNowPlaying();
+  const cover = item?.cover;
   const showCover = Boolean(cover) && !coverFailed;
+
+  // The card shows a play button, so it plays — right here, in the app's own
+  // player. Only something that cannot play in the app goes to Media instead.
+  function onPress() {
+    if (item?.url) {
+      play({ title: item.title, speaker: item.speaker, artwork: item.cover, url: item.url, type: playbackKind(item.url, item.fallbackKind) });
+      return;
+    }
+    router.push('/(tabs)/messages' as any);
+  }
 
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={item ? `Watch ${item.title} in Media` : 'Open Media to watch messages'}
-      onPress={() => router.push('/(tabs)/messages' as any)}
+      accessibilityLabel={item ? (item.url ? `Play ${item.title}` : `Open ${item.title} in Media`) : 'Open Media to watch messages'}
+      onPress={onPress}
       style={styles.messageCard}
     >
       <View style={styles.messageArtWrap}>
@@ -551,7 +599,7 @@ function LatestMessageCard({ item, styles, theme }: { item: MediaItem | null; st
       </View>
 
       <View style={styles.messageCopy}>
-        <Text style={styles.messageOverline}>{item ? 'LATEST MESSAGE' : 'MESSAGES'}</Text>
+        <Text style={styles.messageOverline}>{item ? (item.featured ? 'FEATURED MESSAGE' : 'LATEST TEACHING') : 'MESSAGES'}</Text>
         <Text style={styles.messageTitle} numberOfLines={2} adjustsFontSizeToFit={true} minimumFontScale={0.85}>
           {item ? item.title : 'Watch with us'}
         </Text>
@@ -1210,11 +1258,38 @@ function groupStories(stories: AppStoryRow[]): StoryGroup[] {
   return groups;
 }
 
-/** The newest thing a person can actually watch or listen to. */
-function pickLatestMessage(items: MediaItem[]): MediaItem | null {
-  const playable = items.filter((item) => item.externalUrl || item.fileUrl);
-  const featured = playable.find((item) => item.isFeatured);
-  return featured || playable[0] || null;
+/**
+ * The newest thing a person can actually watch or listen to. A post the
+ * ministry deliberately featured wins; otherwise the newest teaching from the
+ * library (the ministry's own YouTube channel). A plain upload that nobody
+ * featured is never promoted onto Home by itself — that is how a smoke-test
+ * PDF once headlined the app.
+ */
+function pickLatestMessage(items: MediaItem[], teachings: Sermon[]): LatestMessage | null {
+  const featured = items.find((item) => item.isFeatured && (item.externalUrl || item.fileUrl));
+  if (featured) {
+    return {
+      title: featured.title,
+      speaker: featured.speaker,
+      cover: featured.thumbnailUrl || thumbnailFromUrl(featured.externalUrl || featured.fileUrl || '') || undefined,
+      featured: true,
+      // Articles and documents open from Media (outside the app), never in the player.
+      url: featured.mediaType === 'article' || featured.mediaType === 'devotional' ? undefined : inAppPlayable(featured.externalUrl || featured.fileUrl),
+      fallbackKind: featured.mediaType === 'music' ? 'audio' : 'video',
+    };
+  }
+  const newest = teachings.find((sermon) => sermon.videoUrl || sermon.audioUrl);
+  if (newest) {
+    return {
+      title: newest.title,
+      speaker: newest.speaker,
+      cover: newest.thumbnailUrl,
+      featured: Boolean(newest.isFeatured),
+      url: inAppPlayable(newest.videoUrl || newest.audioUrl),
+      fallbackKind: newest.videoUrl ? 'video' : 'audio',
+    };
+  }
+  return null;
 }
 
 function messageForPostFailure(error: unknown) {
@@ -1335,6 +1410,27 @@ const useStyles = createThemedStyles((t: AppTheme) =>
     messageOverline: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.overline, letterSpacing: 1.1 },
     messageTitle: { color: t.colors.textPrimary, fontSize: 23, lineHeight: 28, fontWeight: '900' },
     messageMeta: { color: t.colors.textSecondary, fontSize: t.type.meta, fontWeight: '700' },
+
+    bookCard: {
+      alignSelf: 'stretch',
+      minHeight: 136,
+      marginTop: 14,
+      padding: 14,
+      gap: 14,
+      flexDirection: 'row',
+      alignItems: 'center',
+      borderRadius: t.radius.xl,
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      ...t.elevation.medium,
+    },
+    bookCover: { width: 72, height: 108, borderRadius: 6, backgroundColor: t.colors.surfaceSunken },
+    bookCopy: { flex: 1, minWidth: 0, gap: 4 },
+    bookOverline: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.overline, letterSpacing: 1.1 },
+    bookTitle: { color: t.colors.textPrimary, fontSize: 18, lineHeight: 23, fontWeight: '900' },
+    bookBody: { color: t.colors.textSecondary, fontSize: 14, lineHeight: 20 },
+    bookLink: { color: t.colors.accent, fontSize: 14, fontWeight: '800', marginTop: 4 },
 
     sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginTop: 22, marginBottom: 11 },
     sectionTitle: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.sectionTitle, fontWeight: '900' },

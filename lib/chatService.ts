@@ -6,7 +6,7 @@ import { FriendlyError } from './errorMessages';
 import { UploadError, bucketSizeLimit, currentUserId, formatBytes, uploadFileToBucket } from './uploadService';
 // uploadService re-exports only part of this module, so the shrink helpers are
 // imported from where they live.
-import { CONTENT_IMAGE_MAX_EDGE, isImageMime, prepareImageForUpload } from './uploadBody';
+import { AVATAR_IMAGE_MAX_EDGE, CONTENT_IMAGE_MAX_EDGE, isImageMime, prepareImageForUpload } from './uploadBody';
 
 import { hasSupabase } from './publicEnv';
 
@@ -47,6 +47,12 @@ export type ChatMessage = {
   shared?: SharedRef;
   /** Set on a message this phone is still sending. Drives the progress bar on the bubble. */
   sendingProgress?: number;
+  /**
+   * True for a message its writer (or a leader) deleted for everyone. Only the
+   * id, the writer and the time come back — never the words — and the room
+   * shows "This message was deleted" in its place.
+   */
+  deleted?: boolean;
 };
 
 const ATTACHMENT_BUCKET = 'chat-attachments';
@@ -277,6 +283,7 @@ function noteReader(userId: string | null) {
   blockState = null;
   blockStateInFlight = null;
   moderatorAnswer = null;
+  hiddenState = null;
   reportedTargets.clear();
 }
 
@@ -349,6 +356,37 @@ async function showsContentFrom(userId?: string): Promise<boolean> {
   return readerIsModerator(state.userId);
 }
 
+/* ---------------------------------------------------------------------------
+ * Delete for me — the second list this module filters by, in the same place
+ *
+ * `public.chat_message_hidden` holds (user, message) pairs, readable and
+ * writable only by that user. The room reads the list once per session and
+ * keeps it up to date as the person hides things, exactly like the blocked
+ * list above. A failed read fails OPEN (shows the room), for the same reason.
+ * ------------------------------------------------------------------------- */
+
+let hiddenState: { userId: string; ids: Set<string> } | null = null;
+
+async function currentHiddenIds(): Promise<Set<string>> {
+  if (!hasSupabase) return new Set();
+  const userId = await currentUserId();
+  noteReader(userId);
+  if (!userId) return new Set();
+  if (hiddenState && hiddenState.userId === userId) return hiddenState.ids;
+  const { data, error } = await supabase.from('chat_message_hidden').select('message_id').eq('user_id', userId);
+  // Not cached on failure: the next load asks again.
+  if (error) return new Set();
+  hiddenState = { userId, ids: new Set(((data || []) as any[]).map((row) => row.message_id).filter(Boolean)) };
+  return hiddenState.ids;
+}
+
+/** Drop every message this person chose "Delete for me" on. */
+async function hideHiddenMessages<T extends { id: string }>(items: T[]): Promise<T[]> {
+  const hidden = await currentHiddenIds();
+  if (!hidden.size) return items;
+  return items.filter((item) => !hidden.has(item.id));
+}
+
 function normalizeRoomType(type?: string): ChatRoom['type'] {
   if (type === 'announcement' || type === 'leader' || type === 'regional' || type === 'prayer' || type === 'direct' || type === 'group' || type === 'general' || type === 'global') {
     return type;
@@ -357,6 +395,7 @@ function normalizeRoomType(type?: string): ChatRoom['type'] {
 }
 
 function roomFromRow(row: any): ChatRoom {
+  const type = normalizeRoomType(row.channel_type);
   return {
     id: row.id,
     name: row.name,
@@ -364,7 +403,13 @@ function roomFromRow(row: any): ChatRoom {
     members: 0,
     // No read tracking exists yet, so no invented unread counts.
     unread: 0,
-    type: normalizeRoomType(row.channel_type),
+    type,
+    avatarUrl: row.avatar_url || undefined,
+    createdBy: row.created_by || undefined,
+    // A one-to-one chat keeps a private lookup key in `description`. It is
+    // never shown to anybody.
+    description: type === 'direct' ? undefined : (row.description || undefined),
+    isPublic: typeof row.is_public === 'boolean' ? row.is_public : undefined,
   };
 }
 
@@ -413,6 +458,8 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean)),
     signAttachmentLinks(data.map((row: any) => row.attachment_path).filter(Boolean)),
   ]);
+  const oldest = data.length ? (data[data.length - 1] as any).created_at : null;
+  const [tombstones, tombstoneProfiles] = await readTombstones(channelId, oldest, data.length >= 50);
   const messages: ChatMessage[] = data.reverse().map((row: any) => ({
     id: row.id,
     channelId: row.channel_id,
@@ -425,8 +472,44 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     attachment: rowAttachment(row, links),
     shared: row.shared_ref || undefined,
   }));
-  // The one place a room's history is filtered. See the blocking section above.
-  return hideBlocked(messages, (message) => message.userId);
+  for (const row of tombstones) {
+    messages.push({
+      id: row.id,
+      channelId,
+      userId: row.user_id || undefined,
+      body: '',
+      displayName: tombstoneProfiles.get(row.user_id)?.displayName || profiles.get(row.user_id)?.displayName || 'OGN Member',
+      avatarUrl: tombstoneProfiles.get(row.user_id)?.avatarUrl || profiles.get(row.user_id)?.avatarUrl,
+      createdAt: row.created_at,
+      deleted: true,
+    });
+  }
+  messages.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  // The one place a room's history is filtered: blocked people (see the
+  // blocking section above) and anything this person deleted for themselves.
+  return hideHiddenMessages(await hideBlocked(messages, (message) => message.userId));
+}
+
+/**
+ * Messages deleted for everyone inside the window this room is showing, as
+ * ids and times only. A backend without the function simply shows no
+ * "This message was deleted" lines — the conversation is unaffected.
+ */
+async function readTombstones(channelId: string, oldest: string | null, fullPage: boolean) {
+  const empty: [any[], Map<string, { displayName: string; avatarUrl?: string }>] = [[], new Map()];
+  try {
+    // With a full page, only tombstones newer than the oldest message shown.
+    // With fewer, the whole (recent) history is on screen.
+    const since = fullPage && oldest ? oldest : null;
+    const { data, error } = await supabase.rpc('get_chat_deleted_messages', { p_channel_id: channelId, p_since: since });
+    if (error || !data) return empty;
+    const rows = (data as any[]).filter((row) => row && row.id);
+    if (!rows.length) return empty;
+    const profiles = await getProfilesByIds(rows.map((row) => row.user_id).filter(Boolean));
+    return [rows, profiles] as typeof empty;
+  } catch {
+    return empty;
+  }
 }
 
 /**
@@ -506,6 +589,25 @@ export async function forwardMediaToChat(input: {
 /** What the live connection is doing, so a screen can say so honestly. */
 export type ChatConnectionState = 'connecting' | 'live' | 'reconnecting';
 
+const CHAT_CHANGED_EVENT = 'message-changed';
+
+/**
+ * Tell every other open copy of this room to read it again, after a message
+ * was deleted for everyone or held. Best effort: if it does not arrive, the
+ * other phones catch up the next time they open or refresh the room.
+ */
+export async function announceChatChange(channel: RealtimeChannel | null | undefined): Promise<boolean> {
+  if (!channel) return false;
+  try {
+    const result = await channel.send({ type: 'broadcast', event: CHAT_CHANGED_EVENT, payload: {} });
+    return result === 'ok';
+  } catch {
+    // A closed socket is not the person's problem: the change itself is
+    // already saved, and the other phones see it on their next refresh.
+    return false;
+  }
+}
+
 /**
  * Listen for new messages in one room.
  *
@@ -517,6 +619,7 @@ export function subscribeToChat(
   channelId: string,
   onMessage: (message: ChatMessage) => void,
   onState?: (state: ChatConnectionState) => void,
+  onChanged?: () => void,
 ): RealtimeChannel | undefined {
   if (!hasSupabase) return undefined;
   try {
@@ -558,6 +661,16 @@ export function subscribeToChat(
             .catch(() => onMessage(base));
         },
       )
+      // Somebody deleted or held a message. A database UPDATE cannot reach the
+      // other phones here: once a message is deleted or held, row-level
+      // security no longer lets them read the row, so Realtime drops the
+      // event for them. The phone that made the change says so on the room's
+      // channel instead, and every open copy of the room reads it again. The
+      // signal carries nothing but "look again" — what comes back is still
+      // decided by the database — so a forged one can only cause a re-read.
+      .on('broadcast', { event: CHAT_CHANGED_EVENT }, () => {
+        onChanged?.();
+      })
       .subscribe((status) => {
         if (status === 'SUBSCRIBED') return onState?.('live');
         if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') return onState?.('reconnecting');
@@ -727,33 +840,212 @@ export async function createChatRoom(input: { name: string; memberIds: string[];
 /** A room that was just made, plus how many invited people could not be added. */
 export type NewChatRoom = ChatRoom & { notAdded?: number };
 
-export async function moderateChatMessage(messageId: string, action: 'remove' | 'flag' = 'remove') {
-  if (!hasSupabase) return { id: messageId };
-  const patch = action === 'remove' ? { deleted_at: new Date().toISOString(), is_flagged: true } : { is_flagged: true };
+/**
+ * A leader starts a named group: name, a short description, public or
+ * private, and the first people in it. The leader is always a member.
+ *
+ * A PUBLIC group needs nobody picked — anyone in the network can find it in
+ * Chat and join it, the same way they join every other public room
+ * (joinChatRoom). A private group needs at least one other person.
+ *
+ * Members keep the "New chat" way of starting a group exactly as it was.
+ */
+export async function createChatGroup(input: {
+  name: string;
+  description?: string;
+  isPublic: boolean;
+  memberIds: string[];
+  region?: string;
+}): Promise<NewChatRoom> {
+  if (!hasSupabase) throw new FriendlyError('Chat is not available in this version of the app yet.');
+  const me = await currentUserId();
+  if (!me) throw new FriendlyError('Please sign in to start a group.');
+  const name = input.name.trim().replace(/\s+/g, ' ');
+  if (!name) throw new FriendlyError('Give the group a name so people know what it is.');
+  if (name.length > 80) throw new FriendlyError('Please keep the group name under 80 letters.');
+  const description = (input.description || '').trim();
+  if (description.length > 300) throw new FriendlyError('Please keep the description under 300 letters.');
+
+  const invited = Array.from(new Set(input.memberIds.filter((id) => id && id !== me)));
+  if (!input.isPublic && !invited.length) throw new FriendlyError('A private group needs at least one other person. Add someone, or make the group public.');
+
   const { data, error } = await supabase
-    .from('chat_messages')
-    .update(patch)
-    .eq('id', messageId)
-    .select('id')
+    .from('chat_channels')
+    .insert({
+      name,
+      description: description || null,
+      channel_type: 'group',
+      region: input.region || null,
+      is_public: input.isPublic,
+      is_mandatory: false,
+      created_by: me,
+    })
+    .select('id, name, region, channel_type, description, is_public, created_by, avatar_url')
     .single();
-  if (error) throw error;
-  return data;
+  if (error) {
+    if (refusedToCreate(error)) throw new FriendlyError('Your account is not allowed to start a group. Please ask an admin.');
+    throw error;
+  }
+
+  const room = roomFromRow(data);
+  await addChatMember(room.id, me);
+  const notAdded: string[] = [];
+  for (const id of invited) {
+    try {
+      await addChatMember(room.id, id);
+    } catch {
+      notAdded.push(id);
+    }
+  }
+  return { ...room, notAdded: notAdded.length };
 }
 
-// A member takes back their own message. Soft delete, so moderators can still see it.
-export async function deleteOwnChatMessage(messageId: string) {
+/* ---------------------------------------------------------------------------
+ * Group pictures
+ *
+ * Stored in the public `chat-group-pictures` bucket under `<room id>/`, the
+ * same way profile photos live in `profile-avatars` under `<user id>/`. Only a
+ * moderator or the person who started the room may write there, and the room
+ * row is changed only through set_chat_channel_avatar(), which checks the same
+ * thing on the server. Shrunk to 512px first, like a profile photo.
+ * ------------------------------------------------------------------------- */
+
+const GROUP_PICTURE_BUCKET = 'chat-group-pictures';
+
+export async function uploadChatGroupPicture(
+  channelId: string,
+  picked: { uri: string; mimeType?: string | null; width?: number | null; height?: number | null; fileName?: string | null },
+  options?: { onProgress?: (fraction: number) => void; signal?: AbortSignal },
+): Promise<string> {
+  if (!hasSupabase) throw new UploadError('Pictures are not switched on in this version of the app yet.', 'unsupported');
+  const userId = await currentUserId();
+  if (!userId) throw new UploadError('Please sign in before changing a group picture.', 'auth');
+  const prepared = await prepareImageForUpload({
+    uri: picked.uri,
+    mimeType: picked.mimeType || 'image/jpeg',
+    width: picked.width,
+    height: picked.height,
+    maxEdge: AVATAR_IMAGE_MAX_EDGE,
+  });
+  const mimeType = prepared.mimeType || picked.mimeType || 'image/jpeg';
+  const extension = mimeType === 'image/png' ? 'png' : mimeType === 'image/webp' ? 'webp' : 'jpg';
+  const objectPath = `${channelId}/${Date.now()}-group.${extension}`;
+  await uploadFileToBucket({
+    uri: prepared.uri,
+    bucketId: GROUP_PICTURE_BUCKET,
+    objectPath,
+    mimeType,
+    sizeBytes: prepared.sizeBytes || undefined,
+    upsert: false,
+    onProgress: options?.onProgress,
+    signal: options?.signal,
+  });
+  const { data } = supabase.storage.from(GROUP_PICTURE_BUCKET).getPublicUrl(objectPath);
+  const { error } = await supabase.rpc('set_chat_channel_avatar', { p_channel_id: channelId, p_avatar_url: data.publicUrl });
+  if (error) throw permissionWords(error, 'Only a leader or the person who started this group can change its picture.');
+  return data.publicUrl;
+}
+
+/** Take the picture off a group. It goes back to its icon badge. */
+export async function clearChatGroupPicture(channelId: string) {
+  if (!hasSupabase) return;
+  const { error } = await supabase.rpc('set_chat_channel_avatar', { p_channel_id: channelId, p_avatar_url: null });
+  if (error) throw permissionWords(error, 'Only a leader or the person who started this group can change its picture.');
+}
+
+/* ---------------------------------------------------------------------------
+ * Delete for everyone, Delete for me, Hold for review
+ *
+ * The two that change what OTHER people see go through database functions
+ * (supabase/2026-09-21-chat-actions-and-group-pictures.sql), which decide who
+ * may do it on the server — the phone's idea of somebody's role is never
+ * trusted. The database also refuses a leader who tries to remove or hold a
+ * message written by an admin (DO-NOT-BREAK item 5), and the words it sends
+ * back are shown as they are.
+ * ------------------------------------------------------------------------- */
+
+function permissionWords(error: unknown, fallback: string) {
+  const message = String((error as { message?: unknown })?.message ?? '');
+  const code = String((error as { code?: unknown })?.code ?? '');
+  // Our own functions raise plain sentences with these codes.
+  if ((code === '42501' || code === 'P0002' || code === '22023') && message && !/row-level|violates|permission denied/i.test(message)) {
+    return new FriendlyError(message);
+  }
+  if (code === '42501') return new FriendlyError(fallback);
+  return error;
+}
+
+/**
+ * Soft delete for everyone. The writer may always do it; a leader may do it to
+ * anybody except an admin. The room then shows "This message was deleted".
+ */
+export async function deleteChatMessageForEveryone(messageId: string) {
   if (!hasSupabase) return { id: messageId };
   const userId = await currentUserId();
-  if (!userId) throw new FriendlyError('Please sign in before removing a message.');
-  const { data, error } = await supabase
-    .from('chat_messages')
-    .update({ deleted_at: new Date().toISOString() })
-    .eq('id', messageId)
-    .eq('user_id', userId)
-    .select('id')
-    .single();
+  if (!userId) throw new FriendlyError('Please sign in before deleting a message.');
+  const { error } = await supabase.rpc('chat_delete_message_for_everyone', { p_message_id: messageId });
+  if (error) throw permissionWords(error, 'Only the person who wrote this, or a leader, can delete it for everyone.');
+  return { id: messageId };
+}
+
+/** Anyone, on any message they can see: it disappears for them and nobody else. */
+export async function hideChatMessageForMe(messageId: string) {
+  if (!hasSupabase) return { id: messageId };
+  const userId = await currentUserId();
+  if (!userId) throw new FriendlyError('Please sign in first.');
+  const { error } = await supabase
+    .from('chat_message_hidden')
+    .upsert({ user_id: userId, message_id: messageId }, { onConflict: 'user_id,message_id', ignoreDuplicates: true });
   if (error) throw error;
-  return data;
+  if (hiddenState && hiddenState.userId === userId) hiddenState.ids.add(messageId);
+  else hiddenState = null;
+  return { id: messageId };
+}
+
+/**
+ * Soft hold, for moderators and above. The message is hidden from everyone
+ * but its writer and the leaders, lands in Admin > Needs your look, and
+ * Approve there puts it back.
+ */
+export async function holdChatMessage(messageId: string) {
+  if (!hasSupabase) return { id: messageId };
+  const { error } = await supabase.rpc('chat_hold_message', { p_message_id: messageId });
+  if (error) throw permissionWords(error, 'Only a leader can hold a message for review.');
+  return { id: messageId };
+}
+
+const adminAuthors = new Map<string, boolean>();
+
+/**
+ * Whether a message's writer is an admin, so a leader is not offered Delete
+ * for everyone or Hold on it (DO-NOT-BREAK item 5). Read from chat_profiles,
+ * which every signed-in person may read. Only a courtesy: the database refuses
+ * the action either way. Unknown reads as "not an admin", so the button shows
+ * and the server's plain refusal explains itself.
+ */
+export async function chatAuthorIsAdmin(userId?: string | null): Promise<boolean> {
+  if (!userId || !hasSupabase) return false;
+  const known = adminAuthors.get(userId);
+  if (known !== undefined) return known;
+  try {
+    const { data, error } = await supabase.from('chat_profiles').select('role').eq('id', userId).maybeSingle();
+    if (error) return false;
+    const isAdmin = data?.role === 'admin' || data?.role === 'super_admin';
+    adminAuthors.set(userId, isAdmin);
+    return isAdmin;
+  } catch {
+    return false;
+  }
+}
+
+/** Kept for existing callers. 'remove' is Delete for everyone; 'flag' is Hold. */
+export async function moderateChatMessage(messageId: string, action: 'remove' | 'flag' = 'remove') {
+  return action === 'remove' ? deleteChatMessageForEveryone(messageId) : holdChatMessage(messageId);
+}
+
+/** Kept for existing callers: a member takes back their own message, for everyone. */
+export async function deleteOwnChatMessage(messageId: string) {
+  return deleteChatMessageForEveryone(messageId);
 }
 
 /* ---------------------------------------------------------------------------

@@ -51,18 +51,6 @@ const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Se
 const toLngLat = (p: LatLng): [number, number] => [p.longitude, p.latitude];
 /** A latitude span (old "latitudeDelta") turned into a MapLibre zoom level. */
 const deltaToZoom = (delta: number): number => Math.max(1, Math.min(20, Math.round(Math.log2(360 / delta))));
-/** True when a point sits inside a ring, by the ray-casting rule. */
-function pointInRing(point: LatLng, ring: LatLng[]): boolean {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const xi = ring[i].longitude, yi = ring[i].latitude;
-    const xj = ring[j].longitude, yj = ring[j].latitude;
-    const hit = (yi > point.latitude) !== (yj > point.latitude) &&
-      point.longitude < ((xj - xi) * (point.latitude - yi)) / (yj - yi) + xi;
-    if (hit) inside = !inside;
-  }
-  return inside;
-}
 /** Warm, short "when was this" for a pin or a record. */
 function timeAgo(iso?: string): string {
   if (!iso) return '';
@@ -104,6 +92,7 @@ import {
   type VisitPin,
 } from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
+import { classifyCornerTap, cornerProgressMessage, labelPoint, MIN_CORNERS, pickAtTap, type PinShape, type RegionShape } from '../lib/mapGeometry';
 import { type AppTheme, colors, createThemedStyles, getTheme } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
 import { OutreachContact, Territory } from '../types/models';
@@ -232,6 +221,20 @@ export default function MapsScreen() {
   const [visitDraft, setVisitDraft] = useState<LatLng | null>(null);
   const [visitFocus, setVisitFocus] = useState<VisitPin | null>(null);
   const [openedOnMe, setOpenedOnMe] = useState<LatLng | null>(null);
+  // Selection and drawing on a phone. `deselectedRef` remembers that the person
+  // cleared the selection on purpose, so a background refresh does not quietly
+  // pick a region for them again. `markerPressAtRef` stops one tap on a pin from
+  // also landing on the map underneath it and selecting the big region there.
+  const deselectedRef = useRef(false);
+  const markerPressAtRef = useRef(0);
+  // While outlining, the map holds still by default so a finger placing a corner
+  // cannot drag it. "Move map" lets it pan again.
+  const [drawLocked, setDrawLocked] = useState(true);
+  const [drawNote, setDrawNote] = useState<string | null>(null);
+  // The region the outline is being drawn FOR, fixed when drawing starts. The
+  // save always goes to this region, never to whatever happens to be selected
+  // when Done is pressed.
+  const drawTargetRef = useRef<TerritoryWithActivity | null>(null);
 
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   const myLocationRef = useRef<LatLng | null>(null);
@@ -262,7 +265,9 @@ export default function MapsScreen() {
         ? 'Visit pins are not switched on yet. Once your ministry turns them on, every visit the team logs will show here and on the map.'
         : 'The visits could not load just now. Pull down on this panel to try again.');
     }
-    setSelected((current) => (current ? territories.find((t) => t.id === current.id) || current : territories.find((t) => t.level !== 'global') || territories[0] || null));
+    setSelected((current) => (current
+      ? territories.find((t) => t.id === current.id) || current
+      : deselectedRef.current ? null : territories.find((t) => t.level !== 'global') || territories[0] || null));
   }, []);
 
   /** Who is on the field, refreshed on its own. A failure here says so quietly
@@ -464,27 +469,55 @@ export default function MapsScreen() {
       const isSelected = t.id === selected?.id;
       const outlineOnly = parentsWithDrawnChildren.has(t.id);
       const quiet = derived.basis === 'no-data' || derived.basis === 'dormant';
-      const opacity = outlineOnly ? 0 : isSelected ? 0.26 : quiet ? 0.07 : 0.15;
+      const opacity = outlineOnly ? 0 : isSelected ? 0.32 : quiet ? 0.07 : 0.15;
       return (t.boundary || []).map((ring, index) => ({
         type: 'Feature' as const,
-        properties: { fill: shade, opacity, width: isSelected ? 3 : 2 },
+        // `selected` drives the gold selection outline layers drawn on top.
+        properties: { fill: shade, opacity, width: isSelected ? 3 : 2, selected: isSelected ? 1 : 0 },
         geometry: { type: 'Polygon' as const, coordinates: [[...ring, ring[0]].map(toLngLat)] },
         id: `${t.id}-${index}`,
       }));
     }),
   }), [drawn, selected?.id, statusIndex, parentsWithDrawnChildren]);
 
-  const drawShape = useMemo(() => ({
-    type: 'FeatureCollection' as const,
-    features: drawing && drawing.length > 1
-      ? [{ type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates: drawing.map(toLngLat) } }]
-      : [],
-  }), [drawing]);
+  // The outline being drawn, live: a line for two corners, a filled closed
+  // shape from three, so the person sees the area they are about to save.
+  const drawShape = useMemo(() => {
+    if (!drawing || drawing.length < 2) return { type: 'FeatureCollection' as const, features: [] };
+    const coordinates = drawing.map(toLngLat);
+    const feature = drawing.length >= MIN_CORNERS
+      ? { type: 'Feature' as const, properties: {}, geometry: { type: 'Polygon' as const, coordinates: [[...coordinates, coordinates[0]]] } }
+      : { type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates } };
+    return { type: 'FeatureCollection' as const, features: [feature] };
+  }, [drawing]);
 
-  const centerPinRegions = useMemo(
-    () => (selected ? [selected, ...children] : []).filter((t) => !t.boundary?.length && t.level !== 'global'),
-    [selected, children]
-  );
+  // The selected region's name, written on the map at its centre so the shape
+  // and the name in the panel are plainly the same place.
+  // The stored centre can sit outside a hand-drawn shape, so labelPoint moves
+  // the name inside the outline when it has to.
+  const selectedLabel = useMemo(() => {
+    const spot = selected && selected.boundary?.length && !drawing ? labelPoint(selected.center, selected.boundary) : null;
+    return {
+      type: 'FeatureCollection' as const,
+      features: selected && spot
+        ? [{ type: 'Feature' as const, properties: { name: selected.name }, geometry: { type: 'Point' as const, coordinates: toLngLat(spot) } }]
+        : [],
+    };
+  }, [selected, drawing]);
+
+  // What a tap can land on, in the shapes the geometry helpers measure.
+  const tapRegions = useMemo<RegionShape[]>(() => drawn.map((t) => ({ id: t.id, rings: t.boundary || [] })), [drawn]);
+
+  // Regions with no outline yet are shown as pins. With something selected:
+  // it and the regions inside it. With nothing selected: the top-level regions,
+  // so there is always something on the map to tap.
+  const centerPinRegions = useMemo(() => {
+    if (selected) return [selected, ...children].filter((t) => !t.boundary?.length && t.level !== 'global');
+    const globalIds = new Set(territoryList.filter((t) => t.level === 'global').map((t) => t.id));
+    return territoryList
+      .filter((t) => !t.boundary?.length && t.level !== 'global' && (!t.parentId || globalIds.has(t.parentId)))
+      .slice(0, 30);
+  }, [selected, children, territoryList]);
 
   // The control column rides above whatever is actually on screen: the sheet
   // normally, the drawing toolbar while drawing. It never sits under the sheet
@@ -501,13 +534,26 @@ export default function MapsScreen() {
     else router.replace('/(tabs)/profile' as any);
   }
 
-  function focusTerritory(territory: TerritoryWithActivity) {
+  function focusTerritory(territory: TerritoryWithActivity, options: { moveCamera?: boolean } = {}) {
+    // Mid-outline, switching regions would send the corners to the wrong place.
+    const target = drawTargetRef.current;
+    if (drawing && target && territory.id !== target.id) {
+      setQuery('');
+      Keyboard.dismiss();
+      setDrawNote(`You are outlining ${target.name}. Press Done or Cancel first, then choose another region.`);
+      return;
+    }
+    deselectedRef.current = false;
     setSelected(territory);
     setQuery('');
     Keyboard.dismiss();
     setSheet('summary');
     setVisitFocus(null);
     cameraSettledRef.current = true;
+    // A tap on an outline selects it where it already is on screen. Jumping
+    // the camera to fit a whole city or country after every tap made choosing
+    // an area hard, so map taps pass moveCamera: false.
+    if (options.moveCamera === false) return;
     const coordinates = territory.boundary?.flat() || [];
     if (coordinates.length > 2) {
       let west = 180, south = 90, east = -180, north = -90;
@@ -628,14 +674,52 @@ export default function MapsScreen() {
     }
   }
 
+  /** Start outlining the selected region by hand. The map holds still. */
+  function startDrawing() {
+    drawTargetRef.current = selected;
+    setVisitFocus(null);
+    setDrawLocked(true);
+    setDrawNote(null);
+    setDrawing([]);
+  }
+
+  /** Outline a region with no shape yet: from the public map data, or by hand. */
+  function chooseOutlineMethod() {
+    Alert.alert('Outline this region', 'Pull the shape from the free public map data, or tap the corners yourself.', [
+      { text: 'From map data', onPress: autoOutline },
+      { text: 'Draw by hand', onPress: startDrawing },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }
+
+  function stopDrawing() {
+    drawTargetRef.current = null;
+    setDrawing(null);
+    setDrawNote(null);
+    setDrawLocked(true);
+  }
+
+  function undoCorner() {
+    if (!drawing?.length) return;
+    setDrawing(drawing.slice(0, -1));
+    setDrawNote(null);
+  }
+
   async function saveDrawing() {
-    if (!selected || !drawing || drawing.length < 3) return Alert.alert('Tap at least three corners');
+    const target = drawTargetRef.current || selected;
+    if (!target || !drawing) return;
+    if (drawing.length < MIN_CORNERS) {
+      // Said in the drawing bar, not in a dialog, so the person keeps tapping.
+      setDrawNote(`An outline needs at least ${MIN_CORNERS} corners. You have ${drawing.length} — tap ${MIN_CORNERS - drawing.length} more ${MIN_CORNERS - drawing.length === 1 ? 'spot' : 'spots'} on the map.`);
+      return;
+    }
+    if (busy) return;
     setBusy(true);
     try {
-      await setTerritoryBoundary(selected.id, drawing);
-      setDrawing(null);
+      await setTerritoryBoundary(target.id, drawing);
+      stopDrawing();
       await loadAll();
-      Alert.alert('Outline saved');
+      Alert.alert('Outline saved', `${target.name} is now outlined on the map.`);
     } catch (err) {
       Alert.alert('Outline not saved', friendlyError(err, 'Only outreach leaders can outline a region.'));
     } finally {
@@ -749,17 +833,66 @@ export default function MapsScreen() {
     }
   }
 
-  // A tap: add a corner while drawing, else select the drawn region under it.
+  /** A pin or corner handled the tap itself; the map underneath must not. */
+  function notePinPress() {
+    markerPressAtRef.current = Date.now();
+  }
+
+  /** Tap empty map: nothing selected, and the panel says how to pick one. */
+  function clearSelection() {
+    deselectedRef.current = true;
+    setSelected(null);
+    setSheet('summary');
+    setVisitDraft(null);
+  }
+
+  // A tap. While drawing it places a corner (or closes the outline on the first
+  // corner). Otherwise it selects what the finger meant: a pin it landed near,
+  // else the SMALLEST outline it is inside or within 22pt of — so a street inside
+  // a city is picked by tapping the street. Tapping empty map clears the choice.
   // MapLibre v11 sends { lngLat: [lng, lat], point }. There is no geometry key.
   function onMapPress(event: PressEvent | undefined) {
     const lngLat = event?.lngLat;
     if (!lngLat || lngLat.length < 2) return;
+    // The same finger already hit a pin or a corner handle on top of the map.
+    if (Date.now() - markerPressAtRef.current < 400) return;
     const point: LatLng = { latitude: lngLat[1], longitude: lngLat[0] };
-    if (drawing) { setDrawing([...drawing, point]); return; }
-    setVisitFocus(null);
-    for (const t of drawn) {
-      if ((t.boundary || []).some((ring) => pointInRing(point, ring))) { focusTerritory(t); return; }
+    const zoomNow = zoomRef.current;
+
+    if (drawing) {
+      const tap = classifyCornerTap(point, drawing, zoomNow);
+      if (tap.action === 'close') { saveDrawing(); return; }
+      if (tap.action === 'add') { setDrawing([...drawing, tap.point]); setDrawNote(null); }
+      return;
     }
+
+    const pins: PinShape[] = [
+      ...centerPinRegions.map((t) => ({ id: `region:${t.id}`, at: t.center, radius: 18 })),
+      // A visit pin is a teardrop anchored at its tip; its head sits ~22pt above.
+      ...visits.filter((v) => v.location).map((v) => ({ id: `visit:${v.id}`, at: v.location as LatLng, radius: 14, offsetY: -22 })),
+    ];
+    const pick = pickAtTap({ tap: point, zoom: zoomNow, regions: tapRegions, pins });
+    if (!pick) {
+      setVisitFocus(null);
+      // Half-way through a form, a tap on the map only puts the keyboard away.
+      // It must never throw away what the person was typing.
+      if (sheet === 'visit' || sheet === 'record' || sheet === 'admin') { Keyboard.dismiss(); return; }
+      clearSelection();
+      return;
+    }
+    if (pick.kind === 'pin' && pick.id.startsWith('visit:')) {
+      const visit = visits.find((v) => `visit:${v.id}` === pick.id);
+      if (visit) setVisitFocus(visit);
+      return;
+    }
+    setVisitFocus(null);
+    const id = pick.kind === 'pin' ? pick.id.slice('region:'.length) : pick.id;
+    // Tapping the region that is already selected keeps it, and keeps the view.
+    if (id === selected?.id) return;
+    const territory = territoryList.find((t) => t.id === id);
+    // A pin has no outline to look at, so the camera goes to it; an outline is
+    // already on screen where the finger is, so the camera stays put.
+    if (territory) focusTerritory(territory, { moveCamera: pick.kind === 'pin' });
   }
 
   function onMapLongPress(event: PressEvent | undefined) {
@@ -832,6 +965,15 @@ export default function MapsScreen() {
           }
           settleCamera();
         }}
+        // While outlining: no double-tap zoom (two quick corners used to zoom
+        // in), no rotate or tilt, and — until "Move map" — no pan, so placing a
+        // corner never moves the map under the finger.
+        doubleTapZoom={!drawing}
+        doubleTapHoldZoom={!drawing}
+        touchRotate={!drawing}
+        touchPitch={!drawing}
+        dragPan={!(drawing && drawLocked)}
+        touchZoom={!(drawing && drawLocked)}
         onPress={(event) => onMapPress(event?.nativeEvent as PressEvent | undefined)}
         onLongPress={(event) => onMapLongPress(event?.nativeEvent)}
       >
@@ -841,13 +983,27 @@ export default function MapsScreen() {
         <GeoJSONSource id="regions" data={regionShape}>
           <Layer id="regions-fill" type="fill" paint={{ 'fill-color': ['get', 'fill'], 'fill-opacity': ['get', 'opacity'] }} />
           <Layer id="regions-line" type="line" paint={{ 'line-color': ['get', 'fill'], 'line-width': ['get', 'width'] }} />
+          {/* The selected region: a white casing under a thick gold line, so it
+              reads on any street colour and cannot be mistaken for the rest. */}
+          <Layer id="regions-selected-casing" type="line" filter={['==', ['get', 'selected'], 1]} layout={{ 'line-join': 'round', 'line-cap': 'round' }} paint={{ 'line-color': colors.white, 'line-width': 8, 'line-opacity': 0.9 }} />
+          <Layer id="regions-selected-line" type="line" filter={['==', ['get', 'selected'], 1]} layout={{ 'line-join': 'round', 'line-cap': 'round' }} paint={{ 'line-color': colors.gold, 'line-width': 4.5 }} />
+        </GeoJSONSource>
+
+        <GeoJSONSource id="selected-label" data={selectedLabel}>
+          <Layer
+            id="selected-label-text"
+            type="symbol"
+            layout={{ 'text-field': ['get', 'name'], 'text-font': ['Noto Sans Bold'], 'text-size': 15, 'text-max-width': 12, 'text-allow-overlap': true, 'text-ignore-placement': true }}
+            paint={{ 'text-color': colors.royalBlue, 'text-halo-color': colors.white, 'text-halo-width': 2.5 }}
+          />
         </GeoJSONSource>
 
         {centerPinRegions.map((t) => {
           const shade = shadeFor(statusOf(t));
+          const isOn = t.id === selected?.id;
           return (
             <Marker key={t.id} id={t.id} lngLat={toLngLat(t.center)} anchor="center">
-              <Pressable accessibilityRole="button" accessibilityLabel={`${t.name} — ${statusOf(t).label}`} onPress={() => focusTerritory(t)} hitSlop={10} style={[styles.pin, { borderColor: shade }]}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`${t.name} — ${statusOf(t).label}`} accessibilityState={{ selected: isOn, disabled: !!drawing }} disabled={!!drawing} pointerEvents={drawing ? 'none' : 'auto'} onPressIn={drawing ? undefined : notePinPress} onPress={() => focusTerritory(t)} hitSlop={12} style={[styles.pin, { borderColor: shade }, isOn && styles.pinOn]}>
                 <View style={[styles.pinDot, { backgroundColor: shade }]} />
                 <Text numberOfLines={1} style={styles.pinText}>{t.name}</Text>
               </Pressable>
@@ -856,12 +1012,12 @@ export default function MapsScreen() {
         })}
         {relatedContacts.map((c) => c.location ? (
           <Marker key={c.id} id={c.id} lngLat={toLngLat(c.location)} anchor="center">
-            <View accessibilityLabel={c.followUpNeeded ? `${c.name} — follow-up needed` : `${c.name} — no follow-up due`} style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.brightBlue }]} />
+            <View pointerEvents="none" accessibilityLabel={c.followUpNeeded ? `${c.name} — follow-up needed` : `${c.name} — no follow-up due`} style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.brightBlue }]} />
           </Marker>
         ) : null)}
         {visits.map((v) => v.location ? (
           <Marker key={v.id} id={`visit-${v.id}`} lngLat={toLngLat(v.location)} anchor="bottom">
-            <Pressable accessibilityRole="button" accessibilityLabel={`Visit: ${v.placeLabel}`} onPress={() => setVisitFocus(v)} style={styles.visitPin} hitSlop={20}>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Visit: ${v.placeLabel}`} disabled={!!drawing} pointerEvents={drawing ? 'none' : 'auto'} onPressIn={drawing ? undefined : notePinPress} onPress={() => setVisitFocus(v)} style={styles.visitPin} hitSlop={20}>
               <View style={styles.visitPinHead}><Ionicons name="home" size={13} color={colors.white} /></View>
               <View style={styles.visitPinTail} />
             </Pressable>
@@ -877,7 +1033,7 @@ export default function MapsScreen() {
         ) : null}
         {workers.map((w) => w.location ? (
           <Marker key={w.id} id={w.id} lngLat={toLngLat(w.location)} anchor="center">
-            <View style={styles.worker}>
+            <View pointerEvents="none" style={styles.worker}>
               <View style={styles.workerPulse} />
               <Ionicons name="walk" size={14} color={colors.white} />
             </View>
@@ -885,12 +1041,27 @@ export default function MapsScreen() {
         ) : null)}
         {drawShape.features.length ? (
           <GeoJSONSource id="draw" data={drawShape}>
-            <Layer id="draw-line" type="line" paint={{ 'line-color': colors.gold, 'line-width': 3, 'line-dasharray': [2, 1.5] }} />
+            <Layer id="draw-fill" type="fill" filter={['==', ['geometry-type'], 'Polygon']} paint={{ 'fill-color': colors.gold, 'fill-opacity': 0.2 }} />
+            <Layer id="draw-line" type="line" layout={{ 'line-join': 'round' }} paint={{ 'line-color': colors.gold, 'line-width': 3.5, 'line-dasharray': [2, 1.5] }} />
           </GeoJSONSource>
         ) : null}
-        {drawing?.map((p, i) => (
-          <Marker key={`corner-${i}`} id={`corner-${i}`} lngLat={toLngLat(p)} anchor="center"><View style={styles.corner} /></Marker>
-        ))}
+        {drawing?.map((p, i) => {
+          // The first corner closes the outline once there are three.
+          const canClose = i === 0 && drawing.length >= MIN_CORNERS;
+          return (
+            <Marker key={`corner-${i}`} id={`corner-${i}`} lngLat={toLngLat(p)} anchor="center">
+              {canClose ? (
+                <Pressable accessibilityRole="button" accessibilityLabel="Close the outline here" onPressIn={notePinPress} onPress={saveDrawing} hitSlop={10} style={[styles.corner, styles.cornerFirst, styles.cornerClose]}>
+                  <Ionicons name="checkmark" size={20} color={colors.royalBlue} />
+                </Pressable>
+              ) : (
+                <View pointerEvents="none" style={[styles.corner, i === 0 && styles.cornerFirst]}>
+                  <Text style={styles.cornerText}>{i + 1}</Text>
+                </View>
+              )}
+            </Marker>
+          );
+        })}
       </Map>
 
       {/* Top bar */}
@@ -988,11 +1159,23 @@ export default function MapsScreen() {
       {/* Drawing toolbar */}
       {drawing ? (
         <View style={[styles.drawBar, { bottom: insets.bottom + 16 }]} onLayout={(event) => setDrawBarHeight(Math.round(event.nativeEvent.layout.height + insets.bottom + 16))}>
-          <Text style={styles.drawText}>Tap the corners of {selected?.name || 'this region'}. {drawing.length} so far.</Text>
+          <Text style={styles.drawTitle}>Outlining {drawTargetRef.current?.name || selected?.name || 'this region'}</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.drawText}>{drawNote || cornerProgressMessage(drawing.length)}</Text>
+          <Pressable
+            accessibilityRole="switch"
+            accessibilityLabel="Move the map"
+            accessibilityHint="When off, the map holds still while you tap corners"
+            accessibilityState={{ checked: !drawLocked }}
+            onPress={() => setDrawLocked((value) => !value)}
+            style={[styles.drawToggle, !drawLocked && styles.drawToggleOn]}
+          >
+            <Ionicons name={drawLocked ? 'lock-closed' : 'move'} size={16} color={drawLocked ? colors.white : colors.royalBlue} />
+            <Text style={[styles.drawToggleText, !drawLocked && styles.drawToggleTextOn]}>{drawLocked ? 'Map is holding still — tap to move it' : 'Map moves — tap to hold it still'}</Text>
+          </Pressable>
           <View style={styles.drawActions}>
-            <Pressable accessibilityRole="button" accessibilityLabel="Undo the last corner" onPress={() => setDrawing(drawing.slice(0, -1))} style={styles.drawBtn}><Text style={styles.drawBtnText}>Undo</Text></Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Cancel drawing" onPress={() => setDrawing(null)} style={styles.drawBtn}><Text style={styles.drawBtnText}>Cancel</Text></Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="Save this outline" disabled={busy} onPress={saveDrawing} style={[styles.drawBtn, styles.drawBtnGold]}><Text style={[styles.drawBtnText, styles.drawBtnTextGold]}>{busy ? 'Saving…' : 'Save outline'}</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Undo the last corner" accessibilityState={{ disabled: !drawing.length }} disabled={!drawing.length} onPress={undoCorner} style={[styles.drawBtn, !drawing.length && styles.drawBtnDim]}><Text style={styles.drawBtnText}>Undo</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Cancel drawing" onPress={stopDrawing} style={styles.drawBtn}><Text style={styles.drawBtnText}>Cancel</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Done — save this outline" disabled={busy} onPress={saveDrawing} style={[styles.drawBtn, styles.drawBtnGold, drawing.length < MIN_CORNERS && styles.drawBtnDim]}><Text style={[styles.drawBtnText, styles.drawBtnTextGold]}>{busy ? 'Saving…' : 'Done'}</Text></Pressable>
           </View>
         </View>
       ) : !selected ? (
@@ -1001,10 +1184,13 @@ export default function MapsScreen() {
           <View style={styles.grabber} />
           <View style={styles.quietRow}>
             {loadingMap ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name="map-outline" size={22} color={theme.colors.accent} />}
-            <Text style={styles.quietText}>{loadingMap ? 'Finding your outreach regions…' : mapError || 'No outreach regions are set up yet. Once a leader adds one, it will show here.'}</Text>
+            <Text style={styles.quietText}>{loadingMap ? 'Finding your outreach regions…' : mapError || (territoryList.length ? 'Tap a region to select it.' : 'No outreach regions are set up yet. Once a leader adds one, it will show here.')}</Text>
           </View>
+          {!loadingMap && !mapError && territoryList.length ? (
+            <Text style={styles.quietLine}>Tap inside an outline or on a pin. Tapping near the edge works too. To see every region, search for it above.</Text>
+          ) : null}
           {notes.map((note) => <Text key={note} style={styles.quietLine}>{note}</Text>)}
-          {!loadingMap ? (
+          {!loadingMap && (mapError || !territoryList.length) ? (
             <Pressable accessibilityRole="button" accessibilityLabel="Try again" onPress={retryMap} style={styles.primaryButton}>
               <Text style={styles.primaryButtonText}>Try again</Text>
             </Pressable>
@@ -1070,16 +1256,12 @@ export default function MapsScreen() {
                 <Text style={styles.hint}>Press and hold anywhere on the map to drop a visit pin right on that spot. Everyone on the outreach team will see it.</Text>
                 <View style={styles.actionRow}>
                   {!selected.boundary?.length ? (
-                    <Pressable accessibilityRole="button" accessibilityLabel="Outline this region" disabled={busy} onPress={() => Alert.alert('Outline this region', 'Pull the shape from the free public map data, or tap the corners yourself.', [
-                      { text: 'From map data', onPress: autoOutline },
-                      { text: 'Draw by hand', onPress: () => setDrawing([]) },
-                      { text: 'Cancel', style: 'cancel' },
-                    ])} style={styles.outlineButton}>
+                    <Pressable accessibilityRole="button" accessibilityLabel="Outline this region" disabled={busy} onPress={chooseOutlineMethod} style={styles.outlineButton}>
                       {busy ? <ActivityIndicator color={theme.colors.textPrimary} /> : <Ionicons name="shapes-outline" size={18} color={theme.colors.textPrimary} />}
                       <Text style={styles.outlineButtonText}>{busy ? 'Working…' : 'Outline'}</Text>
                     </Pressable>
                   ) : (
-                    <Pressable accessibilityRole="button" accessibilityLabel="Redraw this outline" onPress={() => setDrawing([])} style={styles.outlineButton}>
+                    <Pressable accessibilityRole="button" accessibilityLabel="Redraw this outline" onPress={startDrawing} style={styles.outlineButton}>
                       <Ionicons name="create-outline" size={18} color={theme.colors.textPrimary} />
                       <Text style={styles.outlineButtonText}>Redraw</Text>
                     </Pressable>
@@ -1294,7 +1476,14 @@ const useStyles = createThemedStyles((t) => {
     visitPinTailDraft: { backgroundColor: colors.gold },
     worker: { width: 30, height: 30, borderRadius: 15, backgroundColor: colors.brightBlue, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white },
     workerPulse: { position: 'absolute', width: 44, height: 44, borderRadius: 22, backgroundColor: withAlpha(colors.brightBlue, 0.30) },
-    corner: { width: 14, height: 14, borderRadius: 7, backgroundColor: colors.gold, borderWidth: 2, borderColor: colors.white },
+    pinOn: { borderWidth: 3, borderColor: colors.gold, minHeight: 40, transform: [{ scale: 1.08 }] },
+    // Corner handles: 30pt, big enough to see under a thumb, numbered so the
+    // order is obvious. The first is larger; once it can close the outline it
+    // turns solid gold with a tick.
+    corner: { minWidth: 30, minHeight: 30, borderRadius: 15, backgroundColor: withAlpha(colors.white, 0.95), borderWidth: 3, borderColor: colors.gold, alignItems: 'center', justifyContent: 'center', ...t.elevation.medium },
+    cornerFirst: { minWidth: 36, minHeight: 36, borderRadius: 18 },
+    cornerClose: { minWidth: 48, minHeight: 48, borderRadius: 24, backgroundColor: colors.gold, borderColor: colors.white },
+    cornerText: { color: colors.royalBlue, fontWeight: '900', fontSize: t.type.overline },
     visitRowIcon: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.dark ? t.colors.accentSolid : colors.deepBlue, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
 
     callout: { position: 'absolute', left: 12, right: 72, borderRadius: t.radius.lg, backgroundColor: sheetFill, borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, padding: 14, gap: 6, ...t.elevation.high },
@@ -1305,7 +1494,13 @@ const useStyles = createThemedStyles((t) => {
     calloutNotes: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19 },
 
     drawBar: { position: 'absolute', left: 12, right: 12, borderRadius: t.radius.xl, backgroundColor: t.dark ? t.colors.pageBottom : colors.royalBlue, borderWidth: t.dark ? StyleSheet.hairlineWidth : 0, borderColor: t.colors.accentBorder, padding: 16, gap: 12, ...t.elevation.high },
-    drawText: { color: colors.white, fontWeight: '800', fontSize: t.type.body },
+    drawTitle: { color: colors.white, fontWeight: '900', fontSize: t.type.cardTitle },
+    drawText: { color: colors.white, fontWeight: '700', fontSize: t.type.meta, lineHeight: 19 },
+    drawToggle: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, minWidth: 48, paddingHorizontal: 16, borderRadius: t.radius.pill, borderWidth: 1, borderColor: withAlpha(colors.white, 0.4), alignSelf: 'flex-start', maxWidth: '100%' },
+    drawToggleOn: { backgroundColor: colors.white, borderColor: colors.white },
+    drawToggleText: { color: colors.white, fontWeight: '800', fontSize: t.type.meta, flexShrink: 1 },
+    drawToggleTextOn: { color: colors.royalBlue },
+    drawBtnDim: { opacity: 0.7 },
     drawActions: { flexDirection: 'row', gap: 8 },
     drawBtn: { flex: 1, minHeight: 48, borderRadius: t.radius.md, backgroundColor: withAlpha(colors.white, 0.14), alignItems: 'center', justifyContent: 'center' },
     drawBtnGold: { backgroundColor: t.colors.accentSolid, flex: 1.6 },
