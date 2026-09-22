@@ -371,6 +371,7 @@ export default function ChatRoomScreen() {
 
   function openShared(shared: SharedRef) {
     if (shared.kind === 'give') return router.push('/(tabs)/give' as any);
+    if (shared.kind === 'event') return shared.eventId ? router.push({ pathname: '/event-detail', params: { id: shared.eventId } } as any) : undefined;
     if (shared.kind === 'scripture' && shared.scripture) {
       const verse = shared.scripture;
       return router.push({ pathname: '/(tabs)/bible', params: { bookId: verse.bookId, chapter: String(verse.chapter), verse: String(verse.verse), version: verse.version } });
