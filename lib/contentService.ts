@@ -221,11 +221,21 @@ export async function getLatestSermons(limit = 6): Promise<Sermon[]> {
   }));
 }
 
+/**
+ * Published events, oldest first. Kept for anything that still wants the
+ * plain Event shape; Home and the event screens now read lib/eventsService.ts,
+ * which also knows about weekly services, cancellations and drafts.
+ *
+ * Drafts are left out on purpose: since 2026-09-22 a leader can read
+ * unpublished events, and those must never reach a list members see. A blank
+ * place stays blank — it used to be filled in as "Online", which was invented.
+ */
 export async function getEvents(): Promise<Event[]> {
   if (!hasSupabase) notConnected();
   const { data, error } = await supabase
     .from('events')
     .select('id, title, description, location, starts_at, image_url, registration_url')
+    .eq('published', true)
     .order('starts_at')
     .limit(50);
   if (error) throw error;
@@ -233,7 +243,7 @@ export async function getEvents(): Promise<Event[]> {
     id: row.id,
     title: row.title,
     description: row.description || '',
-    location: row.location || 'Online',
+    location: row.location || '',
     startsAt: row.starts_at,
     imageUrl: row.image_url || undefined,
     registrationUrl: row.registration_url || undefined

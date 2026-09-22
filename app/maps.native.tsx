@@ -13,11 +13,16 @@
 //   1. Every hook runs on every render. No hook below an early return.
 //   2. Points are stored as {latitude, longitude}. They become [lng, lat] only
 //      at the MapLibre boundary, through toLngLat().
+//
+// Added 2026-09-22 (owner's list): home cells show as a HOUSE (visit pins moved
+// to footsteps so the house means one thing), each region has a Team tab, a
+// record shows the nearest home cell, and the Home cells screen can open this
+// same map in pin-dropping mode (?placeCell=<id>) — still one map, one place.
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View, type NativeSyntheticEvent } from 'react-native';
+import { ActivityIndicator, Alert, Image, Keyboard, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View, type NativeSyntheticEvent } from 'react-native';
 import { Camera, type CameraRef, GeoJSONSource, Layer, Map, type MapRef, Marker, type PressEvent, type StyleSpecification, UserLocation } from '@maplibre/maplibre-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -69,6 +74,7 @@ function timeAgo(iso?: string): string {
 }
 import { useAccessProfile } from '../lib/accessControl';
 import {
+  addToRegionTeam,
   buildActivityIndex,
   deriveTerritoryStatus,
   type DerivedStatus,
@@ -76,23 +82,34 @@ import {
   fetchOutlineFromOpenStreetMap,
   getLiveWorkers,
   getOutreachContacts,
+  getRegionTeams,
   getTerritories,
   getVisits,
   heartbeatCheckin,
+  initialsFor,
   LiveWorker,
   type OutreachRecord,
+  type Person,
+  removeFromRegionTeam,
   saveOutreachContact,
+  searchOutreachTeam,
   saveVisit,
+  setRegionTeamRole,
   setTerritoryBoundary,
   startCheckin,
   subscribeLiveWorkers,
+  teamFor,
+  type TeamMember,
+  teamSummary,
   type TerritoryActivity,
   type TerritoryWithActivity,
   updateTerritoryMetrics,
   type VisitPin,
 } from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
-import { classifyCornerTap, cornerProgressMessage, labelPoint, MIN_CORNERS, pickAtTap, type PinShape, type RegionShape } from '../lib/mapGeometry';
+import { dueLabel } from '../lib/followUps';
+import { addressLine, directionsUrl, distanceLabel, getHomeCells, type HomeCell, meetingLabel, nearestHomeCells, nearestSentence, preferredUnits, setHomeCellLocation } from '../lib/homeCells';
+import { classifyCornerTap, cornerProgressMessage, labelPoint, MIN_CORNERS, pickAtTap, type PinShape, type RegionShape, smallestContaining } from '../lib/mapGeometry';
 import { type AppTheme, colors, createThemedStyles, getTheme } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
 import { OutreachContact, Territory } from '../types/models';
@@ -164,6 +181,7 @@ function withAlpha(hex: string, alpha: number) {
 }
 
 const BLANK_VISIT = { placeLabel: '', unitNumber: '', notes: '' };
+const UNITS = preferredUnits(typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().locale : undefined);
 
 export default function MapsScreen() {
   // ---- every hook lives here, above every return ----
@@ -214,7 +232,26 @@ export default function MapsScreen() {
   const [checkinId, setCheckinId] = useState<string | null>(null);
   const [drawing, setDrawing] = useState<LatLng[] | null>(null);
   const [busy, setBusy] = useState(false);
-  const [sheet, setSheet] = useState<'summary' | 'record' | 'people' | 'visits' | 'visit' | 'admin'>('summary');
+  const [sheet, setSheet] = useState<'summary' | 'record' | 'people' | 'visits' | 'visit' | 'admin' | 'team'>('summary');
+  // Home cells and region teams (owner's list, 2026-09-22). Each loads on its
+  // own and stays quiet if its table is not switched on yet.
+  const params = useLocalSearchParams<{ region?: string; sheet?: string; homeCell?: string; placeCell?: string }>();
+  const [homeCells, setHomeCells] = useState<HomeCell[]>([]);
+  const [cellFocus, setCellFocus] = useState<HomeCell | null>(null);
+  const [team, setTeam] = useState<TeamMember[]>([]);
+  const [teamNote, setTeamNote] = useState<string | null>(null);
+  const [teamOff, setTeamOff] = useState(false);
+  const [teamQuery, setTeamQuery] = useState('');
+  const [teamResults, setTeamResults] = useState<Person[] | null>(null);
+  const [teamBusy, setTeamBusy] = useState(false);
+  // Pin-dropping for a home cell: the cell being placed and where the pin is.
+  const [placing, setPlacing] = useState<HomeCell | null>(null);
+  const [placeDraft, setPlaceDraft] = useState<LatLng | null>(null);
+  const handledParamsRef = useRef<string>('');
+  // Opened from the Reach tab on a region, or from Home cells on a cell: show
+  // THAT, not wherever the phone happens to be standing.
+  const arrivedWithTargetRef = useRef(Boolean(params.region || params.homeCell || params.placeCell));
+  const targetViewRef = useRef<{ center: LatLng; zoom: number } | null>(null);
   const [record, setRecord] = useState({ name: '', phone: '', whatsapp: '', prayerRequest: '', notes: '', gospelShared: true, invitedToChurch: true, bibleStudyStarted: false, savedAcceptedChrist: false, followUpNeeded: true });
   const [metricEdits, setMetricEdits] = useState({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
   const [visitForm, setVisitForm] = useState(BLANK_VISIT);
@@ -244,13 +281,21 @@ export default function MapsScreen() {
     // Regions are what the screen is for, so only they can fail the load.
     // Records, live workers and visits each fall back on their own, so one
     // slow or blocked query never leaves the map blank.
-    const [territories, contactResult, live, visitResult] = await Promise.all([
+    const [territories, contactResult, live, visitResult, cellResult, teamResult] = await Promise.all([
       getTerritories(),
       getOutreachContacts().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as OutreachRecord[] })),
       getLiveWorkers().catch(() => [] as LiveWorker[]),
       getVisits().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
+      getHomeCells().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
+      getRegionTeams().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
     ]);
     setTerritoryList(territories);
+    if (cellResult.ready) setHomeCells(cellResult.cells);
+    setTeamOff(!teamResult.ready && teamResult.reason === 'not-switched-on');
+    if (teamResult.ready) { setTeam(teamResult.members); setTeamNote(null); }
+    else setTeamNote(teamResult.reason === 'not-switched-on'
+      ? 'Region teams are not switched on yet. Once they are, the people assigned to each region will show here.'
+      : 'The region teams could not load just now. Pull down on this panel to try again.');
     setContactList(contactResult.rows);
     setRecordsFailed(!contactResult.ok);
     setWorkers(live);
@@ -387,6 +432,17 @@ export default function MapsScreen() {
   // The camera goes to the user as soon as we know where they are.
   useEffect(() => {
     if (!openedOnMe) return;
+    if (arrivedWithTargetRef.current) {
+      // Dropping a pin for a cell that has no spot yet: start where the leader
+      // is standing. Any other arrival keeps the region or cell it came for.
+      if (params.placeCell && !targetViewRef.current) {
+        targetViewRef.current = { center: openedOnMe, zoom: 15 };
+        cameraSettledRef.current = true;
+        flyTo(openedOnMe, 15, 700);
+      }
+      setOpenedOnMe(null);
+      return;
+    }
     openedOnUserRef.current = true;
     cameraSettledRef.current = true;
     flyTo(openedOnMe, deltaToZoom(0.03), 700);
@@ -396,7 +452,7 @@ export default function MapsScreen() {
   // Once, when we have both a position and the regions, open the sheet on the
   // region the person is actually standing in.
   useEffect(() => {
-    if (pickedNearestRef.current || !myLocation || !territoryList.length) return;
+    if (pickedNearestRef.current || arrivedWithTargetRef.current || !myLocation || !territoryList.length) return;
     pickedNearestRef.current = true;
     const nearest = nearestTerritory(territoryList, myLocation);
     if (nearest) { setSelected(nearest); setSheet('summary'); }
@@ -410,6 +466,11 @@ export default function MapsScreen() {
    */
   const settleCamera = useCallback(() => {
     const me = myLocationRef.current;
+    if (targetViewRef.current) {
+      cameraSettledRef.current = true;
+      flyTo(targetViewRef.current.center, targetViewRef.current.zoom, 0);
+      return;
+    }
     if (openedOnUserRef.current) {
       cameraSettledRef.current = true;
       if (me) flyTo(me, deltaToZoom(0.03), 0);
@@ -431,6 +492,14 @@ export default function MapsScreen() {
   const relatedContacts = useMemo(() => selected ? contactList.filter((c) => c.territoryId === selected.id || children.some((t) => t.id === c.territoryId)) : [], [children, contactList, selected]);
   const relatedVisits = useMemo(() => selected ? visits.filter((v) => v.territoryId === selected.id || children.some((t) => t.id === v.territoryId)) : [], [children, visits, selected]);
   const workersHere = useMemo(() => selected ? workers.filter((w) => w.territoryId === selected.id) : [], [workers, selected]);
+  const regionTeam = useMemo(() => teamFor(team, selected?.id), [team, selected?.id]);
+  const placedCells = useMemo(() => homeCells.filter((cell) => cell.location && cell.id !== placing?.id), [homeCells, placing?.id]);
+  // The nearest home cell that is MEETING, for the Add-record form. Null when
+  // none has a spot (a cell that has stopped meeting is never suggested).
+  const recordNearest = useMemo(() => {
+    const from = myLocation || selected?.center;
+    return from ? nearestHomeCells(homeCells, from, { limit: 1 })[0] || null : null;
+  }, [homeCells, myLocation, selected?.center]);
 
   // What actually happened in each region, rolled up from records, live
   // check-ins, visits and the territories.last_activity_at column when it
@@ -522,10 +591,47 @@ export default function MapsScreen() {
   // The control column rides above whatever is actually on screen: the sheet
   // normally, the drawing toolbar while drawing. It never sits under the sheet
   // and never under the home indicator, and it never climbs into the top bar.
-  const sheetAnchor = drawing ? drawBarHeight : sheetHeight;
+  const sheetAnchor = drawing || placing ? drawBarHeight : sheetHeight;
   const controlsFloor = insets.bottom + 16;
   const controlsCeiling = Math.max(controlsFloor, windowHeight - (insets.top + 64) - controlsHeight);
   const controlsBottom = Math.round(Math.min(Math.max(sheetAnchor + 20, controlsFloor), controlsCeiling));
+
+  // Arriving with something to show: a region from the Reach tab
+  // (?region=<id>, optionally &sheet=team), or a home cell from the Home cells
+  // screen (?homeCell=<id> to look at it, ?placeCell=<id> to drop its pin).
+  // Each is handled once, as soon as the thing it names has loaded.
+  useEffect(() => {
+    const key = [params.region, params.homeCell, params.placeCell, params.sheet].map((v) => v || '').join('|');
+    if (key === '|||' || handledParamsRef.current === key) return;
+    if (params.region) {
+      if (!territoryList.length) return;
+      handledParamsRef.current = key;
+      const region = territoryList.find((t) => t.id === params.region);
+      if (!region) return;
+      pickedNearestRef.current = true;
+      focusTerritory(region);
+      if (params.sheet === 'team') { setCollapsed(false); setSheet('team'); }
+      return;
+    }
+    const cellId = params.placeCell || params.homeCell;
+    if (!cellId || !homeCells.length) return;
+    handledParamsRef.current = key;
+    const cell = homeCells.find((c) => c.id === cellId);
+    if (!cell) return;
+    pickedNearestRef.current = true;
+    if (params.placeCell) {
+      startPlacing(cell);
+    } else if (cell.location) {
+      setVisitFocus(null);
+      setCellFocus(cell);
+      targetViewRef.current = { center: cell.location, zoom: 16 };
+      cameraSettledRef.current = true;
+      flyTo(cell.location, 16, 600);
+    }
+    // focusTerritory and startPlacing are plain functions of this render; the
+    // effect only needs to re-run when what it is waiting for arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.region, params.homeCell, params.placeCell, params.sheet, territoryList, homeCells]);
 
   // ---- plain functions (not hooks) ----
 
@@ -833,6 +939,130 @@ export default function MapsScreen() {
     }
   }
 
+  // ---- home cells: pin-dropping and directions ----
+
+  /** Drop (or move) a home cell's pin on this map. The sheet steps aside. */
+  function startPlacing(cell: HomeCell) {
+    if (drawing) stopDrawing();
+    setVisitFocus(null);
+    setCellFocus(null);
+    setVisitDraft(null);
+    setPlacing(cell);
+    setPlaceDraft(cell.location || null);
+    const at = cell.location || myLocationRef.current;
+    if (at) {
+      targetViewRef.current = { center: at, zoom: 16 };
+      cameraSettledRef.current = true;
+      flyTo(at, 16, 600);
+    }
+  }
+
+  function stopPlacing() {
+    setPlacing(null);
+    setPlaceDraft(null);
+    goBack();
+  }
+
+  async function placeAtMe() {
+    const here = await locateMe().catch(() => null);
+    if (here) setPlaceDraft(here);
+  }
+
+  async function savePlacement() {
+    if (!placing || busy) return;
+    if (!placeDraft) {
+      Alert.alert('Tap the map first', 'Tap the spot where this home cell meets, or use My location.');
+      return;
+    }
+    setBusy(true);
+    try {
+      // The cell joins whichever drawn region it sits inside, the smallest one.
+      const territoryId = smallestContaining(placeDraft, tapRegions);
+      const saved = await setHomeCellLocation(placing.id, placeDraft, territoryId);
+      setHomeCells((current) => [saved, ...current.filter((c) => c.id !== saved.id)]);
+      setPlacing(null);
+      setPlaceDraft(null);
+      Alert.alert('Home cell placed', `${saved.name} now shows on the map as a house.`, [{ text: 'OK', onPress: goBack }]);
+    } catch (err) {
+      Alert.alert('Not saved', friendlyError(err, 'Only leaders, admins or the cell\'s own leader can move a home cell.'));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function openCellDirections(cell: HomeCell) {
+    const url = directionsUrl(cell, Platform.OS);
+    if (!url) { Alert.alert('No address yet', `${cell.name} has no address or spot on the map yet.`); return; }
+    Linking.openURL(url).catch(() => Alert.alert('Maps did not open', 'Your phone could not open its maps app just now.'));
+  }
+
+  // ---- region teams ----
+
+  async function reloadTeam() {
+    const result = await getRegionTeams();
+    if (result.ready) { setTeam(result.members); setTeamNote(null); }
+  }
+
+  async function searchTeam() {
+    if (teamBusy) return;
+    setTeamBusy(true);
+    try {
+      setTeamResults(await searchOutreachTeam(teamQuery));
+    } catch (err) {
+      Alert.alert('Search did not work', friendlyError(err, 'The outreach team could not load just now.'));
+    } finally {
+      setTeamBusy(false);
+    }
+  }
+
+  async function addTeamMember(person: Person) {
+    if (!selected || teamBusy) return;
+    setTeamBusy(true);
+    try {
+      // The first person on a region's team leads it; a leader can change that.
+      await addToRegionTeam(selected.id, person.id, regionTeam.length ? 'member' : 'lead');
+      await reloadTeam();
+      setTeamResults(null);
+      setTeamQuery('');
+    } catch (err) {
+      Alert.alert('Not added', friendlyError(err, 'Only leaders and admins can change a region team, and only people on the outreach team can be added.'));
+    } finally {
+      setTeamBusy(false);
+    }
+  }
+
+  async function toggleTeamLead(member: TeamMember) {
+    if (teamBusy) return;
+    setTeamBusy(true);
+    try {
+      // Making someone the lead puts the old lead back to a member: one lead per region.
+      await setRegionTeamRole(member, member.role === 'lead' ? 'member' : 'lead');
+      await reloadTeam();
+    } catch (err) {
+      Alert.alert('Not changed', friendlyError(err, 'Only leaders and admins can change a region team.'));
+    } finally {
+      setTeamBusy(false);
+    }
+  }
+
+  function confirmRemoveMember(member: TeamMember) {
+    if (!selected) return;
+    Alert.alert(`Take ${member.displayName} off ${selected.name}?`, 'They stay on the outreach team. They are only no longer listed for this region.', [
+      { text: 'Keep', style: 'cancel' },
+      {
+        text: 'Take off',
+        style: 'destructive',
+        onPress: () => {
+          setTeamBusy(true);
+          removeFromRegionTeam(member.assignmentId)
+            .then(reloadTeam)
+            .catch((err) => Alert.alert('Not changed', friendlyError(err, 'Only leaders and admins can change a region team.')))
+            .finally(() => setTeamBusy(false));
+        },
+      },
+    ]);
+  }
+
   /** A pin or corner handled the tap itself; the map underneath must not. */
   function notePinPress() {
     markerPressAtRef.current = Date.now();
@@ -859,6 +1089,8 @@ export default function MapsScreen() {
     const point: LatLng = { latitude: lngLat[1], longitude: lngLat[0] };
     const zoomNow = zoomRef.current;
 
+    if (placing) { setPlaceDraft(point); return; }
+
     if (drawing) {
       const tap = classifyCornerTap(point, drawing, zoomNow);
       if (tap.action === 'close') { saveDrawing(); return; }
@@ -870,22 +1102,31 @@ export default function MapsScreen() {
       ...centerPinRegions.map((t) => ({ id: `region:${t.id}`, at: t.center, radius: 18 })),
       // A visit pin is a teardrop anchored at its tip; its head sits ~22pt above.
       ...visits.filter((v) => v.location).map((v) => ({ id: `visit:${v.id}`, at: v.location as LatLng, radius: 14, offsetY: -22 })),
+      // A home cell is a house on a short stem, anchored at the stem's foot.
+      ...placedCells.map((c) => ({ id: `cell:${c.id}`, at: c.location as LatLng, radius: 17, offsetY: -25 })),
     ];
     const pick = pickAtTap({ tap: point, zoom: zoomNow, regions: tapRegions, pins });
     if (!pick) {
       setVisitFocus(null);
+      setCellFocus(null);
       // Half-way through a form, a tap on the map only puts the keyboard away.
       // It must never throw away what the person was typing.
-      if (sheet === 'visit' || sheet === 'record' || sheet === 'admin') { Keyboard.dismiss(); return; }
+      if (sheet === 'visit' || sheet === 'record' || sheet === 'admin' || sheet === 'team') { Keyboard.dismiss(); return; }
       clearSelection();
       return;
     }
     if (pick.kind === 'pin' && pick.id.startsWith('visit:')) {
       const visit = visits.find((v) => `visit:${v.id}` === pick.id);
-      if (visit) setVisitFocus(visit);
+      if (visit) { setCellFocus(null); setVisitFocus(visit); }
+      return;
+    }
+    if (pick.kind === 'pin' && pick.id.startsWith('cell:')) {
+      const cell = homeCells.find((c) => `cell:${c.id}` === pick.id);
+      if (cell) { setVisitFocus(null); setCellFocus(cell); }
       return;
     }
     setVisitFocus(null);
+    setCellFocus(null);
     const id = pick.kind === 'pin' ? pick.id.slice('region:'.length) : pick.id;
     // Tapping the region that is already selected keeps it, and keeps the view.
     if (id === selected?.id) return;
@@ -896,9 +1137,10 @@ export default function MapsScreen() {
   }
 
   function onMapLongPress(event: PressEvent | undefined) {
-    if (drawing || !selected) return;
     const lngLat = event?.lngLat;
     if (!lngLat || lngLat.length < 2) return;
+    if (placing) { setPlaceDraft({ latitude: lngLat[1], longitude: lngLat[0] }); return; }
+    if (drawing || !selected) return;
     beginVisit({ latitude: lngLat[1], longitude: lngLat[0] });
   }
 
@@ -1003,7 +1245,7 @@ export default function MapsScreen() {
           const isOn = t.id === selected?.id;
           return (
             <Marker key={t.id} id={t.id} lngLat={toLngLat(t.center)} anchor="center">
-              <Pressable accessibilityRole="button" accessibilityLabel={`${t.name} — ${statusOf(t).label}`} accessibilityState={{ selected: isOn, disabled: !!drawing }} disabled={!!drawing} pointerEvents={drawing ? 'none' : 'auto'} onPressIn={drawing ? undefined : notePinPress} onPress={() => focusTerritory(t)} hitSlop={12} style={[styles.pin, { borderColor: shade }, isOn && styles.pinOn]}>
+              <Pressable accessibilityRole="button" accessibilityLabel={`${t.name} — ${statusOf(t).label}`} accessibilityState={{ selected: isOn, disabled: !!drawing || !!placing }} disabled={!!drawing || !!placing} pointerEvents={drawing || placing ? 'none' : 'auto'} onPressIn={drawing || placing ? undefined : notePinPress} onPress={() => focusTerritory(t)} hitSlop={12} style={[styles.pin, { borderColor: shade }, isOn && styles.pinOn]}>
                 <View style={[styles.pinDot, { backgroundColor: shade }]} />
                 <Text numberOfLines={1} style={styles.pinText}>{t.name}</Text>
               </Pressable>
@@ -1017,12 +1259,40 @@ export default function MapsScreen() {
         ) : null)}
         {visits.map((v) => v.location ? (
           <Marker key={v.id} id={`visit-${v.id}`} lngLat={toLngLat(v.location)} anchor="bottom">
-            <Pressable accessibilityRole="button" accessibilityLabel={`Visit: ${v.placeLabel}`} disabled={!!drawing} pointerEvents={drawing ? 'none' : 'auto'} onPressIn={drawing ? undefined : notePinPress} onPress={() => setVisitFocus(v)} style={styles.visitPin} hitSlop={20}>
-              <View style={styles.visitPinHead}><Ionicons name="home" size={13} color={colors.white} /></View>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Visit: ${v.placeLabel}`} disabled={!!drawing || !!placing} pointerEvents={drawing || placing ? 'none' : 'auto'} onPressIn={drawing || placing ? undefined : notePinPress} onPress={() => { setCellFocus(null); setVisitFocus(v); }} style={styles.visitPin} hitSlop={20}>
+              {/* Footsteps, not a house: the house is the home cell's mark. */}
+              <View style={styles.visitPinHead}><Ionicons name="footsteps" size={13} color={colors.white} /></View>
               <View style={styles.visitPinTail} />
             </Pressable>
           </Marker>
         ) : null)}
+        {/* Home cells: a gold house on a short stem. Distinct from a region pin
+            (a named pill) and a visit (a navy footsteps drop). */}
+        {placedCells.map((cell) => cell.location ? (
+          <Marker key={`cell-${cell.id}`} id={`cell-${cell.id}`} lngLat={toLngLat(cell.location)} anchor="bottom">
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Home cell: ${cell.name}. ${cell.active ? meetingLabel(cell.meetingDay, cell.meetingTime) : 'Not meeting at the moment'}.`}
+              disabled={!!drawing || !!placing}
+              pointerEvents={drawing || placing ? 'none' : 'auto'}
+              onPressIn={drawing || placing ? undefined : notePinPress}
+              onPress={() => { setVisitFocus(null); setCellFocus(cell); }}
+              hitSlop={16}
+              style={styles.cellPin}
+            >
+              <View style={[styles.cellPinHead, !cell.active && styles.cellPinHeadQuiet, cellFocus?.id === cell.id && styles.cellPinHeadOn]}><Ionicons name="home" size={17} color={colors.royalBlue} /></View>
+              <View style={styles.cellPinTail} />
+            </Pressable>
+          </Marker>
+        ) : null)}
+        {placing && placeDraft ? (
+          <Marker id="cell-draft" lngLat={toLngLat(placeDraft)} anchor="bottom">
+            <View pointerEvents="none" style={styles.cellPin}>
+              <View style={[styles.cellPinHead, styles.cellPinHeadDraft]}><Ionicons name="home" size={17} color={colors.royalBlue} /></View>
+              <View style={styles.cellPinTail} />
+            </View>
+          </Marker>
+        ) : null}
         {visitDraft ? (
           <Marker id="visit-draft" lngLat={toLngLat(visitDraft)} anchor="bottom">
             <View style={styles.visitPin}>
@@ -1132,6 +1402,9 @@ export default function MapsScreen() {
           <View key={s} style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: statusColor[s] }]} /><Text style={[styles.legendText, { color: inkForStatus(s, theme) }]}>{statusLabel[s]}</Text></View>
         ))}
         <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: NO_ACTIVITY_COLOR }]} /><Text style={styles.legendText}>No activity yet</Text></View>
+        {placedCells.length ? (
+          <View style={styles.legendItem}><Ionicons name="home" size={11} color={theme.colors.accent} /><Text style={styles.legendText}>Home cell</Text></View>
+        ) : null}
         <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.brightBlue }]} /><Text style={styles.legendText}>{workers.length} live</Text></View>
         {updating ? (
           <View style={styles.legendItem}>
@@ -1142,10 +1415,10 @@ export default function MapsScreen() {
       </View>
 
       {/* A visit someone tapped on the map */}
-      {visitFocus && !drawing ? (
+      {visitFocus && !drawing && !placing ? (
         <View style={[styles.callout, { bottom: Math.round(Math.min(sheetHeight + 20, windowHeight - insets.top - 150)) }]}>
           <View style={styles.calloutTop}>
-            <View style={styles.calloutIcon}><Ionicons name="home" size={14} color={colors.white} /></View>
+            <View style={styles.calloutIcon}><Ionicons name="footsteps" size={14} color={colors.white} /></View>
             <View style={{ flex: 1 }}>
               <Text style={styles.calloutTitle}>{visitFocus.placeLabel}</Text>
               <Text style={styles.calloutMeta}>{visitFocus.unitNumber ? `Unit ${visitFocus.unitNumber} • ` : ''}{visitFocus.authorName} • {timeAgo(visitFocus.visitedAt)}</Text>
@@ -1156,8 +1429,44 @@ export default function MapsScreen() {
         </View>
       ) : null}
 
-      {/* Drawing toolbar */}
-      {drawing ? (
+      {/* A home cell someone tapped on the map */}
+      {cellFocus && !drawing && !placing ? (
+        <View style={[styles.callout, { bottom: Math.round(Math.min(sheetHeight + 20, windowHeight - insets.top - 190)) }]}>
+          <View style={styles.calloutTop}>
+            <View style={[styles.calloutIcon, styles.calloutIconCell]}><Ionicons name="home" size={14} color={colors.royalBlue} /></View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.calloutTitle}>{cellFocus.name}</Text>
+              <Text style={styles.calloutMeta}>{cellFocus.active ? meetingLabel(cellFocus.meetingDay, cellFocus.meetingTime) : 'Not meeting at the moment'}</Text>
+              {cellFocus.leaderName ? <Text style={styles.calloutMeta}>Led by {cellFocus.leaderName}</Text> : null}
+              {addressLine(cellFocus) ? <Text style={styles.calloutMeta}>{addressLine(cellFocus)}</Text> : null}
+              {myLocation && cellFocus.location ? <Text style={styles.calloutMeta}>{distanceLabel(nearestHomeCells([cellFocus], myLocation, { includeInactive: true })[0]?.km ?? NaN, UNITS)} from you</Text> : null}
+            </View>
+            <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={() => setCellFocus(null)} hitSlop={16}><Ionicons name="close" size={18} color={theme.colors.textMuted} /></Pressable>
+          </View>
+          <View style={styles.calloutActions}>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Directions to ${cellFocus.name}`} onPress={() => openCellDirections(cellFocus)} style={styles.calloutButton}>
+              <Ionicons name="navigate" size={16} color={theme.colors.textOnAccent} />
+              <Text style={styles.calloutButtonText}>Directions</Text>
+            </Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel={`Details for ${cellFocus.name}`} onPress={() => router.push({ pathname: '/home-cells', params: { focus: cellFocus.id } } as any)} style={[styles.calloutButton, styles.calloutButtonQuiet]}>
+              <Text style={styles.calloutButtonQuietText}>Details</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
+
+      {/* Dropping a home cell's pin, then the drawing toolbar */}
+      {placing ? (
+        <View style={[styles.drawBar, { bottom: insets.bottom + 16 }]} onLayout={(event) => setDrawBarHeight(Math.round(event.nativeEvent.layout.height + insets.bottom + 16))}>
+          <Text style={styles.drawTitle}>Pin for {placing.name}</Text>
+          <Text accessibilityLiveRegion="polite" style={styles.drawText}>{placeDraft ? 'The house shows where it will be saved. Tap somewhere else to move it, or press Save.' : 'Tap the map where this home cell meets. Drag the map to move around.'}</Text>
+          <View style={styles.drawActions}>
+            <Pressable accessibilityRole="button" accessibilityLabel="Put the pin where I am standing" disabled={busy} onPress={placeAtMe} style={styles.drawBtn}><Text style={styles.drawBtnText}>My location</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Cancel dropping the pin" onPress={stopPlacing} style={styles.drawBtn}><Text style={styles.drawBtnText}>Cancel</Text></Pressable>
+            <Pressable accessibilityRole="button" accessibilityLabel="Save the home cell here" accessibilityState={{ disabled: busy || !placeDraft, busy }} disabled={busy} onPress={savePlacement} style={[styles.drawBtn, styles.drawBtnGold, !placeDraft && styles.drawBtnDim]}><Text style={[styles.drawBtnText, styles.drawBtnTextGold]}>{busy ? 'Saving…' : 'Save'}</Text></Pressable>
+          </View>
+        </View>
+      ) : drawing ? (
         <View style={[styles.drawBar, { bottom: insets.bottom + 16 }]} onLayout={(event) => setDrawBarHeight(Math.round(event.nativeEvent.layout.height + insets.bottom + 16))}>
           <Text style={styles.drawTitle}>Outlining {drawTargetRef.current?.name || selected?.name || 'this region'}</Text>
           <Text accessibilityLiveRegion="polite" style={styles.drawText}>{drawNote || cornerProgressMessage(drawing.length)}</Text>
@@ -1222,7 +1531,7 @@ export default function MapsScreen() {
 
           {!collapsed ? <>
           <View style={styles.tabs}>
-            {([['summary', 'Region'], ['visits', `Visits${relatedVisits.length ? ` (${relatedVisits.length})` : ''}`], ['people', 'Records'], ['record', 'Add record'], ...(access.canOverrideLeaderData ? [['admin', 'Fix numbers']] : [])] as [typeof sheet, string][]).map(([key, label]) => (
+            {([['summary', 'Region'], ['visits', `Visits${relatedVisits.length ? ` (${relatedVisits.length})` : ''}`], ['people', 'Records'], ['record', 'Add record'], ['team', `Team${regionTeam.length ? ` (${regionTeam.length})` : ''}`], ...(access.canOverrideLeaderData ? [['admin', 'Fix numbers']] : [])] as [typeof sheet, string][]).map(([key, label]) => (
               <Pressable key={key} accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected: sheet === key }} onPress={() => setSheet(key)} style={[styles.tab, sheet === key && styles.tabOn]}>
                 <Text style={[styles.tabText, sheet === key && styles.tabTextOn]}>{label}</Text>
               </Pressable>
@@ -1243,6 +1552,13 @@ export default function MapsScreen() {
                   <Stat styles={styles} label="Prayer" value={selected.metrics.prayerRequests} tone={theme.dark ? statusInkDark.follow_up_due : colors.purple} />
                   <Stat styles={styles} label="Due" value={selected.metrics.followUpsDue} tone={theme.colors.warning} />
                 </View>
+                {!teamOff ? (
+                  <Pressable accessibilityRole="button" accessibilityLabel={`Team for ${selected.name}: ${teamSummary(regionTeam)}. Opens the team.`} onPress={() => setSheet('team')} style={styles.teamLine}>
+                    <Ionicons name="people-outline" size={18} color={theme.colors.accent} />
+                    <Text style={styles.teamLineText}>Team: {teamSummary(regionTeam)}</Text>
+                    <Ionicons name="chevron-forward" size={16} color={theme.colors.textMuted} />
+                  </Pressable>
+                ) : null}
                 <View style={styles.actionRow}>
                   <Pressable accessibilityRole="button" accessibilityLabel={checkinId ? 'End my check-in' : 'Check in — I am out here'} accessibilityState={{ selected: !!checkinId }} disabled={busy} onPress={toggleCheckin} style={[styles.bigButton, checkinId ? styles.bigButtonLive : null]}>
                     <Ionicons name={checkinId ? 'radio' : 'walk'} size={18} color={checkinId ? colors.white : theme.colors.textOnAccent} />
@@ -1298,7 +1614,7 @@ export default function MapsScreen() {
                 {visitsReady && !relatedVisits.length ? <Text style={styles.empty}>No visits logged here yet. Press and hold on the map, or use Log a visit.</Text> : null}
                 {relatedVisits.map((v) => (
                   <Pressable key={v.id} accessibilityRole="button" accessibilityLabel={`${v.placeLabel}, ${timeAgo(v.visitedAt)}`} onPress={() => { setVisitFocus(v); if (v.location) flyTo(v.location, Math.max(zoomRef.current, 15), 500); }} style={styles.contactRow}>
-                    <View style={styles.visitRowIcon}><Ionicons name="home" size={13} color={colors.white} /></View>
+                    <View style={styles.visitRowIcon}><Ionicons name="footsteps" size={13} color={colors.white} /></View>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.contactName}>{v.placeLabel}</Text>
                       <Text style={styles.contactSub}>{v.unitNumber ? `Unit ${v.unitNumber} • ` : ''}{v.authorName} • {timeAgo(v.visitedAt)}</Text>
@@ -1328,20 +1644,34 @@ export default function MapsScreen() {
             ) : null}
 
             {sheet === 'people' ? (
-              relatedContacts.length ? relatedContacts.map((c) => (
-                <View key={c.id} style={styles.contactRow}>
-                  <View style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.green, marginTop: 4 }]} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.contactName}>{c.name}</Text>
-                    <Text style={styles.contactSub}>{c.status.replace('_', ' ')}{c.nextFollowUpAt ? ` • next ${c.nextFollowUpAt}` : ''}{c.phone ? ` • ${c.phone}` : ''}</Text>
-                    {c.prayerRequest ? <Text style={styles.contactPrayer}>{c.prayerRequest}</Text> : null}
+              relatedContacts.length ? relatedContacts.map((c) => {
+                // What an evangelist can say at the door: the nearest home cell.
+                const near = nearestHomeCells(homeCells, c.location, { limit: 1 })[0];
+                return (
+                  <View key={c.id} style={styles.contactRow}>
+                    <View style={[styles.contactDot, { backgroundColor: c.followUpNeeded ? colors.purple : colors.green, marginTop: 4 }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.contactName}>{c.name}</Text>
+                      <Text style={styles.contactSub}>{c.status.replace('_', ' ')}{c.followUpNeeded && c.nextFollowUpAt ? ` • ${dueLabel(c.nextFollowUpAt)}` : ''}{c.phone ? ` • ${c.phone}` : ''}</Text>
+                      {c.prayerRequest ? <Text style={styles.contactPrayer}>{c.prayerRequest}</Text> : null}
+                      {near ? <Text style={styles.cellLine}>Nearest home cell: {near.cell.name} · {meetingLabel(near.cell.meetingDay, near.cell.meetingTime)}{addressLine(near.cell) ? ` · ${addressLine(near.cell)}` : ''} · {distanceLabel(near.km, UNITS)}</Text> : null}
+                    </View>
                   </View>
-                </View>
-              )) : <Text style={styles.empty}>{recordsFailed ? 'The records could not load just now. Pull down to try again, or reopen this screen in a moment.' : 'No records here yet. Add the first one.'}</Text>
+                );
+              }) : <Text style={styles.empty}>{recordsFailed ? 'The records could not load just now. Pull down to try again, or reopen this screen in a moment.' : 'No records here yet. Add the first one.'}</Text>
             ) : null}
 
             {sheet === 'record' ? (
               <View style={styles.form}>
+                {recordNearest ? (
+                  <View style={styles.cellHint}>
+                    <Ionicons name="home" size={16} color={theme.colors.accent} />
+                    {/* Measured from where the phone is. Without a location fix it
+                        is measured from the middle of the region, and says so —
+                        "1.2 mi away" from a state's centre means nothing at a door. */}
+                    <Text style={styles.cellHintText}>{nearestSentence(recordNearest, UNITS)}{myLocation ? '' : ` Measured from the middle of ${selected.name}, because your location is not on.`}</Text>
+                  </View>
+                ) : null}
                 <TextInput accessibilityLabel="Person or household name" style={styles.input} value={record.name} onChangeText={(name) => setRecord((c) => ({ ...c, name }))} placeholder="Person or household name" placeholderTextColor={theme.colors.textMuted} />
                 <TextInput accessibilityLabel="Phone number" style={styles.input} value={record.phone} onChangeText={(phone) => setRecord((c) => ({ ...c, phone }))} placeholder="Phone" placeholderTextColor={theme.colors.textMuted} keyboardType="phone-pad" />
                 <TextInput accessibilityLabel="WhatsApp number" style={styles.input} value={record.whatsapp} onChangeText={(whatsapp) => setRecord((c) => ({ ...c, whatsapp }))} placeholder="WhatsApp" placeholderTextColor={theme.colors.textMuted} keyboardType="phone-pad" />
@@ -1358,6 +1688,56 @@ export default function MapsScreen() {
                   {busy ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
                   <Text style={styles.goldButtonText}>{busy ? 'Saving…' : myLocation ? 'Save at my location' : 'Save to this region'}</Text>
                 </Pressable>
+              </View>
+            ) : null}
+
+            {sheet === 'team' ? (
+              <View style={styles.form}>
+                {teamNote ? <Text style={styles.empty}>{teamNote}</Text> : null}
+                {!teamNote && !regionTeam.length ? (
+                  <Text style={styles.empty}>No one is assigned to {selected.name} yet.{access.canManageContent ? ' Find someone on the outreach team below to add them.' : ' A leader or admin can add people.'}</Text>
+                ) : null}
+                {regionTeam.map((member) => (
+                  <View key={member.assignmentId} style={styles.teamRow}>
+                    <PersonBadge styles={styles} person={member} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.contactName}>{member.displayName}</Text>
+                      <Text style={styles.contactSub}>{member.role === 'lead' ? 'Leads this region' : 'On this region\'s team'}</Text>
+                    </View>
+                    {access.canManageContent ? (
+                      <>
+                        <Pressable accessibilityRole="button" accessibilityLabel={member.role === 'lead' ? `Make ${member.displayName} a team member` : `Make ${member.displayName} the lead`} disabled={teamBusy} onPress={() => toggleTeamLead(member)} style={styles.rowButton}>
+                          <Text style={styles.rowButtonText}>{member.role === 'lead' ? 'Member' : 'Lead'}</Text>
+                        </Pressable>
+                        <Pressable accessibilityRole="button" accessibilityLabel={`Take ${member.displayName} off this region`} disabled={teamBusy} onPress={() => confirmRemoveMember(member)} style={styles.rowButton}>
+                          <Ionicons name="close" size={18} color={theme.colors.danger} />
+                        </Pressable>
+                      </>
+                    ) : null}
+                  </View>
+                ))}
+                {access.canManageContent && !teamOff ? (
+                  <>
+                    <Text style={styles.section}>Add someone</Text>
+                    <View style={styles.teamSearch}>
+                      <TextInput accessibilityLabel="Search the outreach team by name" style={[styles.input, { flex: 1 }]} value={teamQuery} onChangeText={setTeamQuery} onSubmitEditing={searchTeam} returnKeyType="search" placeholder="Name on the outreach team" placeholderTextColor={theme.colors.textMuted} />
+                      <Pressable accessibilityRole="button" accessibilityLabel="Search the outreach team" accessibilityState={{ busy: teamBusy }} disabled={teamBusy} onPress={searchTeam} style={styles.rowButton}>
+                        {teamBusy ? <ActivityIndicator color={theme.colors.textPrimary} /> : <Ionicons name="search" size={18} color={theme.colors.textPrimary} />}
+                      </Pressable>
+                    </View>
+                    {teamResults && !teamResults.length ? <Text style={styles.empty}>Nobody on the outreach team matches that name. Only people with outreach access can be added.</Text> : null}
+                    {teamResults?.map((person) => {
+                      const already = regionTeam.some((m) => m.userId === person.id);
+                      return (
+                        <Pressable key={person.id} accessibilityRole="button" accessibilityLabel={already ? `${person.displayName} is already on this team` : `Add ${person.displayName} to ${selected.name}`} accessibilityState={{ disabled: already || teamBusy }} disabled={already || teamBusy} onPress={() => addTeamMember(person)} style={styles.teamRow}>
+                          <PersonBadge styles={styles} person={person} />
+                          <Text style={[styles.contactName, { flex: 1 }]}>{person.displayName}</Text>
+                          <Text style={already ? styles.contactSub : styles.upLinkText}>{already ? 'On the team' : 'Add'}</Text>
+                        </Pressable>
+                      );
+                    })}
+                  </>
+                ) : null}
               </View>
             ) : null}
 
@@ -1423,6 +1803,18 @@ function Flag({ styles, theme, label, value, onPress }: { styles: MapStyles; the
   );
 }
 
+/** A person's round picture, or their initials when they have not added one. */
+function PersonBadge({ styles, person }: { styles: MapStyles; person: Person }) {
+  if (person.avatarUrl) {
+    return <Image source={{ uri: person.avatarUrl }} style={styles.personBadgeImage} accessibilityElementsHidden importantForAccessibility="no" />;
+  }
+  return (
+    <View style={styles.personBadge} accessibilityElementsHidden importantForAccessibility="no">
+      <Text style={styles.personBadgeText}>{initialsFor(person.displayName)}</Text>
+    </View>
+  );
+}
+
 /**
  * Both themes, one definition.
  *
@@ -1484,6 +1876,31 @@ const useStyles = createThemedStyles((t) => {
     cornerFirst: { minWidth: 36, minHeight: 36, borderRadius: 18 },
     cornerClose: { minWidth: 48, minHeight: 48, borderRadius: 24, backgroundColor: colors.gold, borderColor: colors.white },
     cornerText: { color: colors.royalBlue, fontWeight: '900', fontSize: t.type.overline },
+    // Home cell: a gold rounded square with a navy house, on a short stem.
+    cellPin: { alignItems: 'center' },
+    cellPinHead: { width: 34, height: 34, borderRadius: 10, backgroundColor: colors.gold, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: colors.white, ...t.elevation.medium },
+    cellPinHeadQuiet: { backgroundColor: colors.softGold },
+    cellPinHeadOn: { borderColor: colors.royalBlue, borderWidth: 3 },
+    cellPinHeadDraft: { backgroundColor: colors.white, borderColor: colors.gold, borderWidth: 3 },
+    cellPinTail: { width: 3, height: 9, backgroundColor: colors.royalBlue, marginTop: -1 },
+    calloutIconCell: { backgroundColor: colors.gold },
+    calloutActions: { flexDirection: 'row', gap: 8, marginTop: 4 },
+    calloutButton: { flex: 1, flexDirection: 'row', gap: 6, minHeight: 48, borderRadius: t.radius.md, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 12 },
+    calloutButtonText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.meta },
+    calloutButtonQuiet: { backgroundColor: inset, borderWidth: 1, borderColor: t.colors.borderStrong },
+    calloutButtonQuietText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+    cellLine: { color: t.colors.accent, fontSize: t.type.meta, marginTop: 4, lineHeight: 18, fontWeight: '700' },
+    cellHint: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', padding: 12, borderRadius: t.radius.md, backgroundColor: inset, borderWidth: 1, borderColor: t.colors.accentBorder },
+    cellHintText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.meta, lineHeight: 19, fontWeight: '700' },
+    teamLine: { flexDirection: 'row', alignItems: 'center', gap: 8, minHeight: 48, minWidth: 48, marginTop: 10, paddingHorizontal: 12, borderRadius: t.radius.md, backgroundColor: inset },
+    teamLineText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.meta, fontWeight: '800' },
+    teamRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 56, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: hairline },
+    teamSearch: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    rowButton: { minHeight: 48, minWidth: 48, paddingHorizontal: 12, borderRadius: t.radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: inset, borderWidth: 1, borderColor: t.colors.borderStrong },
+    rowButtonText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
+    personBadge: { minWidth: 36, minHeight: 36, borderRadius: 18, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+    personBadgeImage: { width: 36, height: 36, borderRadius: 18 },
+    personBadgeText: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.overline },
     visitRowIcon: { width: 24, height: 24, borderRadius: 12, backgroundColor: t.dark ? t.colors.accentSolid : colors.deepBlue, alignItems: 'center', justifyContent: 'center', marginTop: 2 },
 
     callout: { position: 'absolute', left: 12, right: 72, borderRadius: t.radius.lg, backgroundColor: sheetFill, borderWidth: StyleSheet.hairlineWidth, borderColor: hairline, padding: 14, gap: 6, ...t.elevation.high },

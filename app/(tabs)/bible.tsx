@@ -1025,7 +1025,7 @@ const useStyles = createThemedStyles((t: AppTheme) =>
     modalCard: {
       maxHeight: '78%',
       borderRadius: t.radius.xl,
-      backgroundColor: t.colors.surfaceRaised,
+      backgroundColor: t.colors.sheet,
       borderWidth: 1,
       borderColor: t.colors.borderStrong,
       padding: t.spacing.lg,

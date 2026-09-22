@@ -13,6 +13,8 @@ import { friendlyError } from '../lib/errorMessages';
 import { ChatAttachment, ChatAttachmentKind, attachmentKindFromMime, chatAttachmentLimitBytes } from '../lib/chatService';
 import { formatBytes, tooLargeMessage } from '../lib/uploadService';
 import { AppTheme, createThemedStyles, getTheme } from '../lib/theme';
+import { isVoiceNote } from '../lib/voiceNotes';
+import { VoiceNoteBubble } from './VoiceNotePlayer';
 
 export type PickedFile = { uri: string; name?: string | null; mimeType?: string | null; size?: number | null; kind: ChatAttachmentKind; width?: number; height?: number };
 
@@ -63,12 +65,14 @@ async function pick(choice: Choice['key']): Promise<PickedFile | null> {
   return { uri: asset.uri, name: asset.fileName, mimeType: mime, size: asset.fileSize, kind: attachmentKindFromMime(mime), width: asset.width, height: asset.height };
 }
 
-export function AttachSheet({ visible, dark, onClose, onPicked }: { visible: boolean; dark: boolean; onClose: () => void; onPicked: (file: PickedFile) => void }) {
+export function AttachSheet({ visible, dark, onClose, onPicked, onSong }: { visible: boolean; dark: boolean; onClose: () => void; onPicked: (file: PickedFile) => void; /** Song choice (2026-09-22): opens the church's songs from Media. */ onSong?: () => void }) {
   const pendingChoice = useRef<Choice['key'] | null>(null);
+  const pendingSong = useRef(false);
   const insets = useSafeAreaInsets();
   const styles = useStyles(getTheme(dark));
 
   async function openPicker() {
+    if (pendingSong.current) { pendingSong.current = false; onSong?.(); return; }
     const choice = pendingChoice.current;
     pendingChoice.current = null;
     if (!choice) return;
@@ -83,6 +87,14 @@ export function AttachSheet({ visible, dark, onClose, onPicked }: { visible: boo
     } catch (err) {
       Alert.alert('We could not open that', friendlyError(err, 'Please try choosing the file again.'));
     }
+  }
+
+  function chooseSong() {
+    if (pendingChoice.current || pendingSong.current) return;
+    pendingSong.current = true;
+    onClose();
+    // Same as the pickers: iOS opens the next sheet only after this one has gone.
+    if (Platform.OS !== 'ios') void openPicker();
   }
 
   function choose(choice: Choice['key']) {
@@ -110,6 +122,14 @@ export function AttachSheet({ visible, dark, onClose, onPicked }: { visible: boo
                 <Text style={styles.choiceLabel}>{choice.label}</Text>
               </Pressable>
             ))}
+            {onSong ? (
+              <Pressable accessibilityRole="button" accessibilityLabel="Song from Media" onPress={chooseSong} style={styles.choice}>
+                <View style={styles.choiceIcon}>
+                  <Ionicons name="musical-notes" size={26} color={getTheme(dark).colors.textOnAccent} />
+                </View>
+                <Text style={styles.choiceLabel}>Song</Text>
+              </Pressable>
+            ) : null}
           </View>
         </View>
       </View>
@@ -223,6 +243,21 @@ export function AttachmentBubble({ attachment, dark, own, sendingProgress, onOpe
   }, []);
   const aspect = measured ?? 4 / 3;
 
+  // A voice note plays right here in the message, not in the big player.
+  if (isVoiceNote(attachment)) {
+    return (
+      <VoiceNoteBubble
+        id={attachment.path || attachment.url}
+        url={attachment.url}
+        durationMs={attachment.durationMs}
+        own={own}
+        dark={dark}
+        sendingProgress={sendingProgress}
+        size={attachment.size}
+      />
+    );
+  }
+
   if (attachment.kind === 'image') {
     return (
       <View>
@@ -308,7 +343,7 @@ export function formatSize(bytes: number) {
 
 const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   backdrop: { flex: 1, minHeight: 200, justifyContent: 'flex-end', backgroundColor: t.colors.overlay },
-  sheet: { margin: 12, marginBottom: 24, borderRadius: t.radius.xl, backgroundColor: t.colors.surfaceRaised, borderWidth: 1, borderColor: t.colors.borderStrong, padding: 18, ...t.elevation.high },
+  sheet: { margin: 12, marginBottom: 24, borderRadius: t.radius.xl, backgroundColor: t.colors.sheet, borderWidth: 1, borderColor: t.colors.borderStrong, padding: 18, ...t.elevation.high },
   sheetHeading: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle, marginBottom: 14 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-around', rowGap: 18 },
   choice: { minWidth: 76, minHeight: 96, alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 4 },

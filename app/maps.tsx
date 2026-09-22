@@ -9,28 +9,45 @@
 //      comes from the token set in lib/theme.ts.
 //   2. A region is never painted as busy because of a stored label. The status
 //      shown is the one derived from what really happened there.
+//
+// Added 2026-09-22 (owner's list): each region shows its team (leaders and
+// admins can change it here), the home cells in or near it, and each record
+// shows its nearest home cell. Dropping a home cell's pin needs the phone map;
+// here a cell is placed by finding its address on the Home cells page.
 import { Ionicons } from '@expo/vector-icons';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Image, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { AppHeader } from '../components/AppHeader';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { Screen } from '../components/Screen';
 import { useAccessProfile } from '../lib/accessControl';
 import {
+  addToRegionTeam,
   buildActivityIndex,
   deriveTerritoryStatus,
   type DerivedStatus,
   getOutreachContacts,
+  getRegionTeams,
   getTerritories,
   getVisits,
+  initialsFor,
   type OutreachRecord,
+  type Person,
+  removeFromRegionTeam,
   saveOutreachContact,
+  searchOutreachTeam,
+  setRegionTeamRole,
+  teamFor,
+  type TeamMember,
+  teamSummary,
   type TerritoryWithActivity,
   updateTerritoryMetrics,
   type VisitPin,
 } from '../lib/evangelismService';
 import { friendlyError } from '../lib/errorMessages';
+import { dueLabel, followUpDateFromInput } from '../lib/followUps';
+import { addressLine, directionsUrl, distanceLabel, getHomeCells, type HomeCell, meetingLabel, nearestHomeCells, preferredUnits } from '../lib/homeCells';
 import { colors, createThemedStyles, getTheme, type AppTheme } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
 import { Territory } from '../types/models';
@@ -90,6 +107,8 @@ function timeAgo(iso?: string): string {
   return `${days} days ago`;
 }
 
+const UNITS = preferredUnits(typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().locale : undefined);
+
 export default function MapsWebScreen() {
   const { access, loadingAccess } = useAccessProfile();
   const { theme } = useAppTheme();
@@ -108,6 +127,18 @@ export default function MapsWebScreen() {
   const [query, setQuery] = useState('');
   const [record, setRecord] = useState({ name: '', phone: '', whatsapp: '', email: '', prayerRequest: '', assignedTo: '', nextFollowUpAt: '', notes: '', gospelShared: true, invitedToChurch: true, bibleStudyStarted: false, savedAcceptedChrist: false, followUpNeeded: true });
   const [metricEdits, setMetricEdits] = useState({ reached: '', soulsSaved: '', prayerRequests: '', followUps: '' });
+  // Region teams and home cells (owner's list, 2026-09-22).
+  const params = useLocalSearchParams<{ region?: string; homeCell?: string; placeCell?: string }>();
+  const [homeCells, setHomeCells] = useState<HomeCell[]>([]);
+  const [team, setTeam] = useState<TeamMember[]>([]);
+  const [teamNote, setTeamNote] = useState<string | null>(null);
+  const [teamOff, setTeamOff] = useState(false);
+  const [teamQuery, setTeamQuery] = useState('');
+  const [teamResults, setTeamResults] = useState<Person[] | null>(null);
+  const [teamBusy, setTeamBusy] = useState(false);
+  const handledParamsRef = useRef('');
+  // Shown under the date box: Alert.alert does nothing in a browser.
+  const [dateNote, setDateNote] = useState<string | null>(null);
 
   function goBack() {
     if (router.canGoBack()) router.back();
@@ -120,12 +151,20 @@ export default function MapsWebScreen() {
    * rather than emptying the page.
    */
   const loadAll = useCallback(async () => {
-    const [territories, contactResult, visitResult] = await Promise.all([
+    const [territories, contactResult, visitResult, cellResult, teamResult] = await Promise.all([
       getTerritories(),
       getOutreachContacts().then((rows) => ({ ok: true as const, rows })).catch(() => ({ ok: false as const, rows: [] as OutreachRecord[] })),
       getVisits().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
+      getHomeCells().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
+      getRegionTeams().catch(() => ({ ready: false, reason: 'unavailable' } as const)),
     ]);
     setTerritoryList(territories);
+    if (cellResult.ready) setHomeCells(cellResult.cells);
+    setTeamOff(!teamResult.ready && teamResult.reason === 'not-switched-on');
+    if (teamResult.ready) { setTeam(teamResult.members); setTeamNote(null); }
+    else setTeamNote(teamResult.reason === 'not-switched-on'
+      ? 'Region teams are not switched on yet. Once they are, the people assigned to each region will show here.'
+      : 'The region teams could not load just now. Pull down to try again.');
     setContactList(contactResult.rows);
     setRecordsNote(contactResult.ok ? null : 'The outreach records could not load just now. Pull down to try again.');
     if (visitResult.ready) {
@@ -193,11 +232,72 @@ export default function MapsWebScreen() {
     if (!selected) return [];
     return visits.filter((visit) => visit.territoryId === selected.id || children.some((territory) => territory.id === visit.territoryId));
   }, [children, visits, selected]);
+  const regionTeam = useMemo(() => teamFor(team, selected?.id), [team, selected?.id]);
+  /** Home cells inside this region (or a region within it); if none, the nearest to its centre. */
+  const regionCells = useMemo((): { inside: boolean; rows: { cell: HomeCell; km?: number }[] } => {
+    if (!selected) return { inside: true, rows: [] };
+    const ids = new Set([selected.id, ...children.map((t) => t.id)]);
+    const inside = homeCells.filter((cell) => cell.territoryId && ids.has(cell.territoryId));
+    if (inside.length) return { inside: true, rows: inside.map((cell) => ({ cell })) };
+    return { inside: false, rows: nearestHomeCells(homeCells, selected.center, { limit: 3 }) };
+  }, [selected, children, homeCells]);
+
+  // Arriving from the Reach tab on a region, or from Home cells on a cell.
+  useEffect(() => {
+    const key = [params.region, params.homeCell, params.placeCell].map((v) => v || '').join('|');
+    if (key === '||' || handledParamsRef.current === key || !territoryList.length) return;
+    const cellId = params.homeCell || params.placeCell;
+    if (cellId && !homeCells.length) return;
+    handledParamsRef.current = key;
+    const regionId = params.region || homeCells.find((c) => c.id === cellId)?.territoryId;
+    const region = regionId ? territoryList.find((t) => t.id === regionId) : undefined;
+    if (region) setSelected(region);
+    if (params.placeCell) {
+      Alert.alert('Drop the pin from your phone', 'Placing a home cell on the map needs the phone app. On a computer, type the cell\'s address on the Home cells page and use Find this address instead.');
+    }
+  }, [params.region, params.homeCell, params.placeCell, territoryList, homeCells]);
+
   const dueToday = contactList.filter((contact) => contact.nextFollowUpAt && isTodayOrOverdue(contact.nextFollowUpAt));
   const overdue = contactList.filter((contact) => contact.nextFollowUpAt && new Date(contact.nextFollowUpAt) < startOfToday());
 
   function focusTerritory(territory: TerritoryWithActivity) {
     setSelected(territory);
+  }
+
+  function openDirections(cell: HomeCell) {
+    const url = directionsUrl(cell, Platform.OS);
+    if (!url) return Alert.alert('No address yet', `${cell.name} has no address or spot on the map yet.`);
+    Linking.openURL(url).catch(() => Alert.alert('Maps did not open', 'The maps page could not open just now.'));
+  }
+
+  async function reloadTeam() {
+    const result = await getRegionTeams();
+    if (result.ready) { setTeam(result.members); setTeamNote(null); }
+  }
+
+  async function searchTeam() {
+    if (teamBusy) return;
+    setTeamBusy(true);
+    try {
+      setTeamResults(await searchOutreachTeam(teamQuery));
+    } catch (err) {
+      Alert.alert('Search did not work', friendlyError(err, 'The outreach team could not load just now.'));
+    } finally {
+      setTeamBusy(false);
+    }
+  }
+
+  async function runTeamChange(work: () => Promise<void>, fallback: string) {
+    if (teamBusy) return;
+    setTeamBusy(true);
+    try {
+      await work();
+      await reloadTeam();
+    } catch (err) {
+      Alert.alert('Not changed', friendlyError(err, fallback));
+    } finally {
+      setTeamBusy(false);
+    }
   }
 
   function runSearch() {
@@ -214,6 +314,14 @@ export default function MapsWebScreen() {
   async function addRecord() {
     if (!selected || saving) return;
     if (!record.name.trim()) return Alert.alert('Name needed', 'Add a person or household name before saving.');
+    // "2026-09-29" means 9 in the morning here, not midnight in London (which
+    // is the evening before in Ohio, and showed the person overdue a day early).
+    const nextAt = followUpDateFromInput(record.nextFollowUpAt);
+    if (nextAt === undefined) {
+      setDateNote('Write the date as year-month-day, for example 2026-09-29, or leave it empty.');
+      return;
+    }
+    setDateNote(null);
     setSaving(true);
     try {
       const status = record.savedAcceptedChrist ? 'saved' : record.bibleStudyStarted ? 'bible_study' : record.gospelShared ? 'gospel_shared' : 'contact_made';
@@ -232,7 +340,7 @@ export default function MapsWebScreen() {
         savedAcceptedChrist: record.savedAcceptedChrist,
         followUpNeeded: record.followUpNeeded,
         assignedTo: record.assignedTo,
-        nextFollowUpAt: record.nextFollowUpAt,
+        nextFollowUpAt: nextAt || '',
         notes: record.notes,
         status
       });
@@ -253,7 +361,7 @@ export default function MapsWebScreen() {
           savedAcceptedChrist: record.savedAcceptedChrist,
           followUpNeeded: record.followUpNeeded,
           assignedTo: record.assignedTo,
-          nextFollowUpAt: record.nextFollowUpAt,
+          nextFollowUpAt: nextAt || undefined,
           notes: record.notes,
           status,
           createdBy: 'You',
@@ -489,8 +597,69 @@ export default function MapsWebScreen() {
                 {selected.streetNames.map((street) => <Text key={street} style={styles.streetName}>{street}</Text>)}
               </View>
             ) : null}
+
+            <View style={styles.card}>
+              <Text style={styles.kicker}>TEAM</Text>
+              <Text style={styles.metaLine}>{teamNote || teamSummary(regionTeam)}</Text>
+              {regionTeam.map((member) => (
+                <View key={member.assignmentId} style={styles.personRow}>
+                  <Badge theme={theme} person={member} />
+                  <View style={styles.rowBody}>
+                    <Text style={styles.rowTitle}>{member.displayName}</Text>
+                    <Text style={styles.rowSub}>{member.role === 'lead' ? 'Leads this region' : 'On this region\'s team'}</Text>
+                  </View>
+                  {access.canManageContent ? (
+                    <>
+                      <Pressable accessibilityRole="button" accessibilityLabel={member.role === 'lead' ? `Make ${member.displayName} a team member` : `Make ${member.displayName} the lead`} disabled={teamBusy} onPress={() => runTeamChange(() => setRegionTeamRole(member, member.role === 'lead' ? 'member' : 'lead'), 'Only leaders and admins can change a region team.')} style={styles.smallButton}>
+                        <Text style={styles.smallButtonText}>{member.role === 'lead' ? 'Member' : 'Lead'}</Text>
+                      </Pressable>
+                      <Pressable accessibilityRole="button" accessibilityLabel={`Take ${member.displayName} off this region`} disabled={teamBusy} onPress={() => runTeamChange(() => removeFromRegionTeam(member.assignmentId), 'Only leaders and admins can change a region team.')} style={styles.smallButton}>
+                        <Ionicons name="close" size={18} color={theme.colors.danger} />
+                      </Pressable>
+                    </>
+                  ) : null}
+                </View>
+              ))}
+              {access.canManageContent && !teamOff ? (
+                <View style={styles.form}>
+                  <View style={styles.searchRow}>
+                    <TextInput accessibilityLabel="Search the outreach team by name" value={teamQuery} onChangeText={setTeamQuery} onSubmitEditing={searchTeam} returnKeyType="search" placeholder="Add someone on the outreach team" placeholderTextColor={theme.colors.textMuted} style={[styles.input, styles.rowBody]} />
+                    <PrimaryButton label={teamBusy ? 'Searching…' : 'Search'} variant="outline" onPress={searchTeam} />
+                  </View>
+                  {teamResults && !teamResults.length ? <Text style={styles.empty}>Nobody on the outreach team matches that name.</Text> : null}
+                  {teamResults?.map((person) => {
+                    const already = regionTeam.some((m) => m.userId === person.id);
+                    return (
+                      <Pressable key={person.id} accessibilityRole="button" accessibilityLabel={already ? `${person.displayName} is already on this team` : `Add ${person.displayName} to ${selected.name}`} accessibilityState={{ disabled: already || teamBusy }} disabled={already || teamBusy} onPress={() => runTeamChange(async () => { await addToRegionTeam(selected.id, person.id, regionTeam.length ? 'member' : 'lead'); setTeamResults(null); setTeamQuery(''); }, 'Only leaders and admins can change a region team.')} style={styles.personRow}>
+                        <Badge theme={theme} person={person} />
+                        <Text style={[styles.rowTitle, styles.rowBody]}>{person.displayName}</Text>
+                        <Text style={already ? styles.rowSub : styles.upLinkText}>{already ? 'On the team' : 'Add'}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+            </View>
           </View>
         </View>
+
+        <Text style={styles.section}>{regionCells.inside ? `Home cells in ${selected.name}` : 'Nearest home cells'}</Text>
+        {!regionCells.rows.length ? <Text style={styles.empty}>No home cells with a spot on the map yet. Add them on the Home cells page.</Text> : null}
+        {regionCells.rows.map(({ cell, km }) => (
+          <View key={cell.id} style={[styles.card, styles.rowCard]}>
+            <View style={styles.cellIcon}><Ionicons name="home" size={14} color={theme.colors.textOnAccent} /></View>
+            <View style={styles.rowBody}>
+              <Text style={styles.rowTitle}>{cell.name}{km !== undefined ? ` · ${distanceLabel(km, UNITS)}` : ''}</Text>
+              <Text style={styles.rowSub}>{cell.active ? meetingLabel(cell.meetingDay, cell.meetingTime) : 'Not meeting at the moment'}{cell.leaderName ? ` • Led by ${cell.leaderName}` : ''}</Text>
+              {addressLine(cell) ? <Text style={styles.body}>{addressLine(cell)}</Text> : null}
+            </View>
+            <PrimaryButton label="Directions" variant="outline" onPress={() => openDirections(cell)} />
+          </View>
+        ))}
+        <Pressable accessibilityRole="button" accessibilityLabel="Open the Home cells page" onPress={() => router.push('/home-cells' as any)} style={styles.upLink}>
+          <Ionicons name="home-outline" size={18} color={theme.colors.accent} />
+          <Text style={styles.upLinkText}>All home cells</Text>
+        </Pressable>
 
         <Text style={styles.section}>Follow-ups at a glance</Text>
         <View style={styles.stats}>
@@ -505,7 +674,7 @@ export default function MapsWebScreen() {
         {!visitsNote && !relatedVisits.length ? <Text style={styles.empty}>No visits logged here yet. The team drops these from the phone app while they are out.</Text> : null}
         {relatedVisits.slice(0, 12).map((visit) => (
           <View key={visit.id} style={[styles.card, styles.rowCard]}>
-            <View style={styles.visitIcon}><Ionicons name="home" size={13} color={theme.colors.textOnBrand} /></View>
+            <View style={styles.visitIcon}><Ionicons name="footsteps" size={13} color={theme.colors.textOnBrand} /></View>
             <View style={styles.rowBody}>
               <Text style={styles.rowTitle}>{visit.placeLabel}</Text>
               <Text style={styles.rowSub}>{visit.unitNumber ? `Unit ${visit.unitNumber} • ` : ''}{visit.authorName} • {timeAgo(visit.visitedAt)}</Text>
@@ -539,8 +708,9 @@ export default function MapsWebScreen() {
             <View style={[styles.dot, styles.rowDot, { backgroundColor: contact.followUpNeeded ? colors.purple : colors.green }]} />
             <View style={styles.rowBody}>
               <Text style={styles.rowTitle}>{contact.name}</Text>
-              <Text style={styles.rowSub}>{contact.status.replace('_', ' ')} • {contact.nextFollowUpAt ? `Next follow-up ${contact.nextFollowUpAt}` : 'No follow-up set'}</Text>
+              <Text style={styles.rowSub}>{contact.status.replace('_', ' ')} • {contact.followUpNeeded && contact.nextFollowUpAt ? `Next follow-up: ${dueLabel(contact.nextFollowUpAt)}` : contact.followUpNeeded ? 'Follow-up, no date set' : 'No follow-up set'}</Text>
               <Text style={styles.body}>{contact.prayerRequest || 'No prayer request written down.'}</Text>
+              <NearestCellLine theme={theme} cells={homeCells} from={contact.location} />
             </View>
           </View>
         ))}
@@ -559,8 +729,14 @@ export default function MapsWebScreen() {
             <Flag theme={theme} label="Saved" value={record.savedAcceptedChrist} onPress={() => setRecord((current) => ({ ...current, savedAcceptedChrist: !current.savedAcceptedChrist }))} />
             <Flag theme={theme} label="Follow up" value={record.followUpNeeded} onPress={() => setRecord((current) => ({ ...current, followUpNeeded: !current.followUpNeeded }))} />
           </View>
-          <TextInput accessibilityLabel="Assigned leader" style={styles.input} value={record.assignedTo} onChangeText={(assignedTo) => setRecord((current) => ({ ...current, assignedTo }))} placeholder="Assigned leader" placeholderTextColor={theme.colors.textMuted} />
-          <TextInput accessibilityLabel="Next follow-up date, year month day" style={styles.input} value={record.nextFollowUpAt} onChangeText={(nextFollowUpAt) => setRecord((current) => ({ ...current, nextFollowUpAt }))} placeholder="Next follow-up date YYYY-MM-DD" placeholderTextColor={theme.colors.textMuted} />
+          {/* This box is a name written on the record, nothing more. Who gets the
+              follow-up is decided by the account: the person saving it, until a
+              leader hands it on from Follow-ups > Team. Labelled "Assigned
+              leader" it promised a list the leader never saw. */}
+          <TextInput accessibilityLabel="Leader's name, written on the record only" style={styles.input} value={record.assignedTo} onChangeText={(assignedTo) => setRecord((current) => ({ ...current, assignedTo }))} placeholder="Leader's name (written on the record only)" placeholderTextColor={theme.colors.textMuted} />
+          <Text style={styles.body}>This person goes on your own follow-up list. A leader can hand them to someone else from Follow-ups.</Text>
+          <TextInput accessibilityLabel="Next follow-up date, year month day" style={styles.input} value={record.nextFollowUpAt} onChangeText={(nextFollowUpAt) => { setDateNote(null); setRecord((current) => ({ ...current, nextFollowUpAt })); }} placeholder="Next follow-up date YYYY-MM-DD" placeholderTextColor={theme.colors.textMuted} />
+          {dateNote ? <Text accessibilityLiveRegion="polite" style={styles.dateNote}>{dateNote}</Text> : null}
           <TextInput accessibilityLabel="Notes" style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((current) => ({ ...current, notes }))} placeholder="Notes" placeholderTextColor={theme.colors.textMuted} multiline />
           <Pressable accessibilityRole="button" accessibilityLabel="Save this record" disabled={saving} onPress={addRecord} style={[styles.goldButton, saving && styles.buttonBusy]}>
             {saving ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
@@ -580,6 +756,24 @@ function BackRow({ theme, onPress }: { theme: AppTheme; onPress: () => void }) {
       <Text style={styles.backText}>Back</Text>
     </Pressable>
   );
+}
+
+function Badge({ theme, person }: { theme: AppTheme; person: Person }) {
+  const styles = useStyles(theme);
+  if (person.avatarUrl) return <Image source={{ uri: person.avatarUrl }} style={styles.badgeImage} accessibilityElementsHidden importantForAccessibility="no" />;
+  return (
+    <View style={styles.badge} accessibilityElementsHidden importantForAccessibility="no">
+      <Text style={styles.badgeText}>{initialsFor(person.displayName)}</Text>
+    </View>
+  );
+}
+
+/** "Nearest home cell: Grace House · Tuesdays at 7:00 pm · 1.2 mi" — or nothing. */
+function NearestCellLine({ theme, cells, from }: { theme: AppTheme; cells: HomeCell[]; from?: { latitude: number; longitude: number } }) {
+  const styles = useStyles(theme);
+  const near = nearestHomeCells(cells, from, { limit: 1 })[0];
+  if (!near) return null;
+  return <Text style={styles.cellLine}>Nearest home cell: {near.cell.name} · {meetingLabel(near.cell.meetingDay, near.cell.meetingTime)}{addressLine(near.cell) ? ` · ${addressLine(near.cell)}` : ''} · {distanceLabel(near.km, UNITS)}</Text>;
 }
 
 function Stat({ theme, label, value, suffix = '', tone }: { theme: AppTheme; label: string; value: number; suffix?: string; tone?: string }) {
@@ -684,6 +878,15 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   rowTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
   rowSub: { color: t.colors.textMuted, fontSize: t.type.meta },
   visitIcon: { width: 26, height: 26, borderRadius: 13, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center' },
+  cellIcon: { width: 26, height: 26, borderRadius: 8, backgroundColor: t.colors.accentSolid, alignItems: 'center', justifyContent: 'center' },
+  dateNote: { color: t.colors.danger, fontSize: t.type.meta, fontWeight: '700', lineHeight: 18 },
+  cellLine: { color: t.colors.accent, fontSize: t.type.meta, lineHeight: 18, fontWeight: '700', marginTop: 4 },
+  personRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 56, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.colors.border },
+  badge: { minWidth: 36, minHeight: 36, borderRadius: 18, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  badgeImage: { width: 36, height: 36, borderRadius: 18 },
+  badgeText: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.overline },
+  smallButton: { minHeight: 48, minWidth: 48, paddingHorizontal: 12, borderRadius: t.radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.borderStrong },
+  smallButtonText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta },
 
   body: { color: t.colors.textSecondary, lineHeight: 21, fontSize: t.type.body },
   empty: { color: t.colors.textMuted, paddingVertical: 8, lineHeight: 20, fontSize: t.type.body },

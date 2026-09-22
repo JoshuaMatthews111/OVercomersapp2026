@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../lib/accessControl';
 import {
@@ -11,8 +11,18 @@ import {
   ChatMember,
   ChatMessage,
   ChatProfileSearchResult,
+  ReadCursor,
+  ReplyPreview,
   SharedRef,
   addChatMember,
+  createCursorThrottle,
+  getChatReadCursors,
+  getReplyPreview,
+  messageReceipt,
+  replyPreviewFor,
+  saveChatReadCursor,
+  subscribeToReadCursors,
+  timestampMs,
   alreadyReported,
   announceChatChange,
   blockChatUser,
@@ -38,8 +48,28 @@ import {
   uploadChatGroupPicture,
 } from '../lib/chatService';
 import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../components/ChatAttachments';
-import { ChatActionSheet, ChatSheetAction, MessageBody, RoomBadge, formatDayLabel, formatMessageTime, initials, roomLabel } from '../components/chatShared';
+import {
+  ChatActionSheet,
+  ChatSheetAction,
+  MessageBody,
+  MessageInfoSheet,
+  ReceiptMark,
+  ReplyComposerBar,
+  ReplyQuote,
+  RoomBadge,
+  SwipeToReply,
+  formatDayLabel,
+  formatMessageTime,
+  initials,
+  roomLabel,
+} from '../components/chatShared';
 import { SharedCard } from '../components/ShareToChat';
+import { SongPicker } from '../components/SongPicker';
+import { songSharedRef } from '../lib/songShare';
+import type { MediaItem } from '../types/models';
+import { VoiceNotePlaybackProvider, useVoiceNotePlayback } from '../components/VoiceNotePlayer';
+import { RecordedVoiceNote, VoiceNoteRecordingBar, askForMicrophone } from '../components/VoiceNoteRecorder';
+import { VOICE_NOTE_MIME, canRecordVoiceNotes, voiceNoteFileName } from '../lib/voiceNotes';
 import { GIVE_SHARED, mentionsGiving } from '../lib/givingNudge';
 import { playbackKind } from '../lib/embed';
 import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../lib/errorMessages';
@@ -63,7 +93,36 @@ import { ChatRoom } from '../types/models';
  */
 type Row = { kind: 'message'; message: ChatMessage } | { kind: 'day'; id: string; label: string };
 
+/** The newest message the server stamped — never one still leaving this phone, whose time is the phone's own clock. */
+function newestServerStamp(list: ChatMessage[]): string | undefined {
+  let best: string | undefined;
+  let bestMs = -Infinity;
+  for (const message of list) {
+    if (message.sendingProgress !== undefined || message.id.startsWith('sending-')) continue;
+    // A held message approved later became visible at visibleSince, and its
+    // receipts count from then — so seeing it must move the mark that far too.
+    for (const stamp of [message.createdAt, message.visibleSince]) {
+      const ms = timestampMs(stamp);
+      if (stamp && Number.isFinite(ms) && ms > bestMs) { bestMs = ms; best = stamp; }
+    }
+  }
+  return best;
+}
+
+/**
+ * One voice-note player for the whole room (components/VoiceNotePlayer.tsx),
+ * so only one voice note plays at a time and none of them talks over the
+ * sermon in the mini player.
+ */
 export default function ChatRoomScreen() {
+  return (
+    <VoiceNotePlaybackProvider>
+      <ChatRoomView />
+    </VoiceNotePlaybackProvider>
+  );
+}
+
+function ChatRoomView() {
   const router = useRouter();
   const params = useLocalSearchParams<{ id?: string; name?: string }>();
   const roomId = typeof params.id === 'string' ? params.id : '';
@@ -88,6 +147,9 @@ export default function ChatRoomScreen() {
   const [userId, setUserId] = useState<string | null>(null);
   const [connection, setConnection] = useState<ChatConnectionState>('connecting');
   const [attachOpen, setAttachOpen] = useState(false);
+  // Songs from Media, sent as a song card (owner's list, 2026-09-22).
+  const [songOpen, setSongOpen] = useState(false);
+  const [sendingSong, setSendingSong] = useState(false);
   const [pendingFile, setPendingFile] = useState<PickedFile | null>(null);
   const [sendingFile, setSendingFile] = useState(false);
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
@@ -109,11 +171,138 @@ export default function ChatRoomScreen() {
   /** The long-press menu that is open, if any. */
   const [sheet, setSheet] = useState<{ title: string; subtitle?: string; actions: ChatSheetAction[] } | null>(null);
   const [pictureBusy, setPictureBusy] = useState(false);
+  /** The message being answered. Its quote sits above the message box, and stays while a voice note is recorded. */
+  const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
+  /** Everyone's delivered / read marks in this room, by person. */
+  const [cursors, setCursors] = useState<Map<string, ReadCursor>>(() => new Map());
+  /** Your own message whose "Message info" is open. */
+  const [infoFor, setInfoFor] = useState<ChatMessage | null>(null);
+  const [recording, setRecording] = useState(false);
+  /** The original a tapped quote jumped to, lit up for a moment. */
+  const [flashId, setFlashId] = useState<string | null>(null);
+  /** A short, calm line above the message box that goes away by itself. */
+  const [notice, setNotice] = useState<string | null>(null);
+  const voicePlayback = useVoiceNotePlayback();
 
   useEffect(() => {
     alive.current = true;
     return () => { alive.current = false; };
   }, []);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 5000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!flashId) return;
+    const timer = setTimeout(() => setFlashId(null), 1600);
+    return () => clearTimeout(timer);
+  }, [flashId]);
+
+  /* -------------------------------------------------------------------------
+   * Delivered and read
+   *
+   * This phone moves ONLY its own marks. "Delivered" moves whenever messages
+   * reach this phone (the room loading, or one arriving live). "Read" moves
+   * only while the room is actually on screen and the app is in front. Writes
+   * are held to one every few seconds, plus one when you leave.
+   * ----------------------------------------------------------------------- */
+  const cursorWriter = useRef<ReturnType<typeof createCursorThrottle> | null>(null);
+  const focusedRef = useRef(false);
+  const appActiveRef = useRef<boolean>(AppState.currentState === 'active');
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  useEffect(() => {
+    if (!roomId) return;
+    const writer = createCursorThrottle({ write: (marks) => saveChatReadCursor(roomId, marks) });
+    cursorWriter.current = writer;
+    return () => {
+      if (cursorWriter.current === writer) cursorWriter.current = null;
+      void writer.dispose();
+    };
+  }, [roomId]);
+
+  const noteSeen = useCallback((list: ChatMessage[]) => {
+    const writer = cursorWriter.current;
+    const newest = newestServerStamp(list);
+    if (!writer || !newest) return;
+    writer.noteDelivered(newest);
+    if (focusedRef.current && appActiveRef.current) writer.noteRead(newest);
+  }, []);
+
+  // Every time the messages on this phone change, the marks can move.
+  useEffect(() => { noteSeen(messages); }, [messages, noteSeen]);
+
+  useFocusEffect(useCallback(() => {
+    focusedRef.current = true;
+    noteSeen(messagesRef.current);
+    return () => {
+      focusedRef.current = false;
+      void cursorWriter.current?.flush();
+    };
+  }, [noteSeen]));
+
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state: AppStateStatus) => {
+      appActiveRef.current = state === 'active';
+      if (state === 'active') noteSeen(messagesRef.current);
+      else void cursorWriter.current?.flush();
+    });
+    return () => sub.remove();
+  }, [noteSeen]);
+
+  const loadCursors = useCallback(async () => {
+    if (!roomId) return;
+    const list = await getChatReadCursors(roomId);
+    if (alive.current) setCursors(new Map(list.map((cursor) => [cursor.userId, cursor])));
+  }, [roomId]);
+
+  // Ticks change live as people read. Its own connection: if it cannot open,
+  // messages are untouched and the ticks catch up on the next refresh.
+  useEffect(() => {
+    if (!roomId) return;
+    let cancelled = false;
+    const channel = subscribeToReadCursors(roomId, (cursor) => {
+      if (cancelled) return;
+      setCursors((current) => {
+        const next = new Map(current);
+        const known = current.get(cursor.userId);
+        const later = (a?: string | null, b?: string | null) => (timestampMs(b) > timestampMs(a) || !Number.isFinite(timestampMs(a)) ? b ?? a : a);
+        next.set(cursor.userId, known
+          ? { userId: cursor.userId, readAt: later(known.readAt, cursor.readAt), deliveredAt: later(known.deliveredAt, cursor.deliveredAt) }
+          : cursor);
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+      if (channel) supabase.removeChannel(channel);
+    };
+  }, [roomId]);
+
+  // A reply that arrived live, to a message further back than this page:
+  // ask for its quote once.
+  const quotesAsked = useRef(new Set<string>());
+  useEffect(() => {
+    if (!roomId) return;
+    const onScreen = new Set(messages.map((message) => message.id));
+    for (const message of messages) {
+      if (!message.parentId || message.reply || onScreen.has(message.parentId) || quotesAsked.current.has(message.id)) continue;
+      if (message.sendingProgress !== undefined || message.id.startsWith('sending-')) continue;
+      quotesAsked.current.add(message.id);
+      const settle = (reply: ReplyPreview) => {
+        if (!alive.current) return;
+        setMessages((current) => current.map((item) => (item.id === message.id ? { ...item, reply } : item)));
+      };
+      void getReplyPreview(roomId, message)
+        .then((reply) => settle(reply || replyPreviewFor(message.parentId as string, undefined, userId)))
+        // Could not ask: say so on the quote rather than "Loading" for ever.
+        .catch(() => settle(replyPreviewFor(message.parentId as string, undefined, userId)));
+    }
+  }, [messages, roomId, userId]);
 
   // Who am I: read from the session already on the phone, not over the network.
   useEffect(() => {
@@ -173,7 +362,9 @@ export default function ChatRoomScreen() {
       if (alive.current) setLoading(false);
     }
     loadRoster();
-  }, [loadMessages, loadRoster]);
+    // After the join inside loadMessages: marks are only readable by members.
+    void loadCursors();
+  }, [loadCursors, loadMessages, loadRoster]);
 
   useFocusEffect(useCallback(() => {
     let cancelled = false;
@@ -221,6 +412,7 @@ export default function ChatRoomScreen() {
     if (!channel) setConnection('reconnecting');
 
     const catchUp = () => {
+      void loadCursors();
       loadMessages().catch(() => {
         // A background catch-up that fails changes nothing on screen; the
         // person still has the messages they had, and pull-to-refresh says so.
@@ -238,7 +430,7 @@ export default function ChatRoomScreen() {
       liveChannel.current = undefined;
       if (channel) supabase.removeChannel(channel);
     };
-  }, [loadMessages, roomId]);
+  }, [loadCursors, loadMessages, roomId]);
 
   useEffect(() => {
     if (!leaderOpen || !access.canManageChatMembers) return;
@@ -285,6 +477,13 @@ export default function ChatRoomScreen() {
       setRefreshing(false);
     }
     loadRoster();
+    void loadCursors();
+  }
+
+  /** The quote for a reply this phone is sending, so the bubble shows it at once. */
+  function replyFields(target: ChatMessage | null): Pick<ChatMessage, 'parentId' | 'reply'> {
+    if (!target) return {};
+    return { parentId: target.id, reply: replyPreviewFor(target.id, target, userId) };
   }
 
   async function post() {
@@ -292,13 +491,19 @@ export default function ChatRoomScreen() {
     if (!roomId || !text || sending) return;
     setError(null);
     setSending(true);
+    const answering = replyTo;
     try {
       const shared = attachGive ? GIVE_SHARED : undefined;
-      const result = await sendChatMessage(roomId, text, undefined, shared);
+      // A reply carries the message it answers; everything else is the same send.
+      const result = answering
+        ? await sendChatMessage(roomId, text, undefined, shared, { parentMessageId: answering.id })
+        : await sendChatMessage(roomId, text, undefined, shared);
       setMessages((current) => [...current.filter((item) => item.id !== result.id), {
         id: result.id, channelId: roomId, userId: userId || undefined, body: text, displayName: 'You', createdAt: result.createdAt, isFlagged: result.isFlagged, shared,
+        ...replyFields(answering),
       }]);
       setBody('');
+      setReplyTo(null);
       setAttachGive(false);
       setGiveNudgeDismissed(false);
       // The message stays in the thread either way, so nobody is left
@@ -308,6 +513,29 @@ export default function ChatRoomScreen() {
       setError(friendlyError(err, 'Message not sent. Check your connection and try again.'));
     } finally {
       setSending(false);
+    }
+  }
+
+  /** Send one of the church's songs into this chat as a card anyone can play. */
+  async function sendSong(song: MediaItem) {
+    if (!roomId || sendingSong) return;
+    setError(null);
+    setSendingSong(true);
+    const answering = replyTo;
+    const shared = songSharedRef(song);
+    try {
+      const result = await sendChatMessage(roomId, '', undefined, shared, answering ? { parentMessageId: answering.id } : undefined);
+      setMessages((current) => [...current.filter((item) => item.id !== result.id), {
+        id: result.id, channelId: roomId, userId: userId || undefined, body: '', displayName: 'You', createdAt: result.createdAt, isFlagged: result.isFlagged, shared,
+        ...replyFields(answering),
+      }]);
+      setReplyTo(null);
+      setSongOpen(false);
+    } catch (err) {
+      setSongOpen(false);
+      setError(friendlyError(err, 'The song was not sent. Check your connection and try again.'));
+    } finally {
+      setSendingSong(false);
     }
   }
 
@@ -321,8 +549,10 @@ export default function ChatRoomScreen() {
     if (!roomId || !pendingFile || sendingFile) return;
     const file = pendingFile;
     const localId = `sending-${Date.now()}`;
+    const answering = replyTo;
     setSendingFile(true);
     setPendingFile(null);
+    setReplyTo(null);
     setMessages((current) => [...current, {
       id: localId,
       channelId: roomId,
@@ -332,6 +562,7 @@ export default function ChatRoomScreen() {
       createdAt: new Date().toISOString(),
       sendingProgress: 0,
       attachment: { path: '', url: file.uri, kind: file.kind, name: file.name || undefined, size: file.size || undefined, width: file.width, height: file.height },
+      ...replyFields(answering),
     }]);
 
     const onProgress = (fraction: number) => {
@@ -342,20 +573,100 @@ export default function ChatRoomScreen() {
     try {
       await joinChatRoom(roomId);
       const uploaded = await uploadChatAttachment(roomId, file, { onProgress });
-      const sent = await sendChatMessage(roomId, caption, uploaded);
+      const sent = await sendChatMessage(roomId, caption, uploaded, undefined, { parentMessageId: answering?.id });
       if (!alive.current) return;
       setMessages((current) => [...current.filter((item) => item.id !== localId && item.id !== sent.id), {
         id: sent.id, channelId: roomId, userId: userId || undefined, body: caption, displayName: 'You', createdAt: sent.createdAt, isFlagged: sent.isFlagged,
         attachment: { path: uploaded.path, url: file.uri, kind: uploaded.kind, name: uploaded.name, size: uploaded.size, width: uploaded.width, height: uploaded.height },
+        ...replyFields(answering),
       }]);
       if (sent.isFlagged) setCareNotice({ tone: mentionsSelfHarm(caption) ? 'care' : 'held' });
     } catch (err) {
       if (!alive.current) return;
       setMessages((current) => current.filter((item) => item.id !== localId));
+      // Keep the reply, so trying again answers the same message.
+      if (answering) setReplyTo((current) => current || answering);
       setError(friendlyUploadError(err, 'That did not send. Please try again, ideally on Wi-Fi.'));
     } finally {
       if (alive.current) setSendingFile(false);
     }
+  }
+
+  /* -------------------------------------------------------------------------
+   * Voice notes
+   *
+   * The microphone button takes the place of Send while the message box is
+   * empty. A voice note goes through exactly the same private upload as a
+   * photo (DO-NOT-BREAK #20): <room>/<you>/, signed links, never public.
+   * ----------------------------------------------------------------------- */
+  async function startVoiceNote() {
+    if (recording || !roomId) return;
+    const allowed = await askForMicrophone();
+    if (!allowed || !alive.current) return;
+    // Nothing talks over you while you record.
+    voicePlayback?.pauseAll();
+    if (nowPlaying.playing) nowPlaying.toggle();
+    setRecording(true);
+  }
+
+  async function sendVoiceNote(note: RecordedVoiceNote) {
+    setRecording(false);
+    if (!roomId) return;
+    const answering = replyTo;
+    setReplyTo(null);
+    const name = voiceNoteFileName();
+    const localId = `sending-${Date.now()}`;
+    setMessages((current) => [...current, {
+      id: localId,
+      channelId: roomId,
+      userId: userId || undefined,
+      body: '',
+      displayName: 'You',
+      createdAt: new Date().toISOString(),
+      sendingProgress: 0,
+      attachment: { path: '', url: note.uri, kind: 'audio', name, durationMs: note.durationMs },
+      ...replyFields(answering),
+    }]);
+    const onProgress = (fraction: number) => {
+      if (!alive.current) return;
+      setMessages((current) => current.map((item) => (item.id === localId ? { ...item, sendingProgress: fraction } : item)));
+    };
+    try {
+      await joinChatRoom(roomId);
+      const uploaded = await uploadChatAttachment(roomId, { uri: note.uri, name, mimeType: VOICE_NOTE_MIME }, { onProgress });
+      const sent = await sendChatMessage(roomId, '', { ...uploaded, durationMs: note.durationMs }, undefined, { parentMessageId: answering?.id });
+      if (!alive.current) return;
+      setMessages((current) => [...current.filter((item) => item.id !== localId && item.id !== sent.id), {
+        id: sent.id, channelId: roomId, userId: userId || undefined, body: '', displayName: 'You', createdAt: sent.createdAt, isFlagged: sent.isFlagged,
+        attachment: { path: uploaded.path, url: note.uri, kind: 'audio', name: uploaded.name, size: uploaded.size, durationMs: note.durationMs },
+        ...replyFields(answering),
+      }]);
+      if (sent.isFlagged) setCareNotice({ tone: 'held' });
+    } catch (err) {
+      if (!alive.current) return;
+      setMessages((current) => current.filter((item) => item.id !== localId));
+      if (answering) setReplyTo((current) => current || answering);
+      setError(friendlyUploadError(err, 'That voice note did not send. Please try again, ideally on Wi-Fi.'));
+    }
+  }
+
+  /** Reply to a message: its quote goes above the message box, and the keyboard comes up. */
+  function startReply(message: ChatMessage) {
+    if (message.deleted || message.sendingProgress !== undefined) return;
+    setReplyTo(message);
+    if (!recording) setTimeout(() => composerRef.current?.focus(), 50);
+  }
+
+  /** Go to the message a quote points at, when it is loaded. */
+  const rowsRef = useRef<Row[]>([]);
+  function jumpTo(messageId: string) {
+    const index = rowsRef.current.findIndex((row) => row.kind === 'message' && row.message.id === messageId);
+    if (index < 0) {
+      setNotice('That message is older than the messages shown here, so the app cannot take you to it.');
+      return;
+    }
+    setFlashId(messageId);
+    listRef.current?.scrollToIndex({ index, animated: true, viewPosition: 0.5 });
   }
 
   async function openExternalUrl(url?: string) {
@@ -376,7 +687,9 @@ export default function ChatRoomScreen() {
       const verse = shared.scripture;
       return router.push({ pathname: '/(tabs)/bible', params: { bookId: verse.bookId, chapter: String(verse.chapter), verse: String(verse.verse), version: verse.version } });
     }
-    if (!shared.url) return;
+    if (!shared.url) {
+      return Alert.alert('Nothing to open yet', 'This card came without a link. Ask the person who shared it to share it again from Media.');
+    }
     if (shared.kind === 'story') return router.push({ pathname: '/story-viewer', params: { title: shared.title, imageUrl: shared.url } });
     if (shared.kind === 'article') return openExternalUrl(shared.url);
     nowPlaying.play({ title: shared.title, speaker: shared.speaker, url: shared.url, artwork: shared.artwork, type: playbackKind(shared.url, shared.kind === 'music' ? 'audio' : 'video') });
@@ -516,8 +829,8 @@ export default function ChatRoomScreen() {
   /**
    * What a long press offers.
    *
-   *   Your own message       Delete for everyone, Delete for me
-   *   Somebody else's        Delete for me, Report, Block
+   *   Your own message       Reply, Message info, Delete for everyone, Delete for me
+   *   Somebody else's        Reply, Delete for me, Report, Block
    *   ...and for a leader    Delete for everyone and Hold for review as well,
    *                          except on an admin's message (DO-NOT-BREAK #5)
    *   A deleted message      Delete for me (to clear the line away)
@@ -536,9 +849,24 @@ export default function ChatRoomScreen() {
       onPress: () => { void deleteForMe(message); },
     };
 
+    const reply: ChatSheetAction = {
+      key: 'reply',
+      label: 'Reply',
+      icon: 'arrow-undo-outline',
+      onPress: () => startReply(message),
+    };
+
     if (message.deleted) {
       actions.push(forMe);
     } else if (own) {
+      actions.push(reply);
+      actions.push({
+        key: 'info',
+        label: 'Message info',
+        icon: 'information-circle-outline',
+        hint: 'Who has received it and who has read it.',
+        onPress: () => setInfoFor(message),
+      });
       actions.push({
         key: 'delete-all',
         label: 'Delete for everyone',
@@ -556,6 +884,7 @@ export default function ChatRoomScreen() {
       ]);
       // A leader may not remove or hold an admin's message. An admin may.
       const outranked = writerIsAdmin && access.level !== 'super_admin';
+      actions.push(reply);
       if (access.canRemoveChatMessages && !outranked) {
         actions.push({
           key: 'delete-all',
@@ -677,6 +1006,29 @@ export default function ChatRoomScreen() {
     }
   }
 
+  const isDirect = room?.type === 'direct';
+  const messagesById = useMemo(() => new Map(messages.map((message) => [message.id, message])), [messages]);
+  // People who left do not count; while the roster is unknown, everybody with a mark does.
+  const memberIds = useMemo(() => (roomMembers.length ? roomMembers.map((member) => member.userId) : null), [roomMembers]);
+  /** Your newest message says its status in words; older ones show just the ticks. */
+  const newestOwnId = useMemo(() => {
+    let best: ChatMessage | null = null;
+    for (const message of messages) {
+      if (!userId || message.userId !== userId || message.deleted || message.sendingProgress !== undefined) continue;
+      if (!best || timestampMs(message.createdAt) > timestampMs(best.createdAt)) best = message;
+    }
+    return best?.id ?? null;
+  }, [messages, userId]);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
+  const infoPeople = useMemo(
+    () => new Map(roomMembers.map((member) => [member.userId, { displayName: member.displayName, avatarUrl: member.avatarUrl }])),
+    [roomMembers],
+  );
+  const infoReceipt = useMemo(
+    () => (infoFor ? messageReceipt({ message: infoFor, cursors: cursors.values(), memberIds }) : null),
+    [cursors, infoFor, memberIds],
+  );
+
   const renderRow = useCallback(({ item }: { item: Row }) => {
     if (item.kind === 'day') {
       return (
@@ -707,7 +1059,23 @@ export default function ChatRoomScreen() {
         </View>
       );
     }
+    // What the quote says: the original itself when it is on screen (so a quote
+    // follows a delete), otherwise what the service worked out.
+    const parent = message.parentId ? messagesById.get(message.parentId) : undefined;
+    const quote: ReplyPreview | undefined = message.parentId
+      ? (parent ? replyPreviewFor(message.parentId, parent, userId) : message.reply)
+      : undefined;
+    const receipt = own
+      ? messageReceipt({ message, cursors: cursors.values(), memberIds })
+      : null;
+    const sending = message.sendingProgress !== undefined;
+    const a11yActions = [
+      { name: 'longpress', label: 'Message options' },
+      ...(!sending ? [{ name: 'reply', label: 'Reply' }] : []),
+      ...(own && !sending ? [{ name: 'info', label: 'Message info' }] : []),
+    ];
     return (
+      <SwipeToReply enabled={!sending} dark={dark} onReply={() => startReply(message)}>
       <View style={[styles.messageRow, own && styles.messageRowOwn]}>
         {!own ? (
           <Pressable
@@ -727,14 +1095,25 @@ export default function ChatRoomScreen() {
           delayLongPress={280}
           accessibilityRole="button"
           accessibilityLabel={`${own ? 'Your' : message.displayName + "'s"} message.${message.isFlagged && own ? ' Only you can see this. It is waiting for an admin to review it.' : message.isFlagged ? ' Held for review.' : ''} Hold for options.`}
-          accessibilityActions={[{ name: 'longpress', label: 'Message options' }]}
-          onAccessibilityAction={() => { void messageActions(message, own); }}
-          style={[styles.bubble, own && styles.bubbleOwn]}
+          accessibilityActions={a11yActions}
+          onAccessibilityAction={(event) => {
+            const action = event.nativeEvent.actionName;
+            if (action === 'reply') return startReply(message);
+            if (action === 'info') return setInfoFor(message);
+            void messageActions(message, own);
+          }}
+          accessibilityState={{ selected: flashId === message.id }}
+          style={[styles.bubble, own && styles.bubbleOwn, flashId === message.id && styles.bubbleFlash]}
         >
           {!own ? (
             <Pressable accessibilityRole="button" accessibilityLabel={`Open ${message.displayName} profile`} onPress={() => openPerson(message)} hitSlop={12} style={styles.senderNameWrap}>
               <Text style={styles.senderName}>{message.displayName}</Text>
             </Pressable>
+          ) : null}
+          {quote ? (
+            <ReplyQuote reply={quote} own={own} dark={dark} onPress={() => jumpTo(quote.id)} />
+          ) : message.parentId ? (
+            <ReplyQuote reply={{ id: message.parentId, authorName: '', snippet: 'Loading the original…', available: false, kind: 'unavailable' }} own={own} dark={dark} />
           ) : null}
           {message.shared ? <SharedCard shared={message.shared} dark={dark} own={own} onOpen={openShared} /> : null}
           {message.attachment ? (
@@ -758,12 +1137,22 @@ export default function ChatRoomScreen() {
             <Text style={[styles.time, own && styles.timeOwn]}>
               {message.sendingProgress !== undefined ? 'Sending…' : formatMessageTime(message.createdAt)}
             </Text>
+            {receipt ? (
+              <ReceiptMark
+                receipt={receipt}
+                isDirect={isDirect}
+                dark={dark}
+                showWords={message.id === newestOwnId}
+                onPress={receipt.state === 'sending' ? undefined : () => setInfoFor(message)}
+              />
+            ) : null}
           </View>
         </Pressable>
       </View>
+      </SwipeToReply>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, dark, styles, theme, access.canRemoveChatMessages, access.canModerateChat, access.level]);
+  }, [userId, dark, styles, theme, access.canRemoveChatMessages, access.canModerateChat, access.level, cursors, memberIds, isDirect, messagesById, newestOwnId, flashId, recording]);
 
   return (
     <View style={styles.root}>
@@ -811,6 +1200,12 @@ export default function ChatRoomScreen() {
             onRefresh={refreshRoom}
             keyExtractor={(item) => (item.kind === 'day' ? item.id : item.message.id)}
             renderItem={renderRow}
+            extraData={renderRow}
+            onScrollToIndexFailed={(info) => {
+              // The row has not been measured yet: get close, then land on it.
+              listRef.current?.scrollToOffset({ offset: Math.max(0, info.averageItemLength * info.index), animated: true });
+              setTimeout(() => listRef.current?.scrollToIndex({ index: info.index, animated: true, viewPosition: 0.5 }), 300);
+            }}
             contentContainerStyle={styles.listContent}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
@@ -955,21 +1350,55 @@ export default function ChatRoomScreen() {
             </View>
           ) : null}
 
+          {notice ? (
+            <View style={styles.noticeBar} accessibilityLiveRegion="polite">
+              <Ionicons name="information-circle-outline" size={16} color={theme.colors.accent} />
+              <Text style={styles.noticeText}>{notice}</Text>
+            </View>
+          ) : null}
+
+          {replyTo ? (
+            <ReplyComposerBar
+              reply={replyPreviewFor(replyTo.id, messagesById.get(replyTo.id) || replyTo, userId)}
+              dark={dark}
+              onClose={() => setReplyTo(null)}
+            />
+          ) : null}
+
           <SafeAreaView edges={['bottom']} style={styles.composerWrap}>
+            {recording ? (
+              <VoiceNoteRecordingBar
+                dark={dark}
+                onCancel={() => setRecording(false)}
+                onSend={(note) => { void sendVoiceNote(note); }}
+                onProblem={(words) => { setRecording(false); setNotice(words); }}
+              />
+            ) : (
             <View style={styles.composer}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Add a photo, video or file" disabled={sendingFile} onPress={() => setAttachOpen(true)} style={styles.attachButton}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Add a photo, video, file or song" disabled={sendingFile} onPress={() => setAttachOpen(true)} style={styles.attachButton}>
                 <Ionicons name="add" size={24} color={theme.colors.accent} />
               </Pressable>
               <TextInput
                 ref={composerRef}
                 value={body}
                 onChangeText={setBody}
-                placeholder={`Message ${title}`}
+                placeholder={replyTo ? 'Write your reply' : `Message ${title}`}
                 placeholderTextColor={theme.colors.textMuted}
                 style={styles.composerInput}
                 multiline
-                accessibilityLabel={`Write a message to ${title}`}
+                accessibilityLabel={replyTo ? `Write a reply to ${replyTo.displayName}` : `Write a message to ${title}`}
               />
+              {!body.trim() && !sending && canRecordVoiceNotes() ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={replyTo ? 'Record a voice note reply' : 'Record a voice note'}
+                  accessibilityHint="Up to five minutes. You can listen back before you send it."
+                  onPress={() => { void startVoiceNote(); }}
+                  style={styles.sendButton}
+                >
+                  <Ionicons name="mic" size={22} color={theme.colors.textOnBrand} />
+                </Pressable>
+              ) : (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Send this message"
@@ -979,12 +1408,15 @@ export default function ChatRoomScreen() {
               >
                 {sending ? <ActivityIndicator color={theme.colors.textOnBrand} /> : <Ionicons name="send" size={18} color={theme.colors.textOnBrand} />}
               </Pressable>
+              )}
             </View>
+            )}
           </SafeAreaView>
         </KeyboardAvoidingView>
       </SafeAreaView>
 
-      <AttachSheet visible={attachOpen} dark={dark} onClose={() => setAttachOpen(false)} onPicked={setPendingFile} />
+      <AttachSheet visible={attachOpen} dark={dark} onClose={() => setAttachOpen(false)} onPicked={setPendingFile} onSong={() => setSongOpen(true)} />
+      <SongPicker visible={songOpen} dark={dark} sending={sendingSong} onClose={() => setSongOpen(false)} onChoose={(song) => { void sendSong(song); }} />
       <AttachmentPreview
         file={pendingFile}
         dark={dark}
@@ -993,6 +1425,15 @@ export default function ChatRoomScreen() {
         onSend={sendAttachment}
       />
       <PhotoViewer url={photoUrl} onClose={() => setPhotoUrl(null)} />
+      <MessageInfoSheet
+        visible={Boolean(infoFor)}
+        dark={dark}
+        onClose={() => setInfoFor(null)}
+        receipt={infoReceipt}
+        isDirect={isDirect}
+        people={infoPeople}
+        preview={infoFor ? replyPreviewFor(infoFor.id, infoFor, userId).snippet : undefined}
+      />
       <ChatActionSheet
         visible={Boolean(sheet)}
         title={sheet?.title || ''}
@@ -1151,7 +1592,8 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   bubbleOwn: { borderBottomLeftRadius: t.radius.lg, borderBottomRightRadius: 4, backgroundColor: t.dark ? t.colors.accentMuted : t.colors.brandSolid, borderColor: t.colors.accentBorder },
   senderNameWrap: { minHeight: 24, justifyContent: 'center' },
   senderName: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.overline, marginBottom: 2 },
-  bubbleFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, marginTop: 4 },
+  // Wraps so "10:42 AM" plus "Waiting for review" never clips at large text.
+  bubbleFoot: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', columnGap: 8, rowGap: 2, marginTop: 4 },
   time: { color: t.colors.textMuted, fontSize: t.type.overline, fontWeight: '700' },
   timeOwn: { color: t.dark ? t.colors.textMuted : t.colors.textOnBrand, opacity: t.dark ? 1 : 0.8 },
   // Its own small card, so the words read the same on a navy, gold or white
@@ -1253,6 +1695,10 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   attachButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: t.colors.accentMuted, alignItems: 'center', justifyContent: 'center' },
   composerInput: { flex: 1, minHeight: 48, maxHeight: 120, borderRadius: 24, borderWidth: 1, borderColor: t.colors.borderStrong, backgroundColor: t.colors.surfaceSunken, color: t.colors.textPrimary, paddingHorizontal: 16, paddingTop: 12, paddingBottom: 12, fontSize: t.type.body },
   sendButton: { width: 48, height: 48, borderRadius: 24, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center' },
+  // A quote that was tapped lights up its original for a moment.
+  bubbleFlash: { borderColor: t.colors.accentSolid, borderWidth: 2 },
+  noticeBar: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, marginHorizontal: 12, marginBottom: 6, paddingHorizontal: 12, paddingVertical: 10, borderRadius: t.radius.md, backgroundColor: t.colors.accentMuted },
+  noticeText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.meta, lineHeight: 19 },
   sendButtonIdle: { opacity: 0.45 },
   sheet: { flex: 1, paddingTop: 12 },
   sheetHeader: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingLeft: 16, paddingRight: 6 },

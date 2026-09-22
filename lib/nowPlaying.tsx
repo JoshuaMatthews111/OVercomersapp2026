@@ -22,8 +22,37 @@
 // app. When it is minimized the layer is moved off the screen and set to
 // pointerEvents 'none', so it cannot take a single touch; the only thing left
 // on screen is the bar, and the bar only owns its own rectangle.
+//
+// Screen off / another app (2026-09-22, checked against the installed
+// expo-audio 57.0.5 and expo-video 57.0.4 sources, not from memory):
+//   - Songs and audio sermons: expo-audio keeps playing in the background only
+//     while its module-wide `shouldPlayInBackground` flag is on, and that flag
+//     is whatever the LAST setAudioModeAsync call said. Any other call that
+//     leaves it out (a recorder, for one) switches it off for the whole app.
+//     So the playback mode is put back right before every new item starts,
+//     and restorePlaybackAudioMode() is exported for anything that changes the
+//     mode (lib/voiceNotes.ts restores the identical mode itself).
+//     Lock-screen controls come from setActiveForLockScreen (Android also
+//     needs it, or the OS stops the sound after about three minutes in the
+//     background). Five minutes are buffered ahead so a weak signal with the
+//     screen off does not stop a song.
+//   - Video files: expo-video only keeps a player going in the background when
+//     that player is attached to a mounted VideoView and has
+//     staysActiveInBackground set before it plays. The VideoView stays
+//     mounted while minimized (the layer below is moved, never unmounted).
+//     The EMPTY player that exists while no video is playing is left alone:
+//     giving it the background and lock-screen flags started Android's video
+//     service at app launch for nothing, and on iOS it kept a closed video's
+//     title stuck on the lock screen.
+//   - YouTube: see lib/embed.ts. It pauses with the screen off; the first time
+//     that happens the bar says so, once, and a teaching with an audio copy
+//     offers "Listen instead".
+//   - Swiping the app away stops all playback on both phones. Nothing can
+//     change that.
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from 'expo-audio';
+import type { AudioMode } from 'expo-audio';
 import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSegments } from 'expo-router';
@@ -34,6 +63,7 @@ import {
   AccessibilityInfo,
   ActivityIndicator,
   Animated,
+  AppState,
   BackHandler,
   Keyboard,
   Linking,
@@ -53,15 +83,23 @@ import type { WebViewMessageEvent } from 'react-native-webview';
 import { SharedRef } from './chatService';
 import { ShareToChatSheet } from '../components/ShareToChat';
 import {
+  AUDIO_FAILED_COPY,
+  AudioPhase,
   PLAIN_EMBED_BRIDGE,
   PlaybackKind,
   PlayerProblem,
+  SCREEN_OFF_NOTICE_START,
+  YOUTUBE_SCREEN_OFF_NOTICE,
+  YOUTUBE_SCREEN_OFF_NOTICE_KEY,
+  audioPhase,
   embedPageMayNavigate,
   embedSource,
+  isAtEnd,
   parsePlayerMessage,
   playerMayNavigate,
   playerProblemCopy,
   playerProblemFor,
+  screenOffNoticeStep,
   thumbnailFromUrl,
   youtubeVideoId,
   youtubeWatchUrl,
@@ -69,9 +107,80 @@ import {
 import { createThemedStyles } from './theme';
 import { useAppTheme } from './themePreference';
 
-export type NowPlaying = { title: string; speaker?: string; url: string; type: PlaybackKind; artwork?: string };
+export type NowPlaying = {
+  title: string;
+  speaker?: string;
+  url: string;
+  type: PlaybackKind;
+  artwork?: string;
+  /**
+   * An audio-only copy of the same teaching (public.sermons.audio_url). When a
+   * YouTube video is playing, the full player offers "Listen instead", which
+   * keeps going with the screen off. Leave it out when there is none.
+   */
+  audioUrl?: string;
+  /**
+   * What it is, for the card it makes when shared to a group: a teaching
+   * (including its "Listen" audio copy) is a Sermon, never a "Song". Left out,
+   * audio is shared as a song and anything else as a video, as before.
+   */
+  kind?: 'sermon' | 'music' | 'video';
+};
 
 const MINISTRY = 'Overcomers Global Network';
+
+/**
+ * The audio mode every song and sermon needs: sound with the ringer switch
+ * off, keep playing in the background, and take the lock screen (expo-audio
+ * only shows lock-screen controls with 'doNotMix').
+ */
+export const PLAYBACK_AUDIO_MODE: Partial<AudioMode> = {
+  playsInSilentMode: true,
+  shouldPlayInBackground: true,
+  interruptionMode: 'doNotMix',
+  allowsRecording: false,
+  // Stated, not left to the default: expo-audio treats every call as the
+  // whole mode. lib/voiceNotes.ts mirrors this object exactly.
+  shouldRouteThroughEarpiece: false,
+};
+
+/**
+ * Put the playback audio mode back. Anything that records (voice notes) sets
+ * its own mode, and expo-audio keeps only the last one — including
+ * shouldPlayInBackground — for the whole app. Call this when recording ends so
+ * the next sermon still plays with the screen off. Never throws.
+ * Do NOT call it while a recording is running: on iOS a mode without
+ * allowsRecording stops the recorder.
+ */
+export function restorePlaybackAudioMode(): Promise<void> {
+  // If the mode cannot be set (web, or no audio hardware) playback still works
+  // in the app; only the screen-off behaviour depends on it, and there is
+  // nothing a listener could do about it, so there is nothing to tell them.
+  return setAudioModeAsync(PLAYBACK_AUDIO_MODE).catch(() => undefined);
+}
+
+/**
+ * Lock-screen buttons for songs and sermons: play/pause and the scrubber
+ * everywhere, plus 10 seconds back and forward on Android only.
+ *
+ * Why not on iPhone (review, 2026-09-22): expo-audio 57.0.5 adds a fresh set
+ * of lock-screen handlers every time a song takes the lock screen and never
+ * removes the old ones (node_modules/expo-audio/ios/MediaController.swift,
+ * enableRemoteCommands uses addTarget { } but disableRemoteCommands calls
+ * removeTarget(self), which does not match them). Every handler runs on each
+ * tap, so after three songs one "+10 s" tap jumped 30 seconds. The scrubber
+ * sets an exact position, so running it several times is harmless; play and
+ * pause are harmless too. Android's notification has no such leak.
+ */
+const LOCK_SCREEN_OPTIONS = Platform.OS === 'android'
+  ? { showSeekForward: true, showSeekBackward: true }
+  : { showSeekForward: false, showSeekBackward: false };
+
+/** Up to five minutes of sound loaded ahead, so a weak signal with the screen off does not stop a song. */
+const AUDIO_BUFFER_AHEAD_SECONDS = 300;
+
+/** How long the one-time YouTube note stays in the bar before it steps aside. */
+const SCREEN_OFF_NOTICE_MS = 20000;
 
 /** The bar's own height, in points. */
 export const MINI_BAR_HEIGHT = 64;
@@ -89,6 +198,19 @@ type Ctx = {
   expanded: boolean;
   /** Set when an embedded video cannot play inside the app (the bar says so). */
   problem: PlayerProblem | null;
+  /**
+   * True for a short while after the first time a YouTube video stopped
+   * because the screen went off or the person switched apps. The bar says
+   * YOUTUBE_SCREEN_OFF_NOTICE (lib/embed.ts) plainly, once per phone.
+   */
+  screenOffNotice: boolean;
+  /**
+   * For a song or audio sermon: playing, loading (asked to play, still
+   * loading), paused, or failed (the file would not play). null for video.
+   */
+  audioState: AudioPhase | null;
+  /** Try a song or audio sermon that would not play again. */
+  retry: () => void;
   /**
    * How many points of the bottom of the current screen the mini bar covers,
    * or 0 when it covers nothing. Only tab screens ever get a number: the bar
@@ -190,13 +312,46 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const onTab = useOnTabScreen();
   const keyboardUp = useKeyboardVisible();
 
-  const videoPlayer = useVideoPlayer(isVideo && item ? { uri: item.url, metadata: { title: item.title, artist: item.speaker || MINISTRY, artwork } } : null, (player) => {
+  const videoSource = isVideo && item ? { uri: item.url, metadata: { title: item.title, artist: item.speaker || MINISTRY, artwork } } : null;
+  const videoPlayer = useVideoPlayer(videoSource, (player) => {
+    // expo-video 57 builds a new player whenever the source changes and runs
+    // this straight away, before anything plays — the only safe moment to
+    // set staysActiveInBackground. The empty player (no video chosen) is left
+    // alone; see the note at the top of this file.
+    if (!videoSource) return;
     player.staysActiveInBackground = true;
     player.showNowPlayingNotification = true;
     player.audioMixingMode = 'doNotMix';
   });
-  const audioPlayer = useAudioPlayer(item?.type === 'audio' ? { uri: item.url } : null, { keepAudioSessionActive: true });
-  const audioStatus = useAudioPlayerStatus(audioPlayer);
+  const audioPlayer = useAudioPlayer(item?.type === 'audio' ? { uri: item.url } : null, {
+    keepAudioSessionActive: true,
+    preferredForwardBufferDuration: AUDIO_BUFFER_AHEAD_SECONDS,
+  });
+  const rawAudioStatus = useAudioPlayerStatus(audioPlayer);
+  // expo's useEvent keeps the LAST status it heard, even after the player has
+  // been swapped for the next song, so the new song briefly looked "playing"
+  // (or "failed") because of the previous one. Only trust a status that came
+  // from the player in hand.
+  const audioStatus = rawAudioStatus && rawAudioStatus.id === audioPlayer.id ? rawAudioStatus : null;
+  const audioIsPlaying = Boolean(audioStatus?.playing);
+  // Did anyone ask this song to play, and did the phone say the file would
+  // not play? Together with the status they give the bar its word
+  // (audioPhase in lib/embed.ts): Playing, Loading…, Paused, or Would not play.
+  const [audioWantsPlay, setAudioWantsPlay] = useState(false);
+  const [audioFailed, setAudioFailed] = useState(false);
+  const audioFinished = Boolean(audioStatus?.didJustFinish);
+  // Every status the player sends is checked, not only a changed value: a
+  // second failure after Try again carries the very same message.
+  useEffect(() => {
+    const sub = audioPlayer.addListener('playbackStatusUpdate', (status) => {
+      if (!status.error) return;
+      setAudioFailed(true);
+      setAudioWantsPlay(false);
+    });
+    return () => sub.remove();
+  }, [audioPlayer]);
+  useEffect(() => { if (audioIsPlaying) setAudioWantsPlay(true); }, [audioIsPlaying]);
+  useEffect(() => { if (audioFinished) setAudioWantsPlay(false); }, [audioFinished]);
   const [videoPlaying, setVideoPlaying] = useState(false);
   const [posterFrame, setPosterFrame] = useState<VideoThumbnail | null>(null);
 
@@ -206,29 +361,97 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   const [embedPlaying, setEmbedPlaying] = useState(false);
   const [embedProblem, setEmbedProblem] = useState<PlayerProblem | null>(null);
 
+  // The one-time "YouTube pauses when your screen is off" note.
+  const [screenOffNotice, setScreenOffNotice] = useState(false);
+
   useEffect(() => {
-    setAudioModeAsync({ playsInSilentMode: true, shouldPlayInBackground: true, interruptionMode: 'doNotMix' }).catch(() => undefined);
+    void restorePlaybackAudioMode();
   }, []);
 
   useEffect(() => {
     setEmbedPlaying(false);
     setEmbedProblem(null);
+    setScreenOffNotice(false);
+    setAudioFailed(false);
+    setAudioWantsPlay(item?.type === 'audio');
     if (!item) return;
+    let cancelled = false;
     if (isVideo) {
       videoPlayer.play();
       setVideoPlaying(true);
     } else if (item.type === 'audio') {
-      // Title, speaker and cover on the lock screen and in Control Centre.
-      // expo-audio 57.0.5 AudioMetadata is { title, artist, albumTitle, artworkUrl }.
-      audioPlayer.setActiveForLockScreen(true, {
-        title: item.title,
-        artist: item.speaker || MINISTRY,
-        albumTitle: MINISTRY,
-        artworkUrl: artwork,
+      const player = audioPlayer;
+      // Put the background mode back first (a voice note may have changed
+      // it), then take the lock screen, then play.
+      // restorePlaybackAudioMode never rejects, so this always goes on to play.
+      void restorePlaybackAudioMode().finally(() => {
+        if (cancelled) return;
+        // Title, speaker and cover on the lock screen and in Control Centre.
+        // expo-audio 57.0.5 AudioMetadata is { title, artist, albumTitle, artworkUrl }.
+        player.setActiveForLockScreen(true, {
+          title: item.title,
+          artist: item.speaker || MINISTRY,
+          albumTitle: MINISTRY,
+          artworkUrl: artwork,
+        }, LOCK_SCREEN_OPTIONS);
+        player.play();
       });
-      audioPlayer.play();
     }
+    return () => { cancelled = true; };
   }, [item?.url]);
+
+  // Tell the person once, plainly, why a YouTube video stopped when the screen
+  // went off. Fed by AppState; the rule itself is screenOffNoticeStep in
+  // lib/embed.ts. Remembered on this phone so it is never said twice.
+  const noticeShownRef = useRef(true);
+  const noticeStateRef = useRef(SCREEN_OFF_NOTICE_START);
+  const appPhaseRef = useRef<string>(AppState.currentState || 'active');
+  const youtubePlayingRef = useRef(false);
+  youtubePlayingRef.current = Boolean(isEmbed && item && youtubeVideoId(item.url) && embedPlaying && !embedProblem);
+  // Still a working YouTube video in the player? If the person closed it or
+  // picked something else in the moment before the note was due, the note is
+  // kept for another time instead of being used up on nothing.
+  const youtubeLoadedRef = useRef(false);
+  youtubeLoadedRef.current = Boolean(isEmbed && item && youtubeVideoId(item.url) && !embedProblem);
+
+  useEffect(() => {
+    let alive = true;
+    let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+    AsyncStorage.getItem(YOUTUBE_SCREEN_OFF_NOTICE_KEY)
+      .then((value) => { if (alive) noticeShownRef.current = value === 'shown'; })
+      .catch(() => { if (alive) noticeShownRef.current = false; });
+    const sub = AppState.addEventListener('change', (next) => {
+      const from = appPhaseRef.current;
+      appPhaseRef.current = next;
+      const step = screenOffNoticeStep(noticeStateRef.current, from, next, youtubePlayingRef.current, noticeShownRef.current);
+      noticeStateRef.current = step.state;
+      if (!step.show) return;
+      // Only say it if the video really did stop. The page reports its state a
+      // moment after the app is back in front, so give it that moment; if the
+      // video is still going on this phone, say nothing and keep the note for
+      // a time it is true.
+      if (confirmTimer) clearTimeout(confirmTimer);
+      confirmTimer = setTimeout(() => {
+        confirmTimer = null;
+        if (!alive || youtubePlayingRef.current || !youtubeLoadedRef.current || noticeShownRef.current) return;
+        noticeShownRef.current = true;
+        AsyncStorage.setItem(YOUTUBE_SCREEN_OFF_NOTICE_KEY, 'shown').catch(() => undefined);
+        setScreenOffNotice(true);
+        AccessibilityInfo.announceForAccessibility(`${YOUTUBE_SCREEN_OFF_NOTICE}.`);
+      }, 1500);
+    });
+    return () => {
+      alive = false;
+      if (confirmTimer) clearTimeout(confirmTimer);
+      sub.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!screenOffNotice) return;
+    const timer = setTimeout(() => setScreenOffNotice(false), SCREEN_OFF_NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [screenOffNotice]);
 
   // An uploaded video posted without a cover still gets a picture: one frame
   // lifted from the video itself (expo-video 57.0.4 generateThumbnailsAsync).
@@ -262,10 +485,14 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     return () => sub.remove();
   }, [expanded]);
 
+  const audioState: AudioPhase | null = item?.type === 'audio'
+    ? audioPhase(audioStatus, { failed: audioFailed, wantsPlay: audioWantsPlay })
+    : null;
+
   const playing = isVideo
     ? videoPlaying
     : item?.type === 'audio'
-      ? audioStatus.playing
+      ? audioIsPlaying
       : isEmbed
         ? embedPlaying && !embedProblem
         : false;
@@ -288,19 +515,77 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     : 0;
   const miniPlayerInset = barVisible && onTab ? MINI_BAR_HEIGHT + MINI_BAR_GAP * 2 : 0;
 
+  // Play from where it is — or from the top when it has already finished. A
+  // finished player that is only told to play does nothing on either phone.
+  // Read the position from the player itself, so the context does not have to
+  // change twice a second while something plays.
+  const resumeCurrent = useCallback(() => {
+    if (isVideo) {
+      if (isAtEnd(videoPlayer.currentTime, videoPlayer.duration)) videoPlayer.replay();
+      videoPlayer.play();
+    } else if (item?.type === 'audio') {
+      setAudioWantsPlay(true);
+      if (isAtEnd(audioPlayer.currentTime, audioPlayer.duration)) {
+        // Back to the top, then play. If the jump fails it still plays.
+        void audioPlayer.seekTo(0).catch(() => undefined).finally(() => audioPlayer.play());
+      } else {
+        audioPlayer.play();
+      }
+    }
+  }, [isVideo, item?.type, videoPlayer, audioPlayer]);
+
+  // A song that would not play: load the same file again and play it.
+  const retryAudio = useCallback(() => {
+    if (item?.type !== 'audio') return;
+    setAudioFailed(false);
+    setAudioWantsPlay(true);
+    try {
+      audioPlayer.replace({ uri: item.url });
+      audioPlayer.play();
+    } catch {
+      setAudioFailed(true);
+      setAudioWantsPlay(false);
+    }
+  }, [item?.type, item?.url, audioPlayer]);
+
   const ctx = useMemo<Ctx>(() => ({
     item,
     playing,
+    audioState,
+    retry: retryAudio,
     artwork,
     posterFrame,
     expanded,
     problem: isEmbed ? embedProblem : null,
+    screenOffNotice: isEmbed && screenOffNotice,
     miniPlayerInset,
-    play: (next) => { setItem(next); setExpanded(true); },
+    play: (next) => {
+      setScreenOffNotice(false);
+      // The same thing again (its card tapped while it is paused, or after it
+      // finished): carry on with it instead of doing nothing.
+      if (item && next.url === item.url) {
+        if (!playing) {
+          if (isEmbed) { if (!embedProblem) { sendEmbed('play'); setEmbedPlaying(true); } }
+          else if (audioState === 'failed') retryAudio();
+          else resumeCurrent();
+        }
+        setExpanded(true);
+        return;
+      }
+      setItem(next);
+      setExpanded(true);
+    },
     toggle: () => {
       if (!item) return;
-      if (isVideo) (videoPlaying ? videoPlayer.pause() : videoPlayer.play());
-      else if (item.type === 'audio') (audioStatus.playing ? audioPlayer.pause() : audioPlayer.play());
+      setScreenOffNotice(false);
+      if (isVideo) (videoPlaying ? videoPlayer.pause() : resumeCurrent());
+      else if (item.type === 'audio') {
+        // Would not play: open the player, which says why and offers Try again.
+        if (audioState === 'failed') setExpanded(true);
+        // Playing, or still loading after being asked to play: the tap means stop.
+        else if (audioIsPlaying || audioState === 'loading') { setAudioWantsPlay(false); audioPlayer.pause(); }
+        else resumeCurrent();
+      }
       else if (embedProblem) setExpanded(true);
       else {
         sendEmbed(embedPlaying ? 'pause' : 'play');
@@ -312,11 +597,12 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     minimize: () => setExpanded(false),
     stop: () => {
       if (isVideo) videoPlayer.pause();
-      else if (item?.type === 'audio') { audioPlayer.pause(); audioPlayer.clearLockScreenControls(); }
+      else if (item?.type === 'audio') { setAudioWantsPlay(false); audioPlayer.pause(); audioPlayer.clearLockScreenControls(); }
+      setScreenOffNotice(false);
       setExpanded(false);
       setItem(null);
     },
-  }), [item, playing, artwork, posterFrame, expanded, miniPlayerInset, isEmbed, isVideo, videoPlaying, audioStatus.playing, embedPlaying, embedProblem, sendEmbed]);
+  }), [item, playing, audioState, retryAudio, artwork, posterFrame, expanded, miniPlayerInset, isEmbed, isVideo, videoPlaying, audioIsPlaying, embedPlaying, embedProblem, sendEmbed, screenOffNotice, resumeCurrent]);
 
   return (
     <NowPlayingContext.Provider value={ctx}>
@@ -398,33 +684,54 @@ function MiniPlayer({ ctx, visible, onTab }: { ctx: Ctx; visible: boolean; onTab
   // never covers a tab button.
   const tabBarHeight = 58 + Math.max(insets.bottom, 10);
   const bottom = onTab ? tabBarHeight + MINI_BAR_GAP : insets.bottom + 10;
+  const audioFailed = ctx.audioState === 'failed';
+  const loading = ctx.audioState === 'loading';
+  const stuck = Boolean(ctx.problem) || audioFailed;
   const subtitle = ctx.problem
     ? 'Cannot play here — tap to see why'
-    : ctx.playing ? ctx.item.speaker || MINISTRY : 'Paused';
+    : audioFailed
+      ? AUDIO_FAILED_COPY.bar
+      : loading
+        ? 'Loading…'
+        : ctx.playing ? ctx.item.speaker || MINISTRY : 'Paused';
+  // The one-time note takes the words' place in the bar for a few seconds.
+  // Two short lines, held to a size that fits the 64-point bar; the full
+  // player (one tap) says it again at any text size.
+  const notice = ctx.screenOffNotice && !ctx.problem;
   return (
     // box-none: this wrapper takes no touches of its own. Only the bar does.
     <View pointerEvents="box-none" style={[styles.miniWrap, { bottom }]}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`Open the player for ${ctx.item.title}`}
+        accessibilityLabel={notice
+          ? `Open the player for ${ctx.item.title}. ${YOUTUBE_SCREEN_OFF_NOTICE}.`
+          : `Open the player for ${ctx.item.title}`}
         accessibilityHint="Opens the full player"
         onPress={ctx.expand}
         style={styles.mini}
       >
         <Artwork ctx={ctx} size="mini" label={`Cover for ${ctx.item.title}`} />
-        <View style={{ flex: 1 }}>
-          <Text numberOfLines={1} style={styles.miniTitle}>{ctx.item.title}</Text>
-          <Text numberOfLines={1} style={styles.miniSub}>{subtitle}</Text>
-        </View>
+        {notice ? (
+          <View style={{ flex: 1 }} accessibilityLiveRegion="polite">
+            <Text numberOfLines={2} maxFontSizeMultiplier={1.3} style={styles.miniNotice}>{YOUTUBE_SCREEN_OFF_NOTICE}</Text>
+          </View>
+        ) : (
+          <View style={{ flex: 1 }}>
+            {/* Held to a size that fits the 64-point bar at the largest text
+                setting; the full player (one tap) has no such limit. */}
+            <Text numberOfLines={1} maxFontSizeMultiplier={1.4} style={styles.miniTitle}>{ctx.item.title}</Text>
+            <Text numberOfLines={1} maxFontSizeMultiplier={1.4} style={styles.miniSub}>{subtitle}</Text>
+          </View>
+        )}
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={ctx.problem
-            ? `See why ${ctx.item.title} cannot play here`
-            : ctx.playing ? `Pause ${ctx.item.title}` : `Play ${ctx.item.title}`}
+          accessibilityLabel={stuck
+            ? `See why ${ctx.item.title} cannot play`
+            : ctx.playing || loading ? `Pause ${ctx.item.title}` : `Play ${ctx.item.title}`}
           onPress={ctx.toggle}
           style={styles.miniButton}
         >
-          <Ionicons name={ctx.problem ? 'alert-circle-outline' : ctx.playing ? 'pause' : 'play'} size={24} color={theme.colors.accent} />
+          <Ionicons name={stuck ? 'alert-circle-outline' : ctx.playing || loading ? 'pause' : 'play'} size={24} color={theme.colors.accent} />
         </Pressable>
         <Pressable
           accessibilityRole="button"
@@ -512,7 +819,7 @@ function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem,
   const youtubeId = item ? youtubeVideoId(item.url) : null;
   const watchElsewhere = youtubeId ? youtubeWatchUrl(youtubeId) : item?.url;
 
-  const shared: SharedRef | null = item ? { kind: item.type === 'audio' ? 'music' : 'video', title: item.title, speaker: item.speaker, url: item.url, artwork: ctx.artwork } : null;
+  const shared: SharedRef | null = item ? { kind: item.kind ?? (item.type === 'audio' ? 'music' : 'video'), title: item.title, speaker: item.speaker, url: item.url, artwork: ctx.artwork } : null;
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     const message = parsePlayerMessage(event.nativeEvent.data);
@@ -650,23 +957,72 @@ function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem,
         ) : (
           <LinearGradient colors={theme.pageGradient} style={styles.audioPanel}>
             <Artwork ctx={ctx} size="sheet" label={`Cover for ${item?.title || 'this message'}`} />
-            <Text style={styles.audioStatus}>{ctx.playing ? 'Playing — it keeps going when you minimize this' : 'Ready to play'}</Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={ctx.playing ? 'Pause' : 'Play'}
-              onPress={ctx.toggle}
-              style={styles.goldControl}
-            >
-              <Ionicons name={ctx.playing ? 'pause' : 'play'} size={22} color={theme.colors.textOnAccent} />
-              <Text style={styles.goldControlText}>{ctx.playing ? 'Pause' : 'Play'}</Text>
-            </Pressable>
+            {ctx.audioState === 'failed' ? (
+              <View style={styles.audioFailed} accessibilityLiveRegion="polite">
+                <Ionicons name="alert-circle-outline" size={28} color={theme.colors.accent} />
+                <Text style={styles.problemTitle}>{AUDIO_FAILED_COPY.title}</Text>
+                <Text style={styles.videoBusyText}>{AUDIO_FAILED_COPY.body}</Text>
+              </View>
+            ) : (
+              <View style={styles.audioStatusRow} accessibilityLiveRegion="polite">
+                {ctx.audioState === 'loading' ? <ActivityIndicator color={theme.colors.accent} /> : null}
+                <Text style={styles.audioStatus}>
+                  {ctx.playing
+                    ? 'Playing — it keeps going when you minimize this'
+                    : ctx.audioState === 'loading' ? 'Loading…' : 'Paused'}
+                </Text>
+              </View>
+            )}
+            {ctx.audioState === 'failed' ? (
+              <Pressable accessibilityRole="button" accessibilityLabel="Try again" onPress={ctx.retry} style={styles.goldControl}>
+                <Ionicons name="refresh" size={22} color={theme.colors.textOnAccent} />
+                <Text style={styles.goldControlText}>Try again</Text>
+              </Pressable>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={ctx.playing || ctx.audioState === 'loading' ? 'Pause' : 'Play'}
+                onPress={ctx.toggle}
+                style={styles.goldControl}
+              >
+                <Ionicons name={ctx.playing || ctx.audioState === 'loading' ? 'pause' : 'play'} size={22} color={theme.colors.textOnAccent} />
+                <Text style={styles.goldControlText}>{ctx.playing || ctx.audioState === 'loading' ? 'Pause' : 'Play'}</Text>
+              </Pressable>
+            )}
           </LinearGradient>
         )}
 
+        {isEmbed && item?.audioUrl ? (
+          // The honest way to keep a teaching going with the screen off: its
+          // own audio copy, played by the phone (lib/embed.ts).
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Listen instead to ${item.title}`}
+            accessibilityHint="Plays the sound only. It keeps playing when your screen is off."
+            onPress={() => ctx.play({ title: item.title, speaker: item.speaker, artwork: ctx.artwork, url: item.audioUrl as string, type: 'audio', kind: 'sermon' })}
+            style={styles.listenInstead}
+          >
+            <Ionicons name="headset-outline" size={22} color={theme.colors.accent} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.listenInsteadTitle}>Listen instead</Text>
+              <Text style={styles.listenInsteadBody}>Sound only. Keeps playing when your screen is off.</Text>
+            </View>
+          </Pressable>
+        ) : null}
+
+        {isEmbed && ctx.screenOffNotice ? (
+          <View style={styles.noticeRow} accessibilityLiveRegion="polite">
+            <Ionicons name="moon-outline" size={18} color={theme.colors.accent} />
+            <Text style={styles.noticeText}>{`${YOUTUBE_SCREEN_OFF_NOTICE}.`}</Text>
+          </View>
+        ) : null}
+
         <Text style={styles.note}>
           {isEmbed
-            ? 'Minimize and it keeps playing while you use the app — you will hear it, and the bar at the bottom can pause it. Videos from YouTube, Vimeo and Facebook stop if you leave the app.'
-            : 'Minimize to keep listening while you use the app. Close stops it.'}
+            ? 'Minimize and it keeps playing while you use the app — you will hear it, and the bar at the bottom can pause it. Videos from YouTube, Vimeo and Facebook stop if you leave the app or your screen turns off.'
+            : isVideo
+              ? 'Keeps playing when you minimize this, switch apps or lock your phone — you will hear it. Pause it from the lock screen. Close stops it, and so does swiping the app closed.'
+              : 'Keeps playing when you minimize this, switch apps or lock your phone. Pause it from the lock screen. Close stops it, and so does swiping the app closed.'}
         </Text>
 
         <View style={styles.actions}>
@@ -747,6 +1103,7 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   miniArt: { width: 44, height: 44, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceSunken, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   miniTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
   miniSub: { color: t.colors.textMuted, fontSize: 12, marginTop: 1 },
+  miniNotice: { color: t.colors.textPrimary, fontWeight: '800', fontSize: 13, lineHeight: 17 },
   miniButton: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
 
   backdrop: { backgroundColor: t.colors.overlay },
@@ -805,6 +1162,8 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
 
   sheetArt: { width: 96, height: 96, borderRadius: t.radius.lg, backgroundColor: t.colors.surfaceSunken, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   audioPanel: { minHeight: 220, borderRadius: t.radius.lg, alignItems: 'center', justifyContent: 'center', gap: 12, paddingVertical: t.spacing.lg, borderWidth: 1, borderColor: t.colors.accentBorder },
+  audioStatusRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, flexWrap: 'wrap' },
+  audioFailed: { alignItems: 'center', gap: 6, paddingHorizontal: t.spacing.lg },
   audioStatus: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body, textAlign: 'center', paddingHorizontal: t.spacing.lg },
   goldControl: { minHeight: 48, borderRadius: t.radius.pill, backgroundColor: t.colors.accentSolid, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
   goldControlText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body },
@@ -812,6 +1171,33 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   plainControlText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
 
   note: { color: t.colors.textMuted, fontSize: 12, lineHeight: 18 },
+  listenInstead: {
+    alignSelf: 'stretch',
+    minHeight: 56,
+    minWidth: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: t.radius.md,
+    borderWidth: 1,
+    borderColor: t.colors.accentBorder,
+    backgroundColor: t.colors.accentMuted,
+  },
+  listenInsteadTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body },
+  listenInsteadBody: { color: t.colors.textSecondary, fontSize: 12, lineHeight: 17, marginTop: 2 },
+  noticeRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 12,
+    borderRadius: t.radius.md,
+    backgroundColor: t.colors.surfaceSunken,
+    borderWidth: 1,
+    borderColor: t.colors.accentBorder,
+  },
+  noticeText: { flex: 1, color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body, lineHeight: 21 },
   actions: { flexDirection: 'row', gap: 10 },
   action: { flex: 1, minHeight: 56, borderRadius: t.radius.md, borderWidth: 1, borderColor: t.colors.border, backgroundColor: t.colors.surface, alignItems: 'center', justifyContent: 'center', gap: 4, ...t.elevation.low },
   actionText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: 12, textAlign: 'center' },

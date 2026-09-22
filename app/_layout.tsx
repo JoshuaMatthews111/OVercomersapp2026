@@ -166,10 +166,19 @@ export default function RootLayout() {
             <Stack.Screen name="book" />
             <Stack.Screen name="chat-room" />
             <Stack.Screen name="event-detail" />
+            {/* Managing events: app/events/ (list + editor, its own small stack). */}
+            <Stack.Screen name="events" />
             <Stack.Screen name="evangelism" />
+            {/* Outreach team only; each screen checks canUseEvangelism itself. */}
+            <Stack.Screen name="follow-ups" />
+            <Stack.Screen name="home-cells" />
+            {/* Live streaming: app/live.tsx (Go live / End live for leaders on the same screen). */}
+            <Stack.Screen name="live" />
             <Stack.Screen name="maps" />
             <Stack.Screen name="person" />
             <Stack.Screen name="prayer" />
+            {/* 1-on-1 sessions: app/sessions/ (book, host calendar, one booking). A paid service, never in Give. */}
+            <Stack.Screen name="sessions" />
             <Stack.Screen name="story-viewer" />
             <Stack.Screen name="support" />
           </Stack.Protected>

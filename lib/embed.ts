@@ -456,3 +456,138 @@ export function embedPageMayNavigate(embedUri: string, url: string, isTopFrame: 
   const firstPart = (path: string) => path.split('/').filter(Boolean)[0] || '';
   return firstPart(next.pathname) === firstPart(home.pathname);
 }
+
+// ─── Listening with the screen off (2026-09-22) ─────────────────────────────
+//
+// The owner: "Music don't play in background and video, please make sure you
+// have a work around of when someone turn off the phone the video still plays
+// and music in background even if they close the app."
+//
+// What is honest and allowed:
+//   - An audio or video FILE (a song, an uploaded sermon, an .mp3/.m4a/.mp4)
+//     is played by the phone itself, so it keeps going with the screen off and
+//     shows on the lock screen. That is lib/nowPlaying.tsx.
+//   - A YouTube video is YouTube's player inside a web page. YouTube pauses it
+//     when the page is hidden, and keeping it going anyway breaks YouTube's
+//     terms (Apple has rejected apps for exactly that). So we never spoof it.
+//     The honest route is a separate AUDIO copy of the teaching
+//     (public.sermons.audio_url): when there is one, the teaching offers
+//     "Listen" next to "Watch", and Listen is an ordinary audio file.
+//   - When someone swipes the app away, iOS and Android stop everything that
+//     app was playing. No app can get around that.
+
+/** The words the mini bar shows the first time a YouTube video stops because the screen went off. */
+export const YOUTUBE_SCREEN_OFF_NOTICE = 'Videos from YouTube pause when your screen is off';
+
+/** Where the app keeps "we have already told this person once". */
+export const YOUTUBE_SCREEN_OFF_NOTICE_KEY = 'ogn.media.youtubeScreenOffNotice.v1';
+
+/**
+ * What a teaching can offer: Watch (its video link) and, when a separate
+ * audio file exists, Listen. Listen is only offered for something the phone
+ * can play itself — an audio link that is really a web page (a YouTube or
+ * Vimeo link pasted into the audio box) would stop with the screen just the
+ * same, so it is not offered as "Listen".
+ */
+export function teachingPlayback(teaching: { videoUrl?: string | null; audioUrl?: string | null }): {
+  watch: string | null;
+  listen: string | null;
+  /** True when BOTH buttons belong on the card. */
+  both: boolean;
+} {
+  const video = (teaching.videoUrl || '').trim() || null;
+  const audio = (teaching.audioUrl || '').trim() || null;
+  const listen = audio && playbackKind(audio, 'audio') === 'audio' ? audio : null;
+  const watch = video && video !== listen ? video : null;
+  return { watch, listen, both: Boolean(watch && listen) };
+}
+
+/**
+ * True when a song has played to its end. Pressing Play then has to start it
+ * again from the top: a finished player that is simply told to play does
+ * nothing on either phone, which read as a broken Play button.
+ */
+export function isAtEnd(currentTime: number, duration: number): boolean {
+  if (!Number.isFinite(currentTime) || !Number.isFinite(duration) || duration <= 0) return false;
+  return currentTime >= duration - 0.75;
+}
+
+export type AppPhase = 'active' | 'inactive' | 'background' | 'unknown' | 'extension' | string;
+
+export type ScreenOffNoticeState = {
+  /** A YouTube video was playing at the moment the app stopped being in front. */
+  leftWhilePlaying: boolean;
+  /** The app then really went to the background (screen off, or another app). */
+  pending: boolean;
+};
+
+export const SCREEN_OFF_NOTICE_START: ScreenOffNoticeState = { leftWhilePlaying: false, pending: false };
+
+/**
+ * One step of the "tell them once" rule, fed by React Native's AppState.
+ * The note is due only when ALL of these are true:
+ *   - a YouTube video was playing when the app left the front,
+ *   - the app then went to the background (not just Control Centre or a
+ *     notification pulled down, which only makes it 'inactive'),
+ *   - the person has come back ('active'),
+ *   - and they have never been told before.
+ * Returns the next state and whether to show the note now.
+ */
+export function screenOffNoticeStep(
+  state: ScreenOffNoticeState,
+  from: AppPhase,
+  to: AppPhase,
+  youtubePlaying: boolean,
+  alreadyShown: boolean,
+): { state: ScreenOffNoticeState; show: boolean } {
+  let { leftWhilePlaying, pending } = state;
+  if (from === 'active' && to !== 'active') leftWhilePlaying = youtubePlaying;
+  if (to === 'background' && leftWhilePlaying && !alreadyShown) pending = true;
+  if (to === 'active') {
+    return { state: SCREEN_OFF_NOTICE_START, show: pending && !alreadyShown };
+  }
+  return { state: { leftWhilePlaying, pending }, show: false };
+}
+
+// ─── What the bar says about a song or audio sermon (review, 2026-09-22) ────
+//
+// Before this, the bar said "Paused" while a song was still loading on a slow
+// connection, and a file that could not play at all (a moved file, or a
+// podcast web page pasted into the audio box) left a Play button that did
+// nothing and said nothing. The player now tells the person which it is.
+
+export type AudioPhase = 'playing' | 'loading' | 'paused' | 'failed';
+
+/** The fields of expo-audio 57's AudioStatus this rule reads. */
+export type AudioPhaseStatus = {
+  playing: boolean;
+  isLoaded: boolean;
+  /** iOS: 'playing' | 'paused' | 'waitingToPlayAtSpecifiedRate'. Android: 'playing' | 'paused'. */
+  timeControlStatus?: string;
+  error?: string | null;
+};
+
+/**
+ * One word for the state of a song or audio sermon.
+ *   - failed: the phone reported an error for this file (kept until the
+ *     person tries again or picks something else, because expo-audio sends the
+ *     error once and the next status update has error: null again).
+ *   - playing: sound is coming out.
+ *   - loading: the person asked for it to play and it is still loading or
+ *     waiting for the network.
+ *   - paused: anything else (paused by the person, the lock screen, or the end).
+ */
+export function audioPhase(status: AudioPhaseStatus | null | undefined, options: { failed: boolean; wantsPlay: boolean }): AudioPhase {
+  if (options.failed || status?.error) return 'failed';
+  if (!status) return options.wantsPlay ? 'loading' : 'paused';
+  if (status.playing) return 'playing';
+  if (options.wantsPlay && (status.timeControlStatus === 'waitingToPlayAtSpecifiedRate' || !status.isLoaded)) return 'loading';
+  return 'paused';
+}
+
+/** What the bar and the player say when a song or audio sermon would not play. */
+export const AUDIO_FAILED_COPY = {
+  bar: 'Would not play — tap to see why',
+  title: 'This recording would not play',
+  body: 'Check your connection and try again. If it still will not play, the file may have moved — please let a leader know.',
+} as const;

@@ -36,15 +36,22 @@ import {
   type DerivedStatus,
   getLiveWorkers,
   getOutreachContacts,
+  getRegionTeams,
   getTerritories,
   getVisits,
+  initialsFor,
   type LiveWorker,
   type OutreachRecord,
+  teamFor,
+  type TeamMember,
+  teamSummary,
   type TerritoryActivity,
   type TerritoryWithActivity,
   type VisitPin,
 } from '../../lib/evangelismService';
 import { friendlyError } from '../../lib/errorMessages';
+import { buildFollowUpItems, type FollowUpContact, myFollowUps } from '../../lib/followUps';
+import { getHomeCells, type HomeCell } from '../../lib/homeCells';
 import { type AppTheme, colors, createThemedStyles } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
 import { Territory } from '../../types/models';
@@ -113,6 +120,10 @@ export default function OutreachScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [regionsError, setRegionsError] = useState<string | null>(null);
   const [recordsNote, setRecordsNote] = useState<string | null>(null);
+  // Region teams and home cells (owner's list, 2026-09-22). Each loads on its
+  // own; if a table is not there yet, the parts that need it simply stay quiet.
+  const [team, setTeam] = useState<TeamMember[]>([]);
+  const [homeCells, setHomeCells] = useState<HomeCell[] | null>(null);
 
   /**
    * Everything is fetched together and settled separately. A failure in the
@@ -120,12 +131,16 @@ export default function OutreachScreen() {
    * leader still gets the part that loaded, plus a line saying what did not.
    */
   const load = useCallback(async () => {
-    const [regionsResult, recordsResult, workersResult, visitsResult] = await Promise.allSettled([
+    const [regionsResult, recordsResult, workersResult, visitsResult, teamResult, cellsResult] = await Promise.allSettled([
       getTerritories(),
       getOutreachContacts(),
       getLiveWorkers(),
       getVisits(),
+      getRegionTeams(),
+      getHomeCells(),
     ]);
+    if (teamResult.status === 'fulfilled' && teamResult.value.ready) setTeam(teamResult.value.members);
+    if (cellsResult.status === 'fulfilled') setHomeCells(cellsResult.value.ready ? cellsResult.value.cells : null);
 
     if (regionsResult.status === 'fulfilled') {
       setRegions(regionsResult.value);
@@ -200,6 +215,27 @@ export default function OutreachScreen() {
 
   const followUps = useMemo(() => records.filter((record) => record.followUpNeeded).length, [records]);
   const openMap = useCallback(() => router.push('/evangelism' as any), []);
+  /** Open the one map on this region, so its team and records are right there. */
+  const openRegion = useCallback((regionId: string) => router.push({ pathname: '/evangelism', params: { region: regionId } } as any), []);
+
+  // "My follow-ups", counted from the records the team actually filed: the
+  // people this leader is responsible for (assigned to them, or written by them
+  // when nobody was assigned) who still need a follow-up.
+  const mine = useMemo(() => {
+    const contacts: FollowUpContact[] = records.map((record) => ({
+      id: record.id,
+      name: record.name,
+      status: record.status,
+      followUpNeeded: !!record.followUpNeeded,
+      nextFollowUpAt: record.nextFollowUpAt,
+      assignedTo: record.assignedUserId,
+      createdBy: record.createdBy,
+      createdAt: record.createdAt,
+    }));
+    return myFollowUps(buildFollowUpItems(contacts, [], []), access.userId);
+  }, [records, access.userId]);
+  const mineOverdue = mine.filter((item) => item.bucket === 'overdue').length;
+  const activeCells = homeCells ? homeCells.filter((cell) => cell.active).length : 0;
 
   if (loadingAccess) {
     return (
@@ -290,6 +326,35 @@ export default function OutreachScreen() {
             <Ionicons name="chevron-forward" size={20} color={theme.colors.textSecondary} />
           </Pressable>
 
+          <View style={styles.linkRow}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`My follow-ups. ${mine.length} waiting on you${mineOverdue ? `, ${mineOverdue} overdue` : ''}.`}
+              onPress={() => router.push('/follow-ups' as any)}
+              style={({ pressed }) => [styles.linkCard, pressed && styles.pressed]}
+              android_ripple={{ color: theme.colors.accentMuted }}
+            >
+              <Ionicons name="checkbox-outline" size={24} color={theme.colors.accent} />
+              <Text style={styles.linkTitle}>My follow-ups</Text>
+              <Text style={[styles.linkMeta, mineOverdue ? styles.linkMetaDanger : null]}>
+                {mine.length ? `${mine.length} waiting${mineOverdue ? ` · ${mineOverdue} overdue` : ''}` : 'Nobody waiting'}
+              </Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Home cells. ${homeCells ? (activeCells === 1 ? '1 home cell' : `${activeCells} home cells`) : 'Find the nearest one'}.`}
+              onPress={() => router.push('/home-cells' as any)}
+              style={({ pressed }) => [styles.linkCard, pressed && styles.pressed]}
+              android_ripple={{ color: theme.colors.accentMuted }}
+            >
+              <Ionicons name="home-outline" size={24} color={theme.colors.accent} />
+              <Text style={styles.linkTitle}>Home cells</Text>
+              {/* A count of the cells that meet these days. It used to say they
+                  were meeting at this moment, which was never what it counted. */}
+              <Text style={styles.linkMeta}>{homeCells ? (activeCells === 1 ? '1 home cell' : `${activeCells} home cells`) : 'Find the nearest one'}</Text>
+            </Pressable>
+          </View>
+
           <View style={styles.summaryRow}>
             <View style={styles.summaryTile}>
               <Text style={styles.summaryNumber}>{liveCount}</Text>
@@ -352,12 +417,14 @@ export default function OutreachScreen() {
                 const dot = dotFor(derived);
                 const when = timeAgo(derived.lastActivityAt);
                 const live = Boolean(activity[region.id]?.liveNow);
+                const regionTeam = teamFor(team, region.id);
+                const teamLine = teamSummary(regionTeam);
                 return (
                   <Pressable
                     key={region.id}
                     accessibilityRole="button"
-                    accessibilityLabel={`${region.name}. ${derived.label}${when ? `, ${when}` : ''}. Opens the outreach map.`}
-                    onPress={openMap}
+                    accessibilityLabel={`${region.name}. ${derived.label}${when ? `, ${when}` : ''}. Team: ${teamLine}. Opens this region on the outreach map${access.canManageContent ? ', where you can change its team' : ''}.`}
+                    onPress={() => openRegion(region.id)}
                     style={({ pressed }) => [styles.regionRow, pressed && styles.pressed]}
                     android_ripple={{ color: theme.colors.accentMuted }}
                   >
@@ -368,6 +435,18 @@ export default function OutreachScreen() {
                         {derived.label}
                         {when ? ` · ${when}` : ''}
                       </Text>
+                      <View style={styles.teamRow}>
+                        {regionTeam.slice(0, 3).map((member) => (
+                          member.avatarUrl
+                            ? <Image key={member.assignmentId} source={{ uri: member.avatarUrl }} style={styles.teamAvatarImage} accessibilityElementsHidden importantForAccessibility="no" />
+                            : (
+                              <View key={member.assignmentId} style={styles.teamAvatar} accessibilityElementsHidden importantForAccessibility="no">
+                                <Text style={styles.teamAvatarText}>{initialsFor(member.displayName)}</Text>
+                              </View>
+                            )
+                        ))}
+                        <Text style={styles.teamText}>{teamLine}</Text>
+                      </View>
                     </View>
                     {live ? (
                       <View style={styles.liveChip}>
@@ -581,6 +660,38 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   regionName: { color: t.colors.textPrimary, fontSize: t.type.body, fontWeight: '700' },
   regionMeta: { color: t.colors.textSecondary, fontSize: t.type.meta, marginTop: 2 },
   visitNote: { color: t.colors.textMuted, fontSize: t.type.meta, marginTop: 4, lineHeight: 18 },
+
+  teamRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 4, marginTop: 6 },
+  teamAvatarImage: { width: 24, height: 24, borderRadius: 12, marginRight: 2 },
+  teamAvatar: {
+    minWidth: 24,
+    minHeight: 24,
+    paddingHorizontal: 2,
+    borderRadius: 12,
+    marginRight: 2,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: t.colors.brandSolid,
+  },
+  teamAvatarText: { color: t.colors.textOnBrand, fontSize: t.type.overline, fontWeight: '900' },
+  teamText: { flexShrink: 1, color: t.colors.textSecondary, fontSize: t.type.meta, marginLeft: 2 },
+
+  linkRow: { flexDirection: 'row', gap: t.spacing.md, marginTop: t.spacing.md },
+  linkCard: {
+    flex: 1,
+    minHeight: 96,
+    padding: t.spacing.md,
+    borderRadius: t.radius.lg,
+    backgroundColor: t.colors.surface,
+    borderWidth: 1,
+    borderColor: t.colors.cardBorder,
+    gap: 4,
+    ...t.elevation.low,
+  },
+  linkTitle: { color: t.colors.textPrimary, fontSize: t.type.body, fontWeight: '800' },
+  linkMeta: { color: t.colors.textSecondary, fontSize: t.type.meta },
+  linkMetaDanger: { color: t.colors.danger, fontWeight: '800' },
 
   liveChip: {
     paddingHorizontal: t.spacing.md,

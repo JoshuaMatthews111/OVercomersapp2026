@@ -600,6 +600,8 @@ export default function ProfileScreen() {
     { label: 'Saved Media', icon: 'bookmark-outline', action: () => openSettingsDetail('saved') },
     { label: 'Downloads', icon: 'download-outline', action: () => openSettingsDetail('downloads') },
     { label: 'Prayer History', icon: 'hand-left-outline', action: () => router.push('/prayer' as any) },
+    // 1-on-1 sessions (a paid service, never in Give). app/sessions/index.tsx sends the host to their own calendar.
+    { label: 'Book a 1-on-1 with Prophet Joshua', icon: 'calendar-outline', action: () => router.push('/sessions' as any) },
     // Every role has a walkthrough, so this row is not role-gated. It is
     // hidden only when there is no user id to key the flag on, because
     // resetWelcomeTour has nothing to forget without one.

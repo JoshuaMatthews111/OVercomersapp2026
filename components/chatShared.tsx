@@ -1,7 +1,8 @@
 import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
-import { Image, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, GestureResponderEvent, Image, Modal, PanResponder, PanResponderGestureState, Platform, Pressable, SectionList, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { MessageReceipt, ReceiptPerson, ReplyPreview, receiptLabel, receiptSpoken } from '../lib/chatService';
 import { AppTheme, createThemedStyles, getTheme } from '../lib/theme';
 import { ChatRoom } from '../types/models';
 
@@ -226,7 +227,337 @@ export function ChatActionSheet({
   );
 }
 
+/* ---------------------------------------------------------------------------
+ * Delivered and read, on your own messages
+ *
+ *   one tick                  Sent — the church's server has it
+ *   two ticks                 Delivered — somebody's phone has it
+ *   two gold ticks            Read (one-to-one) / Read by N (group)
+ *
+ * The words are there as well as the ticks, so nobody has to know what a tick
+ * means and colour is never the only difference (WCAG 1.4.1).
+ * ------------------------------------------------------------------------- */
+
+export function ReceiptMark({
+  receipt,
+  isDirect,
+  dark,
+  showWords,
+  onPress,
+}: {
+  receipt: MessageReceipt;
+  isDirect: boolean;
+  dark: boolean;
+  /** Words next to the ticks. Always shown for "Read by N" in a group. */
+  showWords: boolean;
+  onPress?: () => void;
+}) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  if (receipt.state === 'none' || receipt.state === 'sending') return null;
+  const read = receipt.state === 'read';
+  const icon: keyof typeof Ionicons.glyphMap = receipt.state === 'held'
+    ? 'time-outline'
+    : receipt.state === 'sent' ? 'checkmark' : 'checkmark-done';
+  // Own bubbles are navy in light mode and gold-tinted in dark.
+  const quiet = dark ? theme.colors.textMuted : theme.colors.textOnBrand;
+  const lit = dark ? theme.colors.accent : theme.colors.accentSolid;
+  const words = receiptLabel(receipt, isDirect);
+  const wordsShown = showWords || (read && !isDirect);
+  const content = (
+    <>
+      <Ionicons name={icon} size={16} color={read ? lit : quiet} />
+      {wordsShown ? <Text style={[styles.receiptWords, dark ? styles.receiptWordsDark : styles.receiptWordsLight]}>{words}</Text> : null}
+    </>
+  );
+  const spoken = receiptSpoken(receipt, isDirect);
+  const more = receipt.state === 'held' ? 'Double tap for details.' : 'Double tap to see who.';
+  if (!onPress) {
+    return <View style={styles.receipt} accessible accessibilityLabel={spoken}>{content}</View>;
+  }
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${spoken} ${more}`}
+      onPress={onPress}
+      hitSlop={{ top: 14, bottom: 14, left: 14, right: 14 }}
+      style={styles.receipt}
+    >
+      {content}
+    </Pressable>
+  );
+}
+
+/** "Today, 10:42 AM" */
+function whenLabel(value: string) {
+  const day = formatDayLabel(value);
+  const time = formatMessageTime(value);
+  return day && time ? `${day}, ${time}` : time || day;
+}
+
+type InfoPerson = { displayName: string; avatarUrl?: string };
+
+/**
+ * Who has read your message, and who has it but has not read it yet. Only
+ * people in this room, never anyone you blocked (lib/chatService.ts drops
+ * them before they get here), names and pictures only.
+ */
+export function MessageInfoSheet({
+  visible,
+  dark,
+  onClose,
+  receipt,
+  isDirect,
+  people,
+  preview,
+}: {
+  visible: boolean;
+  dark: boolean;
+  onClose: () => void;
+  receipt: MessageReceipt | null;
+  isDirect: boolean;
+  people: Map<string, InfoPerson>;
+  preview?: string;
+}) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  const readBy = receipt?.readBy || [];
+  const deliveredTo = receipt?.deliveredTo || [];
+  const sections = [
+    ...(readBy.length ? [{ key: 'read', title: `Read by ${readBy.length}`, icon: 'checkmark-done' as const, data: readBy }] : []),
+    ...(deliveredTo.length ? [{ key: 'delivered', title: `Delivered to ${deliveredTo.length}`, icon: 'checkmark-done' as const, data: deliveredTo }] : []),
+  ];
+  const waiting = receipt && receipt.otherMembers !== null
+    ? Math.max(0, receipt.otherMembers - readBy.length - deliveredTo.length)
+    : 0;
+
+  let note = '';
+  if (receipt?.state === 'held') note = 'This message is waiting for a leader to review it. Nobody else can see it yet, so nobody has read it.';
+  else if (receipt?.state === 'sending') note = 'Still sending.';
+  else if (!readBy.length && !deliveredTo.length) note = isDirect ? 'Sent. It has not reached their phone yet.' : 'Sent. It has not reached anyone’s phone yet.';
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose} statusBarTranslucent>
+      <Pressable accessibilityRole="button" accessibilityLabel="Close message info" onPress={onClose} style={styles.sheetBackdrop} />
+      <SafeAreaView edges={['bottom']} style={[styles.sheetPanel, styles.infoPanel]}>
+        <View style={styles.sheetHandle} />
+        <View style={styles.infoHead}>
+          <Text style={[styles.sheetTitle, { flex: 1 }]} accessibilityRole="header">Message info</Text>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close message info" onPress={onClose} style={styles.infoClose}>
+            <Ionicons name="close" size={22} color={theme.colors.textPrimary} />
+          </Pressable>
+        </View>
+        {preview ? <Text style={styles.sheetSubtitle}>{preview}</Text> : null}
+        {note ? <Text style={styles.infoNote}>{note}</Text> : null}
+        <SectionList
+          sections={sections}
+          keyExtractor={(person: ReceiptPerson) => person.userId}
+          style={styles.infoList}
+          stickySectionHeadersEnabled={false}
+          renderSectionHeader={({ section }) => (
+            <View style={styles.infoSectionHead}>
+              <Ionicons name={section.icon} size={16} color={section.key === 'read' ? theme.colors.accent : theme.colors.textSecondary} />
+              <Text style={styles.infoSectionTitle}>{section.title}</Text>
+            </View>
+          )}
+          renderItem={({ item }) => {
+            const person = people.get(item.userId) || { displayName: 'OGN Member' };
+            return (
+              <View style={styles.infoRow} accessible accessibilityLabel={`${person.displayName}, ${whenLabel(item.at)}`}>
+                <View style={styles.infoAvatar}>
+                  {person.avatarUrl
+                    ? <Image source={{ uri: person.avatarUrl }} style={styles.infoAvatarImage} resizeMode="cover" accessibilityElementsHidden importantForAccessibility="no" />
+                    : <Text style={styles.infoAvatarInitial}>{initials(person.displayName)}</Text>}
+                </View>
+                <View style={{ flex: 1, minWidth: 0 }}>
+                  <Text style={styles.infoName} numberOfLines={1}>{person.displayName}</Text>
+                  <Text style={styles.infoWhen}>{whenLabel(item.at)}</Text>
+                </View>
+              </View>
+            );
+          }}
+          ListFooterComponent={waiting > 0 && !isDirect ? (
+            <Text style={styles.infoWaiting}>
+              {waiting === 1 ? '1 other person has not received it yet.' : `${waiting} other people have not received it yet.`}
+            </Text>
+          ) : null}
+        />
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * Replies
+ * ------------------------------------------------------------------------- */
+
+/** Ends a spoken sentence once, even when the quote already ends with a full stop. */
+function sentence(text: string) {
+  return /[.!?…]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`;
+}
+
+function replyIcon(reply: ReplyPreview): keyof typeof Ionicons.glyphMap | null {
+  if (reply.kind === 'voice') return 'mic';
+  if (reply.kind === 'photo') return 'image';
+  if (reply.kind === 'video') return 'videocam';
+  if (reply.kind === 'file') return 'document-text';
+  if (reply.kind === 'shared') return 'link';
+  return null;
+}
+
+/**
+ * The quote at the top of a reply. Tapping it takes you to the original when
+ * it is loaded. An original that was deleted or held says so, and cannot be
+ * tapped.
+ */
+export function ReplyQuote({ reply, own, dark, onPress }: { reply: ReplyPreview; own: boolean; dark: boolean; onPress?: () => void }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  const icon = replyIcon(reply);
+  if (!reply.available) {
+    return (
+      <View style={[styles.quote, own && styles.quoteOwn]} accessible accessibilityLabel={`Reply to a message. ${sentence(reply.snippet)}`}>
+        <View style={[styles.quoteBar, styles.quoteBarQuiet]} />
+        <Text style={styles.quoteGone}>{reply.snippet}</Text>
+      </View>
+    );
+  }
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Reply to ${reply.authorName}: ${sentence(reply.snippet)} Double tap to go to the original.`}
+      onPress={onPress}
+      style={({ pressed }) => [styles.quote, own && styles.quoteOwn, pressed && styles.sheetRowPressed]}
+    >
+      <View style={styles.quoteBar} />
+      <View style={{ flex: 1, minWidth: 0 }}>
+        <Text style={styles.quoteAuthor} numberOfLines={1}>{reply.authorName}</Text>
+        <View style={styles.quoteLine}>
+          {icon ? <Ionicons name={icon} size={14} color={theme.colors.textSecondary} /> : null}
+          <Text style={styles.quoteText} numberOfLines={2}>{reply.snippet}</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+const SWIPE_REPLY_AT = 64;
+const SWIPE_REPLY_MAX = 96;
+/** Swipes that start this close to the left edge belong to the phone (Back), not to the message. */
+const SWIPE_EDGE = 28;
+
+/**
+ * Swipe a message to the right to reply, the way people already do on their
+ * phones. Only a clearly sideways drag counts, so scrolling the chat is never
+ * mistaken for it, and the long-press menu and screen readers both offer Reply
+ * as well — nobody has to know the gesture.
+ */
+export function SwipeToReply({ enabled, dark, onReply, children }: { enabled: boolean; dark: boolean; onReply: () => void; children: React.ReactNode }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  const shift = React.useRef(new Animated.Value(0)).current;
+  const replyRef = React.useRef(onReply);
+  replyRef.current = onReply;
+
+  const responder = React.useMemo(() => {
+    const wants = (event: GestureResponderEvent, gesture: PanResponderGestureState) => (
+      enabled
+      && gesture.dx > 12
+      && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 2
+      && event.nativeEvent.pageX - gesture.dx > SWIPE_EDGE
+    );
+    const settle = () => Animated.spring(shift, { toValue: 0, useNativeDriver: true, bounciness: 6 }).start();
+    return PanResponder.create({
+      onMoveShouldSetPanResponderCapture: wants,
+      onMoveShouldSetPanResponder: wants,
+      onPanResponderMove: (_event, gesture) => shift.setValue(Math.max(0, Math.min(gesture.dx, SWIPE_REPLY_MAX))),
+      onPanResponderRelease: (_event, gesture) => {
+        if (gesture.dx >= SWIPE_REPLY_AT) replyRef.current();
+        settle();
+      },
+      onPanResponderTerminate: settle,
+      // The list may take over (a vertical scroll): let it.
+      onPanResponderTerminationRequest: () => true,
+    });
+  }, [enabled, shift]);
+
+  const hintOpacity = shift.interpolate({ inputRange: [0, SWIPE_REPLY_AT], outputRange: [0, 1], extrapolate: 'clamp' });
+  return (
+    <View>
+      <Animated.View pointerEvents="none" style={[styles.swipeHint, { opacity: hintOpacity }]} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
+        <Ionicons name="arrow-undo" size={18} color={theme.colors.accent} />
+      </Animated.View>
+      <Animated.View {...responder.panHandlers} style={{ transform: [{ translateX: shift }] }}>
+        {children}
+      </Animated.View>
+    </View>
+  );
+}
+
+/** Above the message box while you are writing (or recording) a reply. */
+export function ReplyComposerBar({ reply, dark, onClose }: { reply: ReplyPreview; dark: boolean; onClose: () => void }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  const icon = replyIcon(reply);
+  // The original was deleted or held while you were writing: there is no name to show.
+  const who = reply.available && reply.authorName ? `Replying to ${reply.authorName}` : 'Replying to a message';
+  return (
+    <View style={styles.replyBar} accessibilityLiveRegion="polite">
+      <View style={[styles.quoteBar, !reply.available && styles.quoteBarQuiet]} />
+      <View style={{ flex: 1, minWidth: 0 }} accessible accessibilityLabel={`${who}: ${reply.snippet}`}>
+        <Text style={styles.quoteAuthor}>{who}</Text>
+        <View style={styles.quoteLine}>
+          {icon ? <Ionicons name={icon} size={14} color={theme.colors.textSecondary} /> : null}
+          <Text style={styles.quoteText}>{reply.snippet}</Text>
+        </View>
+      </View>
+      <Pressable accessibilityRole="button" accessibilityLabel="Cancel the reply" onPress={onClose} style={styles.infoClose}>
+        <Ionicons name="close" size={20} color={theme.colors.textSecondary} />
+      </Pressable>
+    </View>
+  );
+}
+
 const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
+  receipt: { flexDirection: 'row', alignItems: 'center', gap: 3, minHeight: 20, minWidth: 20 },
+  receiptWords: { fontSize: t.type.overline, fontWeight: '700' },
+  receiptWordsLight: { color: t.colors.textOnBrand },
+  receiptWordsDark: { color: t.colors.textMuted },
+
+  infoPanel: { maxHeight: '80%' },
+  infoHead: { flexDirection: 'row', alignItems: 'center', paddingLeft: 4 },
+  infoClose: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
+  infoNote: { color: t.colors.textSecondary, fontSize: t.type.body, lineHeight: 21, paddingHorizontal: 12, paddingVertical: 8 },
+  infoList: { flexGrow: 0 },
+  infoSectionHead: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingTop: 14, paddingBottom: 6 },
+  infoSectionTitle: { color: t.colors.textSecondary, fontWeight: '900', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6 },
+  infoRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 56, paddingHorizontal: 12, paddingVertical: 6 },
+  infoAvatar: { width: 40, height: 40, borderRadius: 20, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', backgroundColor: t.colors.brandSolid, borderWidth: 1, borderColor: t.colors.accentBorder },
+  infoAvatarImage: { width: '100%', height: '100%' },
+  infoAvatarInitial: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.meta },
+  infoName: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
+  infoWhen: { color: t.colors.textSecondary, fontSize: t.type.meta, marginTop: 1 },
+  infoWaiting: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 16 },
+
+  quote: {
+    flexDirection: 'row', alignItems: 'stretch', alignSelf: 'stretch', gap: 8, minHeight: 48, minWidth: 160, marginBottom: 6, paddingVertical: 6, paddingRight: 10,
+    borderRadius: t.radius.md, backgroundColor: t.colors.surfaceSunken, overflow: 'hidden',
+  },
+  quoteOwn: { backgroundColor: t.colors.accentMuted },
+  quoteBar: { width: 4, borderRadius: 2, backgroundColor: t.colors.accentSolid },
+  quoteBarQuiet: { backgroundColor: t.colors.borderStrong },
+  quoteAuthor: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.overline },
+  quoteLine: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 1 },
+  quoteText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.meta, lineHeight: 18 },
+  quoteGone: { flex: 1, alignSelf: 'center', color: t.colors.textSecondary, fontStyle: 'italic', fontSize: t.type.meta, lineHeight: 18 },
+  swipeHint: {
+    position: 'absolute', left: 8, top: 0, bottom: 8, width: 36, alignItems: 'center', justifyContent: 'center',
+  },
+  replyBar: {
+    flexDirection: 'row', alignItems: 'stretch', gap: 10, marginHorizontal: 12, marginBottom: 6, paddingLeft: 8, paddingVertical: 4,
+    borderRadius: t.radius.md, backgroundColor: t.colors.surfaceRaised, borderWidth: 1, borderColor: t.colors.accentBorder,
+  },
+
   messageBody: { color: t.colors.textPrimary, lineHeight: 21, fontSize: t.type.body },
   // Own bubbles are navy in light mode; the words must be white on them.
   messageBodyOwn: { color: t.colors.textOnBrand },
@@ -247,7 +578,7 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
 
   sheetBackdrop: { flex: 1, backgroundColor: t.colors.overlay },
   sheetPanel: {
-    backgroundColor: t.colors.surfaceRaised, borderTopLeftRadius: t.radius.lg, borderTopRightRadius: t.radius.lg,
+    backgroundColor: t.colors.sheet, borderTopLeftRadius: t.radius.lg, borderTopRightRadius: t.radius.lg,
     paddingHorizontal: 8, paddingTop: 8, borderTopWidth: 1, borderColor: t.colors.border,
   },
   sheetHandle: { alignSelf: 'center', width: 40, height: 4, borderRadius: 2, backgroundColor: t.colors.borderStrong, marginBottom: 10 },

@@ -2,10 +2,11 @@
 // (takeaway, question, note, quote), write it, send. The message lands as a
 // card that others can tap to play or open.
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { chatRoomTitle, getChatRooms, joinChatRoom, sendChatMessage, SharedRef } from '../lib/chatService';
+import { chatRoomTitle, formatEventWhen, getChatRooms, joinChatRoom, sendChatMessage, SharedRef } from '../lib/chatService';
 import { friendlyError } from '../lib/errorMessages';
 import { AppTheme, createThemedStyles, getTheme } from '../lib/theme';
 import { ChatRoom } from '../types/models';
@@ -160,10 +161,63 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
   );
 }
 
+/**
+ * An event sent into a group (the events screens send these): the event's
+ * picture across the top, its name, and "Sun, Sep 28 · 10:00 AM · Main Hall"
+ * in the reader's own time. Tapping it opens the event.
+ */
+function EventCard({ shared, dark, own, onOpen }: { shared: SharedRef; dark: boolean; own: boolean; onOpen: (shared: SharedRef) => void }) {
+  const theme = getTheme(dark);
+  const styles = useStyles(theme);
+  const [pictureFailed, setPictureFailed] = useState(false);
+  const when = formatEventWhen(shared.startsAt, shared.location);
+  const type = NOTE_TYPES.find((t) => t.key === shared.noteType);
+  const showPicture = Boolean(shared.artwork) && !pictureFailed;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Event: ${shared.title}${when ? `, ${when}` : ''}. Double tap to open it.`}
+      onPress={() => onOpen(shared)}
+      style={[styles.card, styles.eventCard, own && styles.cardOwn]}
+    >
+      {showPicture ? (
+        <Image
+          source={{ uri: shared.artwork }}
+          accessibilityLabel={`Picture for ${shared.title}`}
+          contentFit="cover"
+          transition={150}
+          cachePolicy="memory-disk"
+          onError={() => setPictureFailed(true)}
+          style={styles.eventBanner}
+        />
+      ) : null}
+      <View style={styles.eventBody}>
+        {type ? (
+          <View style={styles.cardTag}>
+            <Ionicons name={type.icon} size={13} color={theme.colors.accent} />
+            <Text style={styles.cardTagText}>{type.label}</Text>
+          </View>
+        ) : null}
+        <View style={styles.cardRow}>
+          <View style={styles.cardIcon}>
+            <Ionicons name="calendar" size={20} color={theme.colors.accent} />
+          </View>
+          <View style={{ flex: 1, minWidth: 0 }}>
+            <Text numberOfLines={2} style={styles.cardTitle}>{shared.title}</Text>
+            <Text style={styles.eventWhen}>{when || 'Event'}</Text>
+          </View>
+          <Ionicons name="open-outline" size={22} color={theme.colors.accent} />
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
 export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; dark: boolean; own: boolean; onOpen: (shared: SharedRef) => void }) {
   const theme = getTheme(dark);
   const styles = useStyles(theme);
   const type = NOTE_TYPES.find((t) => t.key === shared.noteType);
+  if (shared.kind === 'event') return <EventCard shared={shared} dark={dark} own={own} onOpen={onOpen} />;
   return (
     <Pressable accessibilityRole="button" accessibilityLabel={`Open ${shared.title}`} onPress={() => onOpen(shared)} style={[styles.card, own && styles.cardOwn]}>
       {type ? (
@@ -180,7 +234,7 @@ export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; d
           <Text numberOfLines={2} style={styles.cardTitle}>{shared.title}</Text>
           <Text numberOfLines={1} style={styles.cardMeta}>{labelFor(shared.kind)}{shared.speaker ? ` • ${shared.speaker}` : ''}</Text>
         </View>
-        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' || shared.kind === 'give' || shared.kind === 'event' ? 'open-outline' : 'play-circle'} size={24} color={theme.colors.accent} />
+        <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' || shared.kind === 'give' ? 'open-outline' : 'play-circle'} size={24} color={theme.colors.accent} />
       </View>
       {shared.scripture ? (
         <>
@@ -212,7 +266,7 @@ function labelFor(kind: SharedRef['kind']) {
 const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   backdrop: { flex: 1, minHeight: 200, justifyContent: 'flex-end', backgroundColor: t.colors.overlay },
   sheetScroll: { maxHeight: '88%', flexGrow: 0 },
-  sheet: { borderTopLeftRadius: t.radius.xl, borderTopRightRadius: t.radius.xl, backgroundColor: t.colors.surfaceRaised, borderTopWidth: 1, borderColor: t.colors.accentBorder, padding: 16, paddingBottom: 30, gap: 12 },
+  sheet: { borderTopLeftRadius: t.radius.xl, borderTopRightRadius: t.radius.xl, backgroundColor: t.colors.sheet, borderTopWidth: 1, borderColor: t.colors.accentBorder, padding: 16, paddingBottom: 30, gap: 12 },
   grabber: { alignSelf: 'center', width: 40, height: 5, borderRadius: t.radius.pill, backgroundColor: t.colors.border },
   headingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   heading: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle },
@@ -243,4 +297,8 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   cardIcon: { width: 40, height: 40, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceRaised, alignItems: 'center', justifyContent: 'center' },
   cardTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
   cardMeta: { color: t.colors.textSecondary, fontSize: t.type.overline, marginTop: 2 },
+  eventCard: { padding: 0, overflow: 'hidden', width: 248, maxWidth: '100%' },
+  eventBanner: { width: '100%', aspectRatio: 16 / 9, backgroundColor: t.colors.surfaceRaised },
+  eventBody: { padding: 10, gap: 6 },
+  eventWhen: { color: t.colors.textSecondary, fontSize: t.type.meta, fontWeight: '700', lineHeight: 18, marginTop: 2 },
 }));

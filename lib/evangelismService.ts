@@ -1,10 +1,15 @@
 import { OutreachContact, Territory } from '../types/models';
+import { FriendlyError } from './errorMessages';
+import { isMissingRelation, nominatimHeaders, waitForNominatimTurn } from './homeCells';
 import { fetchWithTimeout } from './requestTimeout';
 import { supabase } from './supabase';
 
 import { hasSupabase } from './publicEnv';
 
 export type LatLng = { latitude: number; longitude: number };
+
+/** A person on the outreach team, as anyone signed in may see them: name and picture. */
+export type Person = { id: string; displayName: string; avatarUrl?: string };
 
 /**
  * A territory plus the one extra field the map needs and types/models.ts does
@@ -39,7 +44,16 @@ function asKnownStatus(value: any): Territory['status'] | undefined {
  * An outreach record plus its timestamp. The timestamp is what lets the map
  * say whether a region is actually active instead of trusting a stored label.
  */
-export type OutreachRecord = OutreachContact & { createdAt?: string };
+export type OutreachRecord = OutreachContact & {
+  createdAt?: string;
+  /**
+   * The account the record is assigned to (outreach_contacts.assigned_to).
+   * `assignedTo` above is the leader's NAME for display and falls back to this
+   * id; this one is always the id or nothing, so "is this mine?" can be asked
+   * without guessing which of the two it holds.
+   */
+  assignedUserId?: string;
+};
 
 // GeoJSON Polygon / MultiPolygon -> rings of map points.
 function ringsFromGeoJson(geo: any): LatLng[][] | undefined {
@@ -103,11 +117,14 @@ export async function setTerritoryBoundary(territoryId: string, ring: LatLng[]) 
 }
 
 // Free outline from OpenStreetMap (Nominatim). One request per tap; that is
-// inside their fair-use rules for an app used by a few leaders.
+// inside their fair-use rules for an app used by a few leaders. It shares the
+// one-request-a-second queue with the home-cell address search
+// (lib/homeCells.ts), so the two can never double up on Nominatim.
 export async function fetchOutlineFromOpenStreetMap(name: string): Promise<LatLng[] | null> {
   const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&polygon_geojson=1&limit=1&q=${encodeURIComponent(name)}`;
+  await waitForNominatimTurn();
   // Bounded: a stalled outline lookup must never hold the button down forever.
-  const response = await fetchWithTimeout(url, { headers: { 'User-Agent': 'OvercomersGlobalNetworkApp/1.0 (evangelism map)', Accept: 'application/json' } }, 12_000);
+  const response = await fetchWithTimeout(url, { headers: nominatimHeaders() }, 12_000);
   if (!response.ok) return null;
   const rows = await response.json();
   const geo = rows?.[0]?.geojson;
@@ -201,6 +218,7 @@ export async function getOutreachContacts(): Promise<OutreachRecord[]> {
     followUpNeeded: row.follow_up_needed,
     status: row.status,
     assignedTo: row.assigned_leader_name || row.assigned_to || undefined,
+    assignedUserId: row.assigned_to || undefined,
     nextFollowUpAt: row.next_follow_up_at || undefined,
     notes: row.notes || undefined,
     createdBy: row.created_by || undefined,
@@ -345,20 +363,28 @@ export type VisitsResult =
   | { ready: true; visits: VisitPin[] }
   | { ready: false; reason: 'not-switched-on' | 'unavailable' };
 
-/** True when the backend is telling us the table simply is not there yet. */
-function isMissingRelation(error: any): boolean {
-  if (!error) return false;
-  const code = String(error.code || '');
-  if (code === '42P01' || code === 'PGRST205' || code === 'PGRST202') return true;
-  const text = `${error.message || ''} ${error.details || ''} ${error.hint || ''}`.toLowerCase();
-  return text.includes('does not exist') || text.includes('schema cache');
+// isMissingRelation lives in lib/homeCells.ts and is shared by every outreach
+// loader, so "not switched on yet" means the same thing on every screen.
+
+/**
+ * Names for a list of accounts.
+ *
+ * Read from chat_profiles — names and pictures only, which every signed-in
+ * person may see — not from `profiles`, which holds phone numbers and is
+ * readable only by staff. Reading `profiles` here meant an outreach worker who
+ * is not staff saw "Worker" and "A team member" instead of the names of the
+ * people they were out with.
+ */
+export async function lookupPeople(userIds: (string | null | undefined)[]): Promise<Map<string, Person>> {
+  const ids = Array.from(new Set(userIds.filter((id): id is string => !!id)));
+  if (!ids.length || !hasSupabase) return new Map();
+  const { data } = await supabase.from('chat_profiles').select('id, display_name, avatar_url').in('id', ids);
+  return new Map((data || []).map((row: any) => [row.id, { id: row.id, displayName: row.display_name || 'OGN member', avatarUrl: row.avatar_url || undefined }]));
 }
 
 async function lookupDisplayNames(userIds: (string | null | undefined)[]): Promise<Map<string, string>> {
-  const ids = Array.from(new Set(userIds.filter((id): id is string => !!id)));
-  if (!ids.length) return new Map();
-  const { data } = await supabase.from('profiles').select('id, display_name').in('id', ids);
-  return new Map((data || []).map((row: any) => [row.id, row.display_name]));
+  const people = await lookupPeople(userIds);
+  return new Map([...people.values()].map((person) => [person.id, person.displayName]));
 }
 
 function mapVisitRow(row: any, names: Map<string, string>): VisitPin {
@@ -641,4 +667,173 @@ export function pointFromEwkbHex(hex: string): { latitude: number; longitude: nu
   if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return null;
   if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) return null;
   return { latitude, longitude };
+}
+
+// ----- Region teams: who is assigned to which region -----
+//
+// The owner's words, 2026-09-22: "a way we can see who is assigned to what
+// region on the evangelism group". One row per person per region in
+// public.territory_assignments (supabase/2026-09-22-outreach-region-teams.sql).
+// The whole outreach team can read it; only leaders and admins
+// (is_staff_or_above) can change it, and only people who already hold an
+// outreach role can be put on a team, because nobody else can open the region.
+
+export type TeamRole = 'lead' | 'member';
+
+export type TeamMember = Person & {
+  /** The assignment row, which is what add / remove / change act on. */
+  assignmentId: string;
+  userId: string;
+  territoryId: string;
+  role: TeamRole;
+};
+
+export type RegionTeamsResult =
+  | { ready: true; members: TeamMember[] }
+  | { ready: false; reason: 'not-switched-on' | 'unavailable' };
+
+/** The outreach roles, copied from public.is_outreach_or_above(). */
+export const OUTREACH_ROLE_NAMES = ['outreach', 'outreach_worker', 'staff', 'leader', 'admin', 'super_admin'];
+
+export async function getRegionTeams(): Promise<RegionTeamsResult> {
+  if (!hasSupabase) return { ready: false, reason: 'unavailable' };
+  const { data, error } = await supabase
+    .from('territory_assignments')
+    .select('id, territory_id, user_id, role, created_at')
+    .order('created_at')
+    .limit(2000);
+  if (error) return { ready: false, reason: isMissingRelation(error) ? 'not-switched-on' : 'unavailable' };
+  const people = await lookupPeople((data || []).map((row: any) => row.user_id));
+  return {
+    ready: true,
+    members: (data || []).map((row: any) => {
+      const person = people.get(row.user_id);
+      return {
+        id: row.user_id,
+        userId: row.user_id,
+        assignmentId: row.id,
+        territoryId: row.territory_id,
+        role: row.role === 'lead' ? 'lead' : 'member',
+        displayName: person?.displayName || 'OGN member',
+        avatarUrl: person?.avatarUrl,
+      } as TeamMember;
+    }),
+  };
+}
+
+/** Everyone on one region's team, the lead first, then by name. */
+export function teamFor(members: TeamMember[], territoryId: string | null | undefined): TeamMember[] {
+  if (!territoryId) return [];
+  return members
+    .filter((member) => member.territoryId === territoryId)
+    .sort((a, b) => (Number(b.role === 'lead') - Number(a.role === 'lead')) || a.displayName.localeCompare(b.displayName));
+}
+
+/**
+ * One short line naming a region's team: "Ana (lead), Ben and 2 more".
+ * No team yet: "No one assigned yet".
+ */
+export function teamSummary(members: TeamMember[], shown: number = 2): string {
+  if (!members.length) return 'No one assigned yet';
+  const ordered = [...members].sort((a, b) => (Number(b.role === 'lead') - Number(a.role === 'lead')) || a.displayName.localeCompare(b.displayName));
+  const names = ordered.slice(0, Math.max(1, shown)).map((m) => (m.role === 'lead' ? `${m.displayName} (lead)` : m.displayName));
+  const rest = ordered.length - names.length;
+  if (rest <= 0) return names.length === 2 ? `${names[0]} and ${names[1]}` : names.join(', ');
+  return `${names.join(', ')} and ${rest} more`;
+}
+
+/** Two letters for a round picture when a person has not added a photo. */
+export function initialsFor(name: string | null | undefined): string {
+  const words = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '?';
+  const first = words[0][0] || '';
+  const last = words.length > 1 ? words[words.length - 1][0] || '' : '';
+  return (first + last).toUpperCase();
+}
+
+export async function addToRegionTeam(territoryId: string, userId: string, role: TeamRole = 'member'): Promise<void> {
+  const { data: session } = await supabase.auth.getSession();
+  const me = session.session?.user.id;
+  if (!me) throw new FriendlyError('Sign in before changing a region team.');
+  const write = (asRole: TeamRole) => supabase
+    .from('territory_assignments')
+    .upsert({ territory_id: territoryId, user_id: userId, role: asRole, assigned_by: me }, { onConflict: 'territory_id,user_id' })
+    .select('id');
+  let { data, error } = await write(role);
+  // One lead per region (unique index territory_assignments_one_lead). If
+  // someone else became the lead while this screen was open, add this person
+  // as a member instead of failing.
+  if (error && role === 'lead' && String(error.code) === '23505') ({ data, error } = await write('member'));
+  if (error) throw error;
+  if (!data?.length) throw new FriendlyError('Only leaders and admins can change a region team, and only people on the outreach team can be added.');
+}
+
+export async function removeFromRegionTeam(assignmentId: string): Promise<void> {
+  const { data, error } = await supabase.from('territory_assignments').delete().eq('id', assignmentId).select('id');
+  if (error) throw error;
+  if (!data?.length) throw new FriendlyError('Only leaders and admins can change a region team.');
+}
+
+/**
+ * Make someone the region's lead, or put the lead back to a member.
+ * A region has ONE lead (the database enforces it), so making someone the lead
+ * first puts the current lead back to a member. Before 2026-09-22's review,
+ * "Make X the lead" left the old lead in place and a region showed two leads.
+ */
+export async function setRegionTeamRole(member: Pick<TeamMember, 'assignmentId' | 'territoryId'>, role: TeamRole): Promise<void> {
+  if (role === 'lead') {
+    const { error: demoteError } = await supabase
+      .from('territory_assignments')
+      .update({ role: 'member' })
+      .eq('territory_id', member.territoryId)
+      .eq('role', 'lead')
+      .neq('id', member.assignmentId);
+    if (demoteError) throw demoteError;
+  }
+  const { data, error } = await supabase.from('territory_assignments').update({ role }).eq('id', member.assignmentId).select('id');
+  if (error) throw error;
+  if (!data?.length) throw new FriendlyError('Only leaders and admins can change a region team.');
+}
+
+/**
+ * Find someone on the outreach team by name, for leaders and admins putting
+ * people on a region team or handing a follow-up to someone.
+ *
+ * Staff can read every user_roles row (policy "users read own roles"), so this
+ * asks who holds an outreach role, then reads their names from chat_profiles.
+ * For anyone else user_roles returns only their own row, so the search comes
+ * back with at most themselves — which is right, because only leaders and
+ * admins may assign.
+ */
+export async function searchOutreachTeam(query: string, limit: number = 20): Promise<Person[]> {
+  if (!hasSupabase) return [];
+  const { data: roleRows, error: roleError } = await supabase
+    .from('user_roles')
+    .select('user_id, role')
+    .in('role', OUTREACH_ROLE_NAMES)
+    .limit(2000);
+  if (roleError) throw roleError;
+  const ids = Array.from(new Set((roleRows || []).map((row: any) => row.user_id).filter(Boolean)));
+  if (!ids.length) return [];
+  const term = query.trim();
+  let request = supabase.from('chat_profiles').select('id, display_name, avatar_url').in('id', ids).order('display_name').limit(limit);
+  if (term) request = request.ilike('display_name', `%${term.replace(/[%_]/g, '')}%`);
+  const { data, error } = await request;
+  if (error) throw error;
+  return (data || []).map((row: any) => ({ id: row.id, displayName: row.display_name || 'OGN member', avatarUrl: row.avatar_url || undefined }));
+}
+
+/** Find anyone in the church by name (a home cell's host need not be on the outreach team). */
+export async function searchChurchPeople(query: string, limit: number = 20): Promise<Person[]> {
+  if (!hasSupabase) return [];
+  const term = query.trim().replace(/[%_]/g, '');
+  if (term.length < 2) return [];
+  const { data, error } = await supabase
+    .from('chat_profiles')
+    .select('id, display_name, avatar_url')
+    .ilike('display_name', `%${term}%`)
+    .order('display_name')
+    .limit(limit);
+  if (error) throw error;
+  return (data || []).map((row: any) => ({ id: row.id, displayName: row.display_name || 'OGN member', avatarUrl: row.avatar_url || undefined }));
 }

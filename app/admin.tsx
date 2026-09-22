@@ -43,7 +43,7 @@ import {
 import { useAccessProfile } from '../lib/accessControl';
 import { ChatProfileSearchResult, searchChatProfiles } from '../lib/chatService';
 import { CoverNeeded, getCoversNeeded, setSermonCover } from '../lib/adminService';
-import { createAdminEvent, createAdminMediaItem, createAdminStory } from '../lib/contentService';
+import { createAdminMediaItem, createAdminStory } from '../lib/contentService';
 import { embedUrl, fetchEmbedMetadata, thumbnailFromUrl, youtubeVideoId } from '../lib/embed';
 import { friendlyError } from '../lib/errorMessages';
 import { AppTheme, createThemedStyles } from '../lib/theme';
@@ -52,7 +52,7 @@ import { friendlyUploadError, uploadDocumentAsset, uploadPickedAsset } from '../
 import { AppRole, MediaKind } from '../types/models';
 
 type Page = 'home' | 'review' | 'post' | 'people' | 'notice' | 'library';
-type PostKind = 'story' | 'media' | 'event' | null;
+type PostKind = 'story' | 'media' | null;
 
 /** What to say when something worked. Never an empty string — see S12. */
 type Done = { title: string; body?: string };
@@ -731,13 +731,17 @@ function PostPage({ canManageContent, canManageMedia, onPosted }: { canManageCon
       <View style={styles.tiles}>
         {canManageContent ? <Tile icon="images" tone="danger" label="Story" hint="Photo or video, gone in 24h" onPress={() => setKind('story')} /> : null}
         {canManageMedia || canManageContent ? <Tile icon="play-circle" tone="accent" label="Sermon or media" hint="Paste a link or upload" onPress={() => setKind('media')} /> : null}
-        {canManageContent ? <Tile icon="calendar" tone="brand" label="Event" hint="Date, place, flyer" onPress={() => setKind('event')} /> : null}
+        {/* Events have their own screens (app/events/): the full editor with
+            photo, weekly repeat and "Send to chat groups", and the list where
+            events are changed, cancelled and attendance is logged. Opened
+            from here so Admin stays five rows (DO-NOT-BREAK #21). */}
+        {canManageContent ? <Tile icon="calendar" tone="brand" label="Event" hint="Date, place, photo, weekly" onPress={() => router.push('/events/edit' as any)} /> : null}
+        {canManageContent ? <Tile icon="list" tone="success" label="Manage events" hint="Change, cancel, attendance" onPress={() => router.push('/events' as any)} /> : null}
       </View>
     );
   }
   if (kind === 'story') return <StoryForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
-  if (kind === 'media') return <MediaForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
-  return <EventForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
+  return <MediaForm onPosted={onPosted} onStartOver={() => setKind(null)} />;
 }
 
 function StoryForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; onStartOver: () => void }) {
@@ -1103,127 +1107,6 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
             : !linkOk
               ? 'Check the link, then this button turns on.'
               : 'Give it a title, then this button turns on.'}
-        </Text>
-      ) : null}
-    </View>
-  );
-}
-
-function EventForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; onStartOver: () => void }) {
-  const { theme } = useAppTheme();
-  const styles = useStyles(theme);
-  const [title, setTitle] = useState('');
-  const [when, setWhen] = useState('');
-  const [where, setWhere] = useState('');
-  const [link, setLink] = useState('');
-  const [flyer, setFlyer] = useState('');
-  const [flyerName, setFlyerName] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [transfer, setTransfer] = useState<{ label: string; fraction: number } | null>(null);
-  const [savedTitle, setSavedTitle] = useState('');
-  const working = saving || Boolean(transfer);
-  const parsedDate = useMemo(() => {
-    const value = new Date(when.trim());
-    return when.trim() && !Number.isNaN(value.getTime()) ? value : null;
-  }, [when]);
-  // A flyer saved as "Youth Revival Night.jpg" already says what this is, so
-  // the title can be left blank. A camera-roll name like "IMG_4821" says
-  // nothing, so the form still asks — an event people are asked to turn up to
-  // has to say what it is.
-  const suggestedTitle = useMemo(() => nameFromFile(flyerName) || '', [flyerName]);
-  const finalTitle = title.trim() || suggestedTitle;
-  const readyToPost = finalTitle.length > 0 && Boolean(parsedDate);
-
-  async function pickFlyer() {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9 });
-    const asset = result.canceled ? null : result.assets[0];
-    if (!asset) return;
-    const name = asset.fileName || 'Flyer';
-    setTransfer({ label: name, fraction: 0 });
-    try {
-      const upload = await uploadPickedAsset({
-        asset,
-        bucketId: 'app-assets',
-        purpose: 'media_thumbnail',
-        pathPrefix: 'event-flyers',
-        relatedTable: 'events',
-        onProgress: (fraction) => setTransfer({ label: name, fraction }),
-      });
-      setFlyer(upload.publicUrl);
-      setFlyerName(asset.fileName || upload.fileName || '');
-    } catch (err) {
-      Alert.alert('Upload stopped', friendlyUploadError(err, 'Try another picture.'));
-    } finally {
-      setTransfer(null);
-    }
-  }
-
-  async function post() {
-    if (!parsedDate || !finalTitle) return;
-    setSaving(true);
-    try {
-      await createAdminEvent({
-        title: finalTitle,
-        startsAt: parsedDate.toISOString(),
-        location: where.trim() || undefined,
-        imageUrl: flyer || undefined,
-        registrationUrl: link.trim() || undefined,
-      });
-      setSavedTitle(finalTitle);
-      setTitle('');
-      setWhen('');
-      setWhere('');
-      setLink('');
-      setFlyer('');
-      setFlyerName('');
-      await onPosted();
-    } catch (err) {
-      Alert.alert('Not posted', friendlyError(err, 'Please check your connection and try again.'));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (savedTitle) {
-    return (
-      <Success
-        title="The event is up"
-        body={`"${savedTitle}" is on Home for everyone to see.`}
-        actionLabel="Post another"
-        onAction={() => { setSavedTitle(''); onStartOver(); }}
-      />
-    );
-  }
-
-  return (
-    <View style={styles.form}>
-      <Pressable accessibilityRole="button" accessibilityLabel={`Pick a flyer. ${flyer ? 'One is ready.' : 'None chosen yet.'}`} disabled={working} onPress={pickFlyer} style={styles.dropzone}>
-        {flyer ? (
-          <Image source={{ uri: flyer }} accessibilityLabel="The flyer you chose" contentFit="cover" style={styles.dropzoneImage} />
-        ) : (
-          <>
-            <Ionicons name="image-outline" size={34} color={theme.colors.accent} />
-            <Text style={styles.dropzoneText}>Tap to add a flyer (optional)</Text>
-          </>
-        )}
-      </Pressable>
-      {transfer ? <Progress label={transfer.label} fraction={transfer.fraction} /> : null}
-      <Field
-        label={suggestedTitle ? 'Event title (optional)' : 'Event title'}
-        value={title}
-        onChange={setTitle}
-        placeholder={suggestedTitle || 'What is happening?'}
-      />
-      {!title.trim() && suggestedTitle ? (
-        <Text style={styles.cardMeta}>It will post as "{suggestedTitle}", taken from your flyer. Type here to call it something else.</Text>
-      ) : null}
-      <Field label="When" value={when} onChange={setWhen} placeholder="Like 2026-10-05 7:00 PM" />
-      <Field label="Where (optional)" value={where} onChange={setWhere} placeholder="The place" />
-      <Field label="Watch or register link (optional)" value={link} onChange={setLink} placeholder="A web address" autoCapitalize="none" keyboardType="url" autoCorrect={false} />
-      <Big label={saving ? 'Posting...' : 'Post event'} disabled={working || !readyToPost} onPress={post} />
-      {!readyToPost && !working ? (
-        <Text style={styles.footnote}>
-          {finalTitle ? 'Type a date and time like 2026-10-05 7:00 PM, then this button turns on.' : 'Give the event a title, then this button turns on.'}
         </Text>
       ) : null}
     </View>

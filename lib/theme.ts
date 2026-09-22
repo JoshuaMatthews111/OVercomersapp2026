@@ -113,6 +113,13 @@ export type ThemeColorTokens = {
   surface: string;
   /** Modals, sheets, anything that must float above a card. */
   surfaceRaised: string;
+  /**
+   * The fill for any pop-up that covers other content — action menus, bottom
+   * sheets, modal cards. Always OPAQUE. surfaceRaised is 8% white in the dark
+   * theme, so a sheet painted with it let the chat show straight through
+   * (the owner saw this on the delete menu, 2026-09-22).
+   */
+  sheet: string;
   /** Inputs, wells, inset rows. Sits one step BELOW the page. */
   surfaceSunken: string;
 
@@ -234,6 +241,7 @@ const lightColors: ThemeColorTokens = {
 
   surface: '#FFFDF8',        // warm off-white, one step above the cream page
   surfaceRaised: '#FFFFFF',   // pure white reserved for things that float
+  sheet: '#FFFFFF',           // pop-ups: opaque by definition
   surfaceSunken: '#F1ECE0',   // inputs and wells sit below the page
 
   border: '#DED7C6',          // 1.41:1 on surface — quiet divider only, always paired with elevation
@@ -304,6 +312,7 @@ const darkColors: ThemeColorTokens = {
 
   surface: 'rgba(255,255,255,0.06)',
   surfaceRaised: 'rgba(255,255,255,0.08)',
+  sheet: '#1A2644',           // surfaceRaised composited over page, made opaque for pop-ups
   surfaceSunken: 'rgba(2,8,23,0.55)',
 
   border: 'rgba(212,175,55,0.24)',   // 1.56:1 against its own surface — quiet divider only

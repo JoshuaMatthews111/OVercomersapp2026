@@ -9,6 +9,7 @@ import { UploadError, bucketSizeLimit, currentUserId, formatBytes, uploadFileToB
 import { AVATAR_IMAGE_MAX_EDGE, CONTENT_IMAGE_MAX_EDGE, isImageMime, prepareImageForUpload } from './uploadBody';
 
 import { hasSupabase } from './publicEnv';
+import { isVoiceNote, voiceNoteLabel } from './voiceNotes';
 
 export type ChatAttachmentKind = 'image' | 'video' | 'audio' | 'file';
 
@@ -21,6 +22,8 @@ export type ChatAttachment = {
   /** Pixel size of the picture that was sent, when we know it. Keeps the bubble the right shape. */
   width?: number;
   height?: number;
+  /** Length of a voice note, in milliseconds. */
+  durationMs?: number;
 };
 
 // A card for something shared from the app into a chat.
@@ -57,7 +60,345 @@ export type ChatMessage = {
    * shows "This message was deleted" in its place.
    */
   deleted?: boolean;
+  /** The message this one answers (chat_messages.parent_message_id). */
+  parentId?: string;
+  /**
+   * When members could first see it (chat_messages.updated_at, stamped when a
+   * leader approves a held message). Read receipts count from the later of
+   * this and createdAt, so an approved message never claims readers who went
+   * past it while it was hidden from them.
+   */
+  visibleSince?: string;
+  /**
+   * What the quote above a reply says, worked out for the person reading.
+   * The room prefers the original itself when it is on screen, so a quote
+   * follows a delete; this is what is shown when the original is further back.
+   */
+  reply?: ReplyPreview;
 };
+
+/* ---------------------------------------------------------------------------
+ * Replies — what the quote above a reply says
+ *
+ * Worked out on each phone from what THAT reader is allowed to see (the read
+ * policy decides), so a reply can never show somebody a message they could
+ * not read. A deleted original, a held one (unless you wrote it), one by
+ * somebody you blocked, and one you deleted for yourself all read
+ * "Original message unavailable".
+ * ------------------------------------------------------------------------- */
+
+export const REPLY_UNAVAILABLE = 'Original message unavailable';
+
+export type ReplyPreview = {
+  id: string;
+  /** "You" when the reader wrote the original. */
+  authorName: string;
+  authorId?: string;
+  snippet: string;
+  available: boolean;
+  kind: 'text' | 'voice' | 'photo' | 'video' | 'file' | 'shared' | 'unavailable';
+};
+
+type ReplySource = Pick<ChatMessage, 'id' | 'userId' | 'displayName' | 'body' | 'isFlagged' | 'deleted' | 'attachment' | 'shared'>;
+
+/** The first line of some words, cut to fit one line of a quote. */
+export function firstLine(text?: string | null, max = 100): string {
+  const line = String(text || '').split(/\r?\n/).map((part) => part.trim()).find(Boolean) || '';
+  if (line.length <= max) return line;
+  return `${line.slice(0, max - 1).trimEnd()}…`;
+}
+
+export function sharedKindWord(kind: SharedRef['kind']): string {
+  if (kind === 'give') return 'Give';
+  if (kind === 'event') return 'Event';
+  if (kind === 'scripture') return 'Scripture';
+  if (kind === 'music') return 'Song';
+  if (kind === 'video') return 'Video';
+  if (kind === 'story') return 'Story';
+  if (kind === 'article') return 'Article';
+  return 'Sermon';
+}
+
+export function replyPreviewFor(parentId: string, parent: ReplySource | null | undefined, viewerId?: string | null): ReplyPreview {
+  const unavailable: ReplyPreview = { id: parentId, authorName: '', snippet: REPLY_UNAVAILABLE, available: false, kind: 'unavailable' };
+  if (!parent || parent.deleted) return unavailable;
+  // DO-NOT-BREAK #18: a held message is for its writer and the leaders. A
+  // quote must never be the way round that, so only its writer sees it quoted.
+  if (parent.isFlagged && (!viewerId || parent.userId !== viewerId)) return unavailable;
+
+  const authorName = viewerId && parent.userId === viewerId ? 'You' : (parent.displayName || 'OGN Member');
+  const base = { id: parentId, authorName, authorId: parent.userId, available: true };
+  const words = firstLine(parent.body);
+  const withWords = (label: string) => (words ? `${label} · ${words}` : label);
+  const attachment = parent.attachment;
+  if (attachment) {
+    if (attachment.kind === 'audio') {
+      return { ...base, kind: 'voice', snippet: isVoiceNote(attachment) ? voiceNoteLabel(attachment.durationMs) : withWords(attachment.name ? `Audio: ${attachment.name}` : 'Audio') };
+    }
+    if (attachment.kind === 'image') return { ...base, kind: 'photo', snippet: withWords('Photo') };
+    if (attachment.kind === 'video') return { ...base, kind: 'video', snippet: withWords('Video') };
+    return { ...base, kind: 'file', snippet: withWords(attachment.name || 'Document') };
+  }
+  if (parent.shared) {
+    return { ...base, kind: 'shared', snippet: `${sharedKindWord(parent.shared.kind)}: ${firstLine(parent.shared.title, 80) || 'Shared item'}` };
+  }
+  return { ...base, kind: 'text', snippet: words || 'Message' };
+}
+
+/* ---------------------------------------------------------------------------
+ * Delivered and read — the arithmetic
+ *
+ * public.chat_read_cursors keeps ONE row per (room, person): the newest
+ * message their phone has received, and the newest they have looked at. A
+ * message is read by somebody when their read mark is at or past the moment
+ * it was sent. Nothing is stored per message. These functions are pure, so
+ * qa/chat-receipts.test.mjs can hold them to that.
+ * ------------------------------------------------------------------------- */
+
+export type ReadCursor = { userId: string; deliveredAt?: string | null; readAt?: string | null };
+
+export type ReceiptPerson = { userId: string; at: string };
+
+export type ReceiptState = 'none' | 'sending' | 'held' | 'sent' | 'delivered' | 'read';
+
+export type MessageReceipt = {
+  state: ReceiptState;
+  /** Other members who have read it, most recent first. Never the sender, never somebody blocked. */
+  readBy: ReceiptPerson[];
+  /** Other members whose phone has it, but who have not read it yet. */
+  deliveredTo: ReceiptPerson[];
+  /** How many other members there are, when the member list is known. */
+  otherMembers: number | null;
+};
+
+/**
+ * Milliseconds from a Postgres timestamp. Postgres sends microseconds
+ * ("…:05.123456+00:00"), which not every phone's date parser accepts, so they
+ * are cut to milliseconds first. NaN for anything unreadable.
+ */
+export function timestampMs(value?: string | null): number {
+  if (!value) return NaN;
+  let text = String(value).trim().replace(' ', 'T');
+  text = text.replace(/(\.\d{3})\d+/, '$1');
+  text = text.replace(/([+-]\d{2})$/, '$1:00');
+  return Date.parse(text);
+}
+
+export function messageReceipt(input: {
+  message: { userId?: string; createdAt: string; visibleSince?: string | null; isFlagged?: boolean; deleted?: boolean; sendingProgress?: number };
+  cursors: Iterable<ReadCursor>;
+  /** The room's members right now. People who left are not counted. Unknown: pass null. */
+  memberIds?: Iterable<string> | null;
+  /** People the reader blocked. They never appear in a list, and are never counted. */
+  blockedIds?: Iterable<string> | null;
+}): MessageReceipt {
+  const { message } = input;
+  const members = input.memberIds ? new Set(input.memberIds) : null;
+  const blocked = new Set(input.blockedIds || []);
+  const sender = message.userId;
+  const otherMembers = members
+    ? [...members].filter((id) => id && id !== sender && !blocked.has(id)).length
+    : null;
+  const empty = (state: ReceiptState): MessageReceipt => ({ state, readBy: [], deliveredTo: [], otherMembers });
+
+  if (message.deleted) return empty('none');
+  if (typeof message.sendingProgress === 'number') return empty('sending');
+  // Nobody but the sender and the leaders can see a held message, so nobody
+  // has read it. Say it is waiting, never "Read by 0".
+  if (message.isFlagged) return empty('held');
+  const created = timestampMs(message.createdAt);
+  if (!Number.isFinite(created)) return empty('sent');
+  // A held message that a leader approved later only became visible then.
+  const shown = timestampMs(message.visibleSince);
+  const sent = Number.isFinite(shown) && shown > created ? shown : created;
+
+  const latest = new Map<string, ReadCursor>();
+  for (const cursor of input.cursors) {
+    const id = cursor?.userId;
+    if (!id || id === sender || blocked.has(id)) continue;
+    if (members && !members.has(id)) continue;
+    const known = latest.get(id);
+    if (!known) { latest.set(id, cursor); continue; }
+    latest.set(id, {
+      userId: id,
+      readAt: laterOf(known.readAt, cursor.readAt),
+      deliveredAt: laterOf(known.deliveredAt, cursor.deliveredAt),
+    });
+  }
+
+  const readBy: ReceiptPerson[] = [];
+  const deliveredTo: ReceiptPerson[] = [];
+  for (const cursor of latest.values()) {
+    const readAt = timestampMs(cursor.readAt);
+    if (Number.isFinite(readAt) && readAt >= sent) {
+      readBy.push({ userId: cursor.userId, at: cursor.readAt as string });
+      continue;
+    }
+    const deliveredAt = timestampMs(cursor.deliveredAt);
+    if (Number.isFinite(deliveredAt) && deliveredAt >= sent) {
+      deliveredTo.push({ userId: cursor.userId, at: cursor.deliveredAt as string });
+    }
+  }
+  const newestFirst = (a: ReceiptPerson, b: ReceiptPerson) => timestampMs(b.at) - timestampMs(a.at);
+  readBy.sort(newestFirst);
+  deliveredTo.sort(newestFirst);
+  const state: ReceiptState = readBy.length ? 'read' : deliveredTo.length ? 'delivered' : 'sent';
+  return { state, readBy, deliveredTo, otherMembers };
+}
+
+function laterOf(a?: string | null, b?: string | null) {
+  const ta = timestampMs(a);
+  const tb = timestampMs(b);
+  if (!Number.isFinite(ta)) return b ?? a ?? null;
+  if (!Number.isFinite(tb)) return a ?? null;
+  return tb > ta ? b : a;
+}
+
+/** The short words under your own message. */
+export function receiptLabel(receipt: MessageReceipt, isDirect: boolean): string {
+  switch (receipt.state) {
+    case 'sending': return 'Sending…';
+    case 'held': return 'Waiting for review';
+    case 'sent': return 'Sent';
+    case 'delivered': return 'Delivered';
+    case 'read': {
+      if (isDirect) return 'Read';
+      const n = receipt.readBy.length;
+      if (receipt.otherMembers && n >= receipt.otherMembers && receipt.otherMembers > 1) return 'Read by everyone';
+      return `Read by ${n}`;
+    }
+    default: return '';
+  }
+}
+
+/** The same thing in full sentences, for VoiceOver and TalkBack. */
+export function receiptSpoken(receipt: MessageReceipt, isDirect: boolean): string {
+  switch (receipt.state) {
+    case 'sending': return 'Sending.';
+    case 'held': return 'Waiting for a leader to review it. Nobody else can see it yet.';
+    case 'sent': return 'Sent. Not received by anyone yet.';
+    case 'delivered': return isDirect ? 'Delivered. Not read yet.' : `Delivered to ${receipt.deliveredTo.length}. Not read yet.`;
+    case 'read': {
+      const n = receipt.readBy.length;
+      return isDirect ? 'Read.' : `Read by ${n} ${n === 1 ? 'person' : 'people'}.`;
+    }
+    default: return '';
+  }
+}
+
+/**
+ * Writes the reader's own marks without hammering the database: at most one
+ * write every few seconds, only when a mark actually moves forward, and one
+ * last write when the room closes. A failed write is kept and tried again,
+ * a little later each time.
+ */
+export function createCursorThrottle(options: {
+  write: (next: { deliveredAt?: string; readAt?: string }) => Promise<unknown>;
+  intervalMs?: number;
+  now?: () => number;
+  setTimer?: (run: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
+}) {
+  const interval = options.intervalMs ?? 2500;
+  const now = options.now ?? (() => Date.now());
+  const setTimer = options.setTimer ?? ((run: () => void, ms: number) => setTimeout(run, ms));
+  const clearTimer = options.clearTimer ?? ((handle: unknown) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  const saved: { deliveredAt?: string; readAt?: string } = {};
+  let pending: { deliveredAt?: string; readAt?: string } = {};
+  let lastWrite = -Infinity;
+  let failures = 0;
+  let timer: unknown = null;
+  let inFlight: Promise<void> | null = null;
+  let disposed = false;
+
+  const ahead = (candidate?: string, than?: string) => {
+    const c = timestampMs(candidate);
+    if (!Number.isFinite(c)) return false;
+    const t = timestampMs(than);
+    return !Number.isFinite(t) || c > t;
+  };
+  const hasWork = () => pending.deliveredAt !== undefined || pending.readAt !== undefined;
+
+  function note(kind: 'delivered' | 'read', at?: string | null) {
+    if (disposed || !at) return;
+    if (kind === 'read' && ahead(at, pending.readAt ?? saved.readAt)) pending.readAt = at;
+    if (ahead(at, pending.deliveredAt ?? saved.deliveredAt)) pending.deliveredAt = at;
+    schedule();
+  }
+
+  function schedule() {
+    if (timer !== null || inFlight || !hasWork()) return;
+    const backoff = failures ? interval * Math.min(2 ** failures, 24) : interval;
+    const wait = Math.max(0, lastWrite + backoff - now());
+    timer = setTimer(() => { timer = null; void flush(); }, wait);
+  }
+
+  async function flush(): Promise<void> {
+    if (timer !== null) { clearTimer(timer); timer = null; }
+    // One write at a time. Whatever arrived meanwhile goes in the next one.
+    while (inFlight) await inFlight;
+    if (timer !== null) { clearTimer(timer); timer = null; }
+    if (!hasWork()) return;
+    const batch = pending;
+    pending = {};
+    lastWrite = now();
+    inFlight = (async () => {
+      try {
+        await options.write(batch);
+        failures = 0;
+        if (ahead(batch.readAt, saved.readAt)) saved.readAt = batch.readAt;
+        if (ahead(batch.deliveredAt, saved.deliveredAt)) saved.deliveredAt = batch.deliveredAt;
+      } catch {
+        failures += 1;
+        // Keep whichever is newer: what failed, or what arrived meanwhile.
+        if (batch.readAt && ahead(batch.readAt, pending.readAt)) pending.readAt = batch.readAt;
+        if (batch.deliveredAt && ahead(batch.deliveredAt, pending.deliveredAt)) pending.deliveredAt = batch.deliveredAt;
+      }
+    })();
+    try {
+      await inFlight;
+    } finally {
+      inFlight = null;
+      if (!disposed) schedule();
+    }
+  }
+
+  return {
+    noteDelivered: (at?: string | null) => note('delivered', at),
+    noteRead: (at?: string | null) => note('read', at),
+    flush,
+    /** One last write of anything pending, then stop. */
+    async dispose() {
+      await flush();
+      disposed = true;
+      if (timer !== null) { clearTimer(timer); timer = null; }
+    },
+  };
+}
+
+const EVENT_DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const EVENT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * "Sun, Sep 28 · 10:00 AM · Main Sanctuary" — the line under an event card,
+ * in the reader's own time zone. The year appears only when it is not this
+ * year. Missing pieces are simply left out.
+ */
+export function formatEventWhen(startsAt?: string | null, location?: string | null, now: Date = new Date()): string {
+  const parts: string[] = [];
+  const ms = timestampMs(startsAt);
+  if (Number.isFinite(ms)) {
+    const date = new Date(ms);
+    const year = date.getFullYear() !== now.getFullYear() ? `, ${date.getFullYear()}` : '';
+    parts.push(`${EVENT_DAYS[date.getDay()]}, ${EVENT_MONTHS[date.getMonth()]} ${date.getDate()}${year}`);
+    const hours = date.getHours();
+    const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+    parts.push(`${hour12}:${String(date.getMinutes()).padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`);
+  }
+  const place = (location || '').trim();
+  if (place) parts.push(place);
+  return parts.join(' · ');
+}
 
 const ATTACHMENT_BUCKET = 'chat-attachments';
 const ATTACHMENT_LINK_TTL = 60 * 60 * 24; // one day; links are re-signed on every load
@@ -97,6 +438,7 @@ function rowAttachment(row: any, links: Map<string, string>): ChatAttachment | u
     kind: (row.attachment_type as ChatAttachmentKind) || 'file',
     name: row.attachment_name || undefined,
     size: row.attachment_size || undefined,
+    durationMs: typeof row.attachment_duration_ms === 'number' ? row.attachment_duration_ms : undefined,
   };
 }
 
@@ -424,7 +766,111 @@ export async function getChatRooms(): Promise<ChatRoom[]> {
   // backend must read as empty, not as a thriving community.
   if (error) throw error;
   if (!data) return [];
+  // This phone is online and has its chats: messages sent to this person have
+  // reached them. Senders see two ticks. At most once a minute, never awaited.
+  void markChatDeliveredEverywhere();
   return data.map(roomFromRow);
+}
+
+/* ---------------------------------------------------------------------------
+ * Delivered and read — talking to the database
+ * ------------------------------------------------------------------------- */
+
+const DELIVERED_EVERYWHERE_EVERY_MS = 60 * 1000;
+let deliveredEverywhere: { userId: string; at: number } | null = null;
+
+/**
+ * "This person's app has picked up their chats." One call to
+ * chat_mark_all_delivered(), which can only move the caller's own marks.
+ * Best effort and quiet: a failure only means the ticks stay single a while.
+ */
+export async function markChatDeliveredEverywhere(): Promise<void> {
+  if (!hasSupabase) return;
+  try {
+    const userId = await currentUserId();
+    if (!userId) return;
+    const nowMs = Date.now();
+    if (deliveredEverywhere && deliveredEverywhere.userId === userId && nowMs - deliveredEverywhere.at < DELIVERED_EVERYWHERE_EVERY_MS) return;
+    deliveredEverywhere = { userId, at: nowMs };
+    const { error } = await supabase.rpc('chat_mark_all_delivered');
+    if (error) deliveredEverywhere = null;
+  } catch {
+    deliveredEverywhere = null;
+  }
+}
+
+/**
+ * Everyone's marks in one room — only readable by the room's members. People
+ * this reader blocked are dropped here, in the one place blocking lives, so
+ * they never appear in a "Read by" list. A backend without the table reads
+ * as no marks at all: every message simply says "Sent".
+ */
+export async function getChatReadCursors(channelId: string): Promise<ReadCursor[]> {
+  if (!hasSupabase || !channelId) return [];
+  try {
+    const { data, error } = await supabase
+      .from('chat_read_cursors')
+      .select('user_id, last_delivered_at, last_read_at')
+      .eq('channel_id', channelId);
+    if (error || !data) return [];
+    const cursors: ReadCursor[] = (data as any[]).map((row) => ({
+      userId: row.user_id,
+      deliveredAt: row.last_delivered_at || null,
+      readAt: row.last_read_at || null,
+    }));
+    return hideBlocked(cursors, (cursor) => cursor.userId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Move this person's own marks forward. The database refuses a mark in the
+ * future or one that goes backwards, and fills "delivered" from "read".
+ */
+export async function saveChatReadCursor(channelId: string, marks: { deliveredAt?: string; readAt?: string }) {
+  if (!hasSupabase || !channelId) return;
+  const userId = await currentUserId();
+  if (!userId) return;
+  const row: Record<string, string> = { channel_id: channelId, user_id: userId };
+  if (marks.deliveredAt) row.last_delivered_at = marks.deliveredAt;
+  if (marks.readAt) row.last_read_at = marks.readAt;
+  if (!row.last_delivered_at && !row.last_read_at) return;
+  const { error } = await supabase.from('chat_read_cursors').upsert(row, { onConflict: 'channel_id,user_id' });
+  if (error) throw error;
+}
+
+/**
+ * Live ticks. A separate connection from the messages on purpose: if this one
+ * cannot open, messages still arrive — the ticks just catch up on the next
+ * refresh. Blocked people's marks are dropped before they reach the screen.
+ */
+export function subscribeToReadCursors(channelId: string, onCursor: (cursor: ReadCursor) => void): RealtimeChannel | undefined {
+  if (!hasSupabase || !channelId) return undefined;
+  try {
+    return supabase
+      // A topic of its own per open room: realtime-js hands back an EXISTING
+      // channel for a repeated topic, so two copies of one room (a notification
+      // opening a room that is already open) would share one channel, and
+      // closing either would silence the other.
+      .channel(`chat-receipts:${channelId}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'chat_read_cursors', filter: `channel_id=eq.${channelId}` },
+        (payload) => {
+          const row: any = payload.new;
+          if (!row || !row.user_id) return;
+          void showsContentFrom(row.user_id)
+            .then((show) => {
+              if (show) onCursor({ userId: row.user_id, deliveredAt: row.last_delivered_at || null, readAt: row.last_read_at || null });
+            })
+            .catch(() => undefined);
+        },
+      )
+      .subscribe();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -445,26 +891,48 @@ export function chatRoomTitle(room: { name: string; type: ChatRoom['type'] }, my
   return others.length && others.length < parts.length ? others.join(', ') : room.name;
 }
 
-export async function getChatMessages(channelId: string): Promise<ChatMessage[]> {
-  if (!hasSupabase) throw new FriendlyError('Chat is not available in this version of the app yet.');
+/** What every message read asks for. */
+const MESSAGE_COLUMNS = 'id, channel_id, user_id, body, created_at, is_flagged, attachment_path, attachment_type, attachment_name, attachment_size, shared_ref';
+/** ...plus replies and voice-note length (supabase/2026-09-22-chat-receipts-replies-voice.sql). */
+const MESSAGE_COLUMNS_2026_09_22 = `${MESSAGE_COLUMNS}, parent_message_id, attachment_duration_ms, updated_at`;
 
-  const { data, error } = await supabase
+/** A backend that has not been given a column yet answers 42703. */
+function isMissingColumn(error: unknown) {
+  const code = String((error as { code?: unknown })?.code ?? '');
+  const message = String((error as { message?: unknown })?.message ?? '');
+  return code === '42703' || code === 'PGRST204' || /column .* does not exist/i.test(message);
+}
+
+async function readRecentMessages(channelId: string) {
+  const read = (columns: string) => supabase
     .from('chat_messages')
-    .select('id, channel_id, user_id, body, created_at, is_flagged, attachment_path, attachment_type, attachment_name, attachment_size, shared_ref')
+    .select(columns)
     .eq('channel_id', channelId)
     .is('deleted_at', null)
     .order('created_at', { ascending: false })
     .limit(50);
+  const first = await read(MESSAGE_COLUMNS_2026_09_22);
+  // Never let a newer column take the whole room down: fall back to what
+  // every backend has, and the room reads exactly as it did before.
+  if (first.error && isMissingColumn(first.error)) return read(MESSAGE_COLUMNS);
+  return first;
+}
+
+export async function getChatMessages(channelId: string): Promise<ChatMessage[]> {
+  if (!hasSupabase) throw new FriendlyError('Chat is not available in this version of the app yet.');
+
+  const { data: rawData, error } = await readRecentMessages(channelId);
 
   if (error) throw error;
-  if (!data) return [];
+  if (!rawData) return [];
+  const data = rawData as any[];
   const [profiles, links] = await Promise.all([
     getProfilesByIds(data.map((row: any) => row.user_id).filter(Boolean)),
     signAttachmentLinks(data.map((row: any) => row.attachment_path).filter(Boolean)),
   ]);
   const oldest = data.length ? (data[data.length - 1] as any).created_at : null;
   const [tombstones, tombstoneProfiles] = await readTombstones(channelId, oldest, data.length >= 50);
-  const messages: ChatMessage[] = data.reverse().map((row: any) => ({
+  let messages: ChatMessage[] = data.reverse().map((row: any) => ({
     id: row.id,
     channelId: row.channel_id,
     userId: row.user_id,
@@ -475,6 +943,8 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     isFlagged: row.is_flagged,
     attachment: rowAttachment(row, links),
     shared: row.shared_ref || undefined,
+    parentId: row.parent_message_id || undefined,
+    visibleSince: row.updated_at || undefined,
   }));
   for (const row of tombstones) {
     messages.push({
@@ -489,9 +959,78 @@ export async function getChatMessages(channelId: string): Promise<ChatMessage[]>
     });
   }
   messages.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+  // Quotes for replies, worked out from what this reader may see.
+  messages = await attachReplyPreviews(channelId, messages);
   // The one place a room's history is filtered: blocked people (see the
   // blocking section above) and anything this person deleted for themselves.
   return hideHiddenMessages(await hideBlocked(messages, (message) => message.userId));
+}
+
+/**
+ * Give every reply its quote. The original is usually on screen already;
+ * the few that are further back are read in ONE query, through the same read
+ * policy as everything else, then passed through the same two filters. A
+ * failure here costs only the quote text, never the room.
+ */
+async function attachReplyPreviews(channelId: string, messages: ChatMessage[]): Promise<ChatMessage[]> {
+  const replies = messages.filter((message) => message.parentId);
+  if (!replies.length) return messages;
+  const viewerId = await currentUserId().catch(() => null);
+  // Only what this reader may see can be quoted: the same two filters as the room.
+  const visible = await hideHiddenMessages(await hideBlocked(messages, (message) => message.userId));
+  const onScreen = new Map(visible.map((message) => [message.id, message]));
+  const known = new Set(messages.map((message) => message.id));
+  // Further back than this page: read them. On the page but filtered out: unavailable.
+  const missing = [...new Set(replies.map((message) => message.parentId as string))].filter((id) => !known.has(id));
+  const further = new Map<string, ChatMessage>();
+  if (missing.length) {
+    try {
+      const { data, error } = await supabase
+        .from('chat_messages')
+        .select('id, channel_id, user_id, body, created_at, is_flagged, deleted_at, attachment_type, attachment_name, attachment_duration_ms, shared_ref')
+        .eq('channel_id', channelId)
+        .in('id', missing.slice(0, 100));
+      if (!error && data) {
+        const rows = data as any[];
+        const names = await getProfilesByIds(rows.map((row) => row.user_id).filter(Boolean));
+        const parents: ChatMessage[] = rows.map((row) => ({
+          id: row.id,
+          channelId: row.channel_id,
+          userId: row.user_id || undefined,
+          body: row.deleted_at ? '' : row.body || '',
+          displayName: names.get(row.user_id)?.displayName || 'OGN Member',
+          createdAt: row.created_at,
+          isFlagged: Boolean(row.is_flagged),
+          deleted: Boolean(row.deleted_at),
+          // Only the kind, name and length: a quote never needs the file itself.
+          attachment: row.attachment_type
+            ? { path: '', url: '', kind: row.attachment_type as ChatAttachmentKind, name: row.attachment_name || undefined, durationMs: row.attachment_duration_ms ?? undefined }
+            : undefined,
+          shared: row.shared_ref || undefined,
+        }));
+        const allowed = await hideHiddenMessages(await hideBlocked(parents, (parent) => parent.userId));
+        for (const parent of allowed) further.set(parent.id, parent);
+      }
+    } catch {
+      // The quotes read "Original message unavailable". The room is fine.
+      further.clear();
+    }
+  }
+  return messages.map((message) => {
+    if (!message.parentId) return message;
+    const parent = onScreen.get(message.parentId) || further.get(message.parentId);
+    return { ...message, reply: replyPreviewFor(message.parentId, parent, viewerId) };
+  });
+}
+
+/**
+ * The quote for ONE reply that arrived live, when its original is not on
+ * screen. Same rules as the room's own read.
+ */
+export async function getReplyPreview(channelId: string, message: ChatMessage): Promise<ReplyPreview | undefined> {
+  if (!message.parentId) return undefined;
+  const [withQuote] = await attachReplyPreviews(channelId, [message]);
+  return withQuote?.reply;
 }
 
 /**
@@ -545,29 +1084,45 @@ export type SentChatMessage = {
 export async function sendChatMessage(
   channelId: string,
   body: string,
-  attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number },
+  attachment?: { path: string; kind: ChatAttachmentKind; name?: string; size?: number; durationMs?: number },
   shared?: SharedRef,
+  options?: {
+    /** Send this as a reply to that message. It must be in the same room; the database checks. */
+    parentMessageId?: string | null;
+  },
 ): Promise<SentChatMessage> {
   if (!hasSupabase) throw new FriendlyError('Chat is not available in this version of the app yet. Your message was not sent.');
   const userId = await currentUserId();
   if (!userId) throw new FriendlyError('Please sign in before posting to chat.');
 
   await ensureChatMember(channelId, userId);
+  const row: Record<string, unknown> = {
+    channel_id: channelId,
+    user_id: userId,
+    body,
+    attachment_path: attachment?.path ?? null,
+    attachment_type: attachment?.kind ?? null,
+    attachment_name: attachment?.name ?? null,
+    attachment_size: attachment?.size ?? null,
+    shared_ref: shared ?? null,
+  };
+  // Only sent when there is something to say, so an ordinary message is
+  // exactly the insert it always was.
+  if (options?.parentMessageId) row.parent_message_id = options.parentMessageId;
+  if (attachment && typeof attachment.durationMs === 'number' && Number.isFinite(attachment.durationMs) && attachment.durationMs > 0) {
+    row.attachment_duration_ms = Math.min(600000, Math.round(attachment.durationMs));
+  }
   const { data, error } = await supabase
     .from('chat_messages')
-    .insert({
-      channel_id: channelId,
-      user_id: userId,
-      body,
-      attachment_path: attachment?.path ?? null,
-      attachment_type: attachment?.kind ?? null,
-      attachment_name: attachment?.name ?? null,
-      attachment_size: attachment?.size ?? null,
-      shared_ref: shared ?? null,
-    })
+    .insert(row)
     .select('id, is_flagged, created_at')
     .single();
-  if (error) throw error;
+  if (error) {
+    if (String((error as { code?: unknown }).code ?? '') === '22023' && /same chat/i.test(String(error.message || ''))) {
+      throw new FriendlyError('That reply could not be linked to the message you picked. Please send it again without the reply.');
+    }
+    throw error;
+  }
   return {
     id: data.id as string,
     isFlagged: Boolean(data.is_flagged),
@@ -644,6 +1199,8 @@ export function subscribeToChat(
             createdAt: row.created_at,
             isFlagged: row.is_flagged,
             shared: row.shared_ref || undefined,
+            parentId: row.parent_message_id || undefined,
+            visibleSince: row.updated_at || undefined,
           };
           // A blocked person's new message must not arrive live either, or the
           // block would hold on a refresh and break the moment they typed.

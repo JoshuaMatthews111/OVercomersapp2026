@@ -34,12 +34,17 @@ export function notificationTarget(data: Record<string, unknown> | undefined | n
   return null;
 }
 
-export function useNotificationRouting() {
+// expo-notifications has no last-response API in a browser, and calling it there
+// throws, taking the whole tab bar down on the web preview. Hooks cannot be
+// called conditionally, so the platform picks the implementation once.
+export const useNotificationRouting: () => void = Platform.OS === 'web' ? () => undefined : useNativeNotificationRouting;
+
+function useNativeNotificationRouting() {
   const response = Notifications.useLastNotificationResponse();
   const handled = useRef<string | null>(null);
 
   useEffect(() => {
-    if (Platform.OS === 'web' || !response) return;
+    if (!response) return;
     if (response.actionIdentifier !== Notifications.DEFAULT_ACTION_IDENTIFIER) return;
     const id = response.notification.request.identifier;
     if (handled.current === id) return;

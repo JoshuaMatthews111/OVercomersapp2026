@@ -7,7 +7,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../../lib/accessControl';
 import { BlogPost, formatBlogDate, getBlogPosts, readingMinutes } from '../../lib/blogService';
 import { getMediaItems, getMessageLibrary, getUserDownloads, recordDownloadIntent, subscribeToMediaItems } from '../../lib/contentService';
-import { playbackKind, thumbnailFromUrl, youtubeVideoId } from '../../lib/embed';
+import { playbackKind, teachingPlayback, thumbnailFromUrl, youtubeVideoId } from '../../lib/embed';
 import { friendlyError } from '../../lib/errorMessages';
 import { useNowPlaying } from '../../lib/nowPlaying';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
@@ -226,18 +226,43 @@ export default function MediaScreen() {
     }
   }
 
+  // Watch: the teaching's video (YouTube plays inside the app, and pauses
+  // when the screen goes off). When the teaching also has its own audio copy,
+  // the player is told about it so it can offer "Listen instead".
   function playSermon(sermon: Sermon) {
     const target = sermon.videoUrl || sermon.audioUrl;
     if (!target) {
       Alert.alert('Nothing to play yet', 'A recording has not been attached to this message. It will play here as soon as one is.');
       return;
     }
+    const { listen } = teachingPlayback(sermon);
     setNowPlaying({
       title: sermon.title,
       speaker: sermon.speaker,
       artwork: sermonCover(sermon),
       url: target,
       type: playbackKind(target, sermon.videoUrl ? 'video' : 'audio'),
+      audioUrl: listen && listen !== target ? listen : undefined,
+      kind: 'sermon',
+    });
+  }
+
+  // Listen: the teaching's audio copy, played by the phone itself, so it keeps
+  // going with the screen off and shows on the lock screen.
+  function listenToSermon(sermon: Sermon) {
+    const { listen } = teachingPlayback(sermon);
+    if (!listen) {
+      playSermon(sermon);
+      return;
+    }
+    setNowPlaying({
+      title: sermon.title,
+      speaker: sermon.speaker,
+      artwork: sermonCover(sermon),
+      url: listen,
+      type: 'audio',
+      // Shared to a group it is a Sermon card, not a "Song".
+      kind: 'sermon',
     });
   }
 
@@ -276,6 +301,7 @@ export default function MediaScreen() {
       artwork: coverFor(item),
       url: target,
       type: playbackKind(target, item.mediaType === 'video' || item.mediaType === 'live' ? 'video' : 'audio'),
+      kind: shareKindFor(item),
     });
   }
 
@@ -335,11 +361,18 @@ export default function MediaScreen() {
 
   const sermonRow = (sermon: Sermon, showSeries: boolean) => {
     const seriesTitle = showSeries ? seriesById.get(sermon.seriesId)?.title : undefined;
+    const { both } = teachingPlayback(sermon);
     return (
       <Pressable
         key={sermon.id}
         accessibilityRole="button"
-        accessibilityLabel={`Play ${sermon.title} by ${sermon.speaker}`}
+        accessibilityLabel={both ? `Watch ${sermon.title} by ${sermon.speaker}` : `Play ${sermon.title} by ${sermon.speaker}`}
+        // A screen reader reaches Listen as an action on the row itself.
+        accessibilityActions={both ? [{ name: 'activate' }, { name: 'listen', label: 'Listen. Keeps playing when your screen is off.' }] : undefined}
+        onAccessibilityAction={both ? (event) => {
+          if (event.nativeEvent.actionName === 'listen') listenToSermon(sermon);
+          else playSermon(sermon);
+        } : undefined}
         onPress={() => playSermon(sermon)}
         style={styles.sermonRow}
       >
@@ -351,7 +384,22 @@ export default function MediaScreen() {
             <Text style={styles.sermonRef} numberOfLines={1}>{sermon.scriptureReference || seriesTitle}</Text>
           ) : null}
         </View>
-        <Ionicons name="play-circle-outline" size={24} color={theme.colors.accent} />
+        {both ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Listen to ${sermon.title}. Keeps playing when your screen is off.`}
+            onPress={(event) => {
+              event.stopPropagation();
+              listenToSermon(sermon);
+            }}
+            style={styles.listenPill}
+          >
+            <Ionicons name="headset-outline" size={18} color={theme.colors.accent} />
+            <Text style={styles.listenPillText}>Listen</Text>
+          </Pressable>
+        ) : (
+          <Ionicons name="play-circle-outline" size={24} color={theme.colors.accent} />
+        )}
       </Pressable>
     );
   };
@@ -482,6 +530,7 @@ export default function MediaScreen() {
               overline={heroTarget ? (heroIsFeatured ? 'FEATURED MESSAGE' : 'LATEST TEACHING') : 'MEDIA LIBRARY'}
               cover={heroCover}
               onPlay={heroTarget ? playFeatured : null}
+              onListen={heroSermon && teachingPlayback(heroSermon).both ? () => listenToSermon(heroSermon) : null}
             />
           ) : null}
 
@@ -550,7 +599,7 @@ export default function MediaScreen() {
                   ) : (
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
                       {sermons.slice(0, SHELF_SIZE).map((sermon) => (
-                        <TeachingCard key={sermon.id} theme={theme} styles={styles} sermon={sermon} onPress={() => playSermon(sermon)} />
+                        <TeachingCard key={sermon.id} theme={theme} styles={styles} sermon={sermon} onPress={() => playSermon(sermon)} onListen={() => listenToSermon(sermon)} />
                       ))}
                     </ScrollView>
                   )}
@@ -593,7 +642,7 @@ export default function MediaScreen() {
                   />
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.shelfRow}>
                     {list.slice(0, SHELF_SIZE).map((sermon) => (
-                      <TeachingCard key={sermon.id} theme={theme} styles={styles} sermon={sermon} onPress={() => playSermon(sermon)} />
+                      <TeachingCard key={sermon.id} theme={theme} styles={styles} sermon={sermon} onPress={() => playSermon(sermon)} onListen={() => listenToSermon(sermon)} />
                     ))}
                   </ScrollView>
                 </View>
@@ -775,7 +824,7 @@ function Cover({ theme, styles, box, uri, label, glyph }: {
   );
 }
 
-function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay }: {
+function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay, onListen }: {
   theme: AppTheme;
   styles: Styles;
   dark: boolean;
@@ -784,6 +833,8 @@ function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay
   overline: string;
   cover?: string;
   onPlay: (() => void) | null;
+  /** Set when the teaching has its own audio copy: "Listen" beside the play button. */
+  onListen?: (() => void) | null;
 }) {
   const [coverFailed, setCoverFailed] = useState(false);
   const showCover = Boolean(cover) && !coverFailed;
@@ -823,6 +874,20 @@ function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay
       </View>
       <Text style={styles.heroTitle}>{title}</Text>
       <Text style={styles.heroSpeaker}>{speaker}</Text>
+      {onPlay && onListen ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Listen to ${title}. Keeps playing when your screen is off.`}
+          onPress={(event) => {
+            event.stopPropagation();
+            onListen();
+          }}
+          style={[styles.listenPill, styles.heroListen]}
+        >
+          <Ionicons name="headset-outline" size={18} color={theme.colors.accent} />
+          <Text style={styles.listenPillText}>Listen</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 
@@ -840,7 +905,12 @@ function HeroCard({ theme, styles, dark, title, speaker, overline, cover, onPlay
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Play ${title} by ${speaker}`}
+      accessibilityLabel={onListen ? `Watch ${title} by ${speaker}` : `Play ${title} by ${speaker}`}
+      accessibilityActions={onListen ? [{ name: 'activate' }, { name: 'listen', label: 'Listen. Keeps playing when your screen is off.' }] : undefined}
+      onAccessibilityAction={onListen ? (event) => {
+        if (event.nativeEvent.actionName === 'listen') onListen();
+        else onPlay();
+      } : undefined}
       onPress={onPlay}
       style={styles.heroPressable}
     >
@@ -880,10 +950,55 @@ function ShelfHeader({ title, meta, actionLabel, onAction, styles, theme }: {
   );
 }
 
-/** One teaching on a shelf: the video's own picture, its length, its title. */
-function TeachingCard({ sermon, onPress, styles, theme }: { sermon: Sermon; onPress: () => void; styles: Styles; theme: AppTheme }) {
+/**
+ * One teaching on a shelf: the video's own picture, its length, its title.
+ * When the teaching also has its own audio copy the card carries two plain
+ * buttons, Watch and Listen (Listen keeps going with the screen off). With no
+ * audio copy the whole card is Watch, as before.
+ */
+function TeachingCard({ sermon, onPress, onListen, styles, theme }: { sermon: Sermon; onPress: () => void; onListen?: () => void; styles: Styles; theme: AppTheme }) {
   const [failed, setFailed] = useState(false);
   const cover = sermonCover(sermon);
+  const both = Boolean(onListen) && teachingPlayback(sermon).both;
+  if (both && onListen) {
+    return (
+      <View style={styles.teachingCard}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Watch ${sermon.title} by ${sermon.speaker}${sermon.durationSeconds ? `, ${formatDuration(sermon.durationSeconds)} long` : ''}`}
+          onPress={onPress}
+        >
+          <TeachingArt sermon={sermon} cover={cover} failed={failed} onFailed={() => setFailed(true)} styles={styles} theme={theme}>
+            <View style={styles.teachingPlay}>
+              <Ionicons name="play" size={16} color={theme.colors.textOnAccent} />
+            </View>
+          </TeachingArt>
+          <Text style={styles.teachingTitle} numberOfLines={2}>{sermon.title}</Text>
+          <Text style={styles.teachingMeta} numberOfLines={1}>{sermon.speaker}</Text>
+        </Pressable>
+        <View style={styles.teachingButtons}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Watch ${sermon.title}`}
+            onPress={onPress}
+            style={styles.teachingButton}
+          >
+            <Ionicons name="play" size={16} color={theme.colors.accent} />
+            <Text style={styles.listenPillText}>Watch</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Listen to ${sermon.title}. Keeps playing when your screen is off.`}
+            onPress={onListen}
+            style={styles.teachingButton}
+          >
+            <Ionicons name="headset-outline" size={16} color={theme.colors.accent} />
+            <Text style={styles.listenPillText}>Listen</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
   return (
     <Pressable
       accessibilityRole="button"
@@ -891,26 +1006,46 @@ function TeachingCard({ sermon, onPress, styles, theme }: { sermon: Sermon; onPr
       onPress={onPress}
       style={styles.teachingCard}
     >
-      <View style={styles.teachingArtWrap}>
-        {cover && !failed ? (
-          <Image source={{ uri: cover }} style={styles.teachingArt} resizeMode="cover" accessible={false} onError={() => setFailed(true)} />
-        ) : (
-          <LinearGradient colors={theme.pageGradient} style={[styles.teachingArt, styles.centered]}>
-            <Image source={art.seal} style={styles.fallbackSeal} resizeMode="contain" accessible={false} />
-          </LinearGradient>
-        )}
+      <TeachingArt sermon={sermon} cover={cover} failed={failed} onFailed={() => setFailed(true)} styles={styles} theme={theme}>
         <View style={styles.teachingPlay}>
           <Ionicons name="play" size={16} color={theme.colors.textOnAccent} />
         </View>
-        {sermon.durationSeconds ? (
-          <View style={styles.durationBadge}>
-            <Text style={styles.durationText}>{formatDuration(sermon.durationSeconds)}</Text>
-          </View>
-        ) : null}
-      </View>
+      </TeachingArt>
       <Text style={styles.teachingTitle} numberOfLines={2}>{sermon.title}</Text>
       <Text style={styles.teachingMeta} numberOfLines={1}>{sermon.speaker}</Text>
     </Pressable>
+  );
+}
+
+/**
+ * The 16:9 picture on a teaching card and its length. The play badge is
+ * passed in by the card, so it is always drawn inside the button it belongs to.
+ */
+function TeachingArt({ sermon, cover, failed, onFailed, styles, theme, children }: {
+  sermon: Sermon;
+  cover?: string;
+  failed: boolean;
+  onFailed: () => void;
+  styles: Styles;
+  theme: AppTheme;
+  children?: React.ReactNode;
+}) {
+  return (
+    <View style={styles.teachingArtWrap}>
+      {cover && !failed ? (
+        <Image source={{ uri: cover }} style={styles.teachingArt} resizeMode="cover" accessible={false} onError={onFailed} />
+      ) : (
+        <LinearGradient colors={theme.pageGradient} style={[styles.teachingArt, styles.centered]}>
+          <Image source={art.seal} style={styles.fallbackSeal} resizeMode="contain" accessible={false} />
+        </LinearGradient>
+      )}
+      {children}
+      {sermon.durationSeconds ? (
+        <View style={styles.durationBadge}>
+          <Text style={styles.durationText}>{formatDuration(sermon.durationSeconds)}</Text>
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -1088,6 +1223,13 @@ function formatDuration(seconds?: number) {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+/** What a media item is called on the card it makes when shared to a group. */
+function shareKindFor(item: MediaItem): 'sermon' | 'music' | 'video' {
+  if (item.mediaType === 'music') return 'music';
+  if (item.mediaType === 'video' || item.mediaType === 'live') return 'video';
+  return 'sermon';
 }
 
 function shouldOpenExternally(item: MediaItem, url: string) {
@@ -1279,6 +1421,12 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   durationText: { color: t.colors.textOnBrand, fontSize: 12, fontWeight: '800' },
   teachingTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: 15, lineHeight: 20, marginTop: 10, paddingHorizontal: 12 },
   teachingMeta: { color: t.colors.textSecondary, fontSize: 12, marginTop: 4, paddingHorizontal: 12 },
+  teachingButtons: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, marginTop: 10 },
+  teachingButton: { flex: 1, minHeight: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: t.radius.pill, borderWidth: 1, borderColor: t.colors.accentBorder, backgroundColor: t.colors.accentMuted },
+  // "Listen": the audio copy of a teaching, which keeps playing with the screen off.
+  listenPill: { minHeight: 48, minWidth: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingHorizontal: 12, borderRadius: t.radius.pill, borderWidth: 1, borderColor: t.colors.accentBorder, backgroundColor: t.colors.accentMuted },
+  listenPillText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
+  heroListen: { alignSelf: 'flex-start', marginTop: 10 },
 
   seriesBanner: { minHeight: 200, borderRadius: t.radius.lg, overflow: 'hidden', justifyContent: 'flex-end', marginBottom: 14, borderWidth: 1, borderColor: t.colors.accentBorder, ...t.elevation.medium },
   seriesBannerArt: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0 },

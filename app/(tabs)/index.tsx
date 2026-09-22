@@ -11,13 +11,14 @@ import {
   createMemberStory,
   deleteMyStory,
   getAppStories,
-  getEvents,
   getLatestSermons,
   getMediaItems,
   storyWentOut,
   subscribeToStories,
 } from '../../lib/contentService';
+import { refreshEventReminders, useEventReminderTaps } from '../../lib/calendarService';
 import { fileKind, playbackKind, thumbnailFromUrl, youtubeVideoId } from '../../lib/embed';
+import { ChurchEvent, Occurrence, getHomeEvents, isHappeningNow, repeatText, timeText, upcomingWithOccurrence } from '../../lib/eventsService';
 import { REVIEW_NOTICE, friendlyError, mentionsSelfHarm } from '../../lib/errorMessages';
 import { useNowPlaying } from '../../lib/nowPlaying';
 import { publicEnv } from '../../lib/publicEnv';
@@ -25,7 +26,8 @@ import { isStoryLive, storyRemainingLabel } from '../../lib/storyTime';
 import { AppTheme, createThemedStyles } from '../../lib/theme';
 import { useAppTheme } from '../../lib/themePreference';
 import { UploadError, friendlyUploadError, uploadPickedAsset } from '../../lib/uploadService';
-import { Event, MediaItem, Sermon } from '../../types/models';
+import { MediaItem, Sermon } from '../../types/models';
+import { LiveBanner } from '../../components/LiveBanner';
 import { StorySlide, openStoryPlaylist } from '../story-viewer';
 
 /* ---------------------------------------------------------------------------
@@ -144,8 +146,10 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { width: windowWidth } = useWindowDimensions();
   const canManage = canReachContentTools(access);
+  // A tapped "Remind me" notification opens its event.
+  useEventReminderTaps();
 
-  const [events, setEvents] = useState<Event[]>([]);
+  const [events, setEvents] = useState<ChurchEvent[]>([]);
   const [latestMessage, setLatestMessage] = useState<LatestMessage | null>(null);
   const [remoteStories, setRemoteStories] = useState<AppStoryRow[]>([]);
   const [loadingStories, setLoadingStories] = useState(true);
@@ -181,12 +185,20 @@ export default function HomeScreen() {
     try {
       const [stories, upcoming, media, teachings] = await Promise.all([
         getAppStories(),
-        getEvents().catch(() => [] as Event[]),
+        // Kept apart from the rest: a failed events read must not empty the
+        // list into "nothing scheduled", and must never be used to decide
+        // which reminders on this phone are still wanted.
+        getHomeEvents().then((list) => ({ ok: true as const, list }), () => ({ ok: false as const, list: [] as ChurchEvent[] })),
         getMediaItems({ limit: 8 }).catch(() => [] as MediaItem[]),
         getLatestSermons(1).catch(() => [] as Sermon[]),
       ]);
       setRemoteStories(stories);
-      setEvents(upcoming);
+      if (upcoming.ok) {
+        setEvents(upcoming.list);
+        // Reminders set with "Remind me": top up weekly ones, move any whose
+        // event changed, drop any whose event was cancelled or removed.
+        void refreshEventReminders(upcoming.list).catch(() => undefined);
+      }
       setLatestMessage(pickLatestMessage(media, teachings));
       setBanner((current) => (current?.tone === 'problem' ? null : current));
     } catch (error) {
@@ -216,12 +228,8 @@ export default function HomeScreen() {
   // failed socket can never take anything else down with it.
   useEffect(() => subscribeToStories(() => void loadAll('quiet')), [loadAll]);
 
-  const dayStart = new Date();
-  dayStart.setHours(0, 0, 0, 0);
-  const upcomingEvents = events.filter((event) => {
-    const at = new Date(event.startsAt).getTime();
-    return Number.isNaN(at) || at >= dayStart.getTime();
-  });
+  // Weekly services show their NEXT week; one-offs show until they end.
+  const upcomingEvents = useMemo(() => upcomingWithOccurrence(events, new Date(now)).slice(0, 8), [events, now]);
 
   const liveStories = useMemo(
     () =>
@@ -393,6 +401,11 @@ export default function HomeScreen() {
             </View>
           </View>
 
+          {/* The first thing in the feed: the "We're live" card while a
+              service is streaming (components/LiveBanner.tsx, owned by the
+              live-streaming work). It draws nothing when nobody is live. */}
+          <LiveBanner />
+
           <LatestMessageCard item={latestMessage} styles={styles} theme={theme} />
 
           <Pressable
@@ -490,23 +503,31 @@ export default function HomeScreen() {
 
           <View style={styles.sectionHeader}>
             <Text numberOfLines={1} adjustsFontSizeToFit={true} minimumFontScale={0.75} style={styles.sectionTitle}>
-              Upcoming Services
+              Services &amp; Events
             </Text>
             {canManage ? (
-              <Pressable accessibilityRole="button" accessibilityLabel="Open the ministry tools" onPress={() => router.push('/admin')} style={styles.textAction}>
-                <Text style={styles.textActionLabel}>Manage</Text>
-              </Pressable>
+              <>
+                <Pressable accessibilityRole="button" accessibilityLabel="Add an event" onPress={() => router.push('/events/edit' as any)} style={styles.eventAddPill}>
+                  <Ionicons name="add" size={19} color={theme.colors.textOnAccent} />
+                  <Text style={styles.sharePillText}>Event</Text>
+                </Pressable>
+                <Pressable accessibilityRole="button" accessibilityLabel="Manage events" onPress={() => router.push('/events' as any)} style={styles.textAction}>
+                  <Text style={styles.textActionLabel}>Manage</Text>
+                </Pressable>
+              </>
             ) : null}
           </View>
 
           <View style={styles.eventsRow}>
-            {upcomingEvents.map((event) => (
-              <EventCard key={event.id} event={event} styles={styles} theme={theme} />
+            {upcomingEvents.map((item) => (
+              <EventCard key={item.event.id} event={item.event} occurrence={item.occurrence} now={now} styles={styles} theme={theme} />
             ))}
             {!upcomingEvents.length ? (
               <View style={styles.emptyEvents}>
                 <Ionicons name="calendar-outline" size={22} color={theme.colors.accent} />
-                <Text style={styles.emptyEventsText}>No services scheduled yet. Check back soon.</Text>
+                <Text style={styles.emptyEventsText}>
+                  {canManage ? 'Nothing is on Home yet. Tap "Event" to add Sunday Service or Bible Study.' : 'No services scheduled yet. Check back soon.'}
+                </Text>
               </View>
             ) : null}
           </View>
@@ -714,18 +735,45 @@ function StoryTile({
   );
 }
 
-function EventCard({ event, styles, theme }: { event: Event; styles: Styles; theme: AppTheme }) {
-  const date = new Date(event.startsAt);
-  const known = !Number.isNaN(date.getTime());
-  const month = known ? date.toLocaleString('en-US', { month: 'short' }).toUpperCase() : '—';
-  const day = known ? String(date.getDate()).padStart(2, '0') : '—';
-  const weekday = known ? date.toLocaleString('en-US', { weekday: 'short' }).toUpperCase() : '';
-  const time = known ? date.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit' }) : 'Time to be confirmed';
+/**
+ * One event on Home: its photo when it has one, the date of the NEXT
+ * gathering (a weekly service shows next week once this week's has ended),
+ * and a word when it is on right now or has been cancelled.
+ */
+function EventCard({
+  event,
+  occurrence,
+  now,
+  styles,
+  theme,
+}: {
+  event: ChurchEvent;
+  occurrence: Occurrence;
+  now: number;
+  styles: Styles;
+  theme: AppTheme;
+}) {
+  const [photoFailed, setPhotoFailed] = useState(false);
+  const date = occurrence.start;
+  const month = date.toLocaleString('en-US', { month: 'short' }).toUpperCase();
+  const day = String(date.getDate()).padStart(2, '0');
+  const weekday = date.toLocaleString('en-US', { weekday: 'short' }).toUpperCase();
+  const time = timeText(date);
+  const cancelled = event.status === 'cancelled';
+  const happening = !cancelled && isHappeningNow(occurrence, new Date(now));
+  const status = cancelled ? 'Cancelled' : happening ? 'Happening now' : '';
+  // A cancelled weekly service is off every week until a leader brings it
+  // back, so it must not still say "Every Sunday at 10:00 AM" (events review).
+  const when = cancelled && event.recurrence === 'weekly'
+    ? 'Called off until further notice'
+    : repeatText(event) || `${date.toLocaleString('en-US', { weekday: 'long' })} at ${time}`;
+  const place = event.location || event.description;
+  const showPhoto = Boolean(event.imageUrl) && !photoFailed;
 
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open the service ${event.title}, ${time}`}
+      accessibilityLabel={`Open ${event.title}. ${date.toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} at ${time}.${status ? ` ${status}.` : ''}`}
       onPress={() =>
         router.push({
           pathname: '/event-detail',
@@ -734,7 +782,7 @@ function EventCard({ event, styles, theme }: { event: Event; styles: Styles; the
             title: event.title,
             description: event.description,
             location: event.location,
-            startsAt: event.startsAt,
+            startsAt: occurrence.start.toISOString(),
             imageUrl: event.imageUrl || '',
             registrationUrl: event.registrationUrl || '',
           },
@@ -742,19 +790,33 @@ function EventCard({ event, styles, theme }: { event: Event; styles: Styles; the
       }
       style={styles.eventCard}
     >
-      <View style={styles.eventDate}>
-        <Text style={styles.eventMonth}>{month}</Text>
-        <Text style={styles.eventDay}>{day}</Text>
-        <Text style={styles.eventWeekday}>{weekday}</Text>
+      {showPhoto ? (
+        <Image
+          source={{ uri: event.imageUrl }}
+          accessible={false}
+          resizeMode="cover"
+          style={styles.eventPhoto}
+          onError={() => setPhotoFailed(true)}
+        />
+      ) : null}
+      <View style={styles.eventRowInner}>
+        <View style={styles.eventDate}>
+          <Text style={styles.eventMonth}>{month}</Text>
+          <Text style={styles.eventDay}>{day}</Text>
+          <Text style={styles.eventWeekday}>{weekday}</Text>
+        </View>
+        <View style={styles.eventCopy}>
+          {status ? <Text style={[styles.eventStatus, cancelled ? styles.eventStatusCancelled : styles.eventStatusNow]}>{status}</Text> : null}
+          <Text style={[styles.eventTitle, cancelled && styles.eventTitleCancelled]}>{event.title}</Text>
+          <Text style={styles.eventMeta}>{when}</Text>
+          {place ? (
+            <Text style={styles.eventBody} numberOfLines={2}>
+              {place}
+            </Text>
+          ) : null}
+        </View>
+        <Ionicons name="chevron-forward-circle" size={32} color={theme.colors.accent} />
       </View>
-      <View style={styles.eventCopy}>
-        <Text style={styles.eventTitle}>{event.title}</Text>
-        <Text style={styles.eventMeta}>{time}</Text>
-        <Text style={styles.eventBody} numberOfLines={2}>
-          {event.description || event.location}
-        </Text>
-      </View>
-      <Ionicons name="chevron-forward-circle" size={32} color={theme.colors.accent} />
     </Pressable>
   );
 }
@@ -1447,6 +1509,17 @@ const useStyles = createThemedStyles((t: AppTheme) =>
     },
     sharePillText: { color: t.colors.textOnAccent, fontWeight: '900' },
     textAction: { minWidth: 76, minHeight: 48, alignItems: 'flex-end', justifyContent: 'center', paddingHorizontal: 8 },
+    eventAddPill: {
+      minWidth: 48,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      minHeight: 48,
+      paddingHorizontal: 14,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+      ...t.elevation.low,
+    },
     textActionLabel: { color: t.colors.accent, fontWeight: '800' },
 
     noticeCard: {
@@ -1568,12 +1641,26 @@ const useStyles = createThemedStyles((t: AppTheme) =>
       borderWidth: 1,
       borderColor: t.colors.border,
       backgroundColor: t.colors.surface,
-      flexDirection: 'row',
-      alignItems: 'center',
-      padding: 12,
-      gap: 12,
+      overflow: 'hidden',
       ...t.elevation.medium,
     },
+    // The event's own photo, a wide strip above the date. 2:1 keeps a flyer
+    // readable without pushing the rest of Home off the screen.
+    eventPhoto: { width: '100%', aspectRatio: 2, backgroundColor: t.colors.surfaceSunken },
+    eventRowInner: { minHeight: 110, flexDirection: 'row', alignItems: 'center', padding: 12, gap: 12 },
+    eventStatus: {
+      alignSelf: 'flex-start',
+      fontWeight: '900',
+      fontSize: t.type.overline,
+      paddingHorizontal: 8,
+      paddingVertical: 2,
+      borderRadius: t.radius.pill,
+      overflow: 'hidden',
+      marginBottom: 4,
+    },
+    eventStatusCancelled: { color: t.colors.danger, backgroundColor: t.colors.dangerMuted },
+    eventStatusNow: { color: t.colors.success, backgroundColor: t.colors.successMuted },
+    eventTitleCancelled: { textDecorationLine: 'line-through' },
     eventDate: { width: 72, minHeight: 86, borderRadius: t.radius.md, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center' },
     eventMonth: { color: t.colors.accentSolid, fontWeight: '900', fontSize: t.type.overline },
     eventDay: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: 27, lineHeight: 31 },
@@ -1605,7 +1692,7 @@ const useStyles = createThemedStyles((t: AppTheme) =>
     sheetBackdrop: { flex: 1, backgroundColor: t.colors.overlay, justifyContent: 'flex-end' },
     sheetLift: { width: '100%' },
     sheet: {
-      backgroundColor: t.colors.surfaceRaised,
+      backgroundColor: t.colors.sheet,
       borderTopLeftRadius: 26,
       borderTopRightRadius: 26,
       borderWidth: 1,
