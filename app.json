@@ -14,13 +14,17 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Overcomers uses your location on the Evangelism map to show where you are, so you can save an outreach area, a visit or a follow-up in the right place.",
         "NSCameraUsageDescription": "Overcomers opens the camera when you tap Camera in a chat, so you can take a photo or a short video and send it to the conversation.",
-        "NSMicrophoneUsageDescription": "Overcomers uses the microphone only while you are recording a video with the chat camera, so the video you send has its sound.",
+        "NSMicrophoneUsageDescription": "Overcomers uses the microphone when you record a voice note or a video in chat, so the people you send it to can hear you.",
         "ITSAppUsesNonExemptEncryption": false,
         "UIBackgroundModes": [
           "audio"
         ],
         "CFBundleDisplayName": "Overcomers",
-        "NSMotionUsageDescription": "Overcomers uses motion only to point the compass on the Evangelism map, so the map can turn the way you are facing. It is never recorded or shared."
+        "NSMotionUsageDescription": "Overcomers uses motion only to point the compass on the Evangelism map, so the map can turn the way you are facing. It is never recorded or shared.",
+        "NSCalendarsUsageDescription": "Overcomers adds a service, meeting or event to your calendar only when you tap Add to calendar.",
+        "NSCalendarsFullAccessUsageDescription": "Overcomers adds a service, meeting or event to your calendar only when you tap Add to calendar.",
+        "NSCalendarsWriteOnlyAccessUsageDescription": "Overcomers adds a service, meeting or event to your calendar only when you tap Add to calendar.",
+        "NSRemindersUsageDescription": "Overcomers only uses reminders if you ask it to remind you about a service or meeting."
       }
     },
     "android": {
@@ -81,14 +85,15 @@
         {
           "photosPermission": false,
           "cameraPermission": "Overcomers opens the camera when you tap Camera in a chat, so you can take a photo or a short video and send it to the conversation.",
-          "microphonePermission": "Overcomers uses the microphone only while you are recording a video with the chat camera, so the video you send has its sound."
+          "microphonePermission": "Overcomers uses the microphone when you record a voice note or a video in chat, so the people you send it to can hear you."
         }
       ],
       [
         "expo-audio",
         {
-          "recordAudioAndroid": false,
-          "enableBackgroundPlayback": true
+          "recordAudioAndroid": true,
+          "enableBackgroundPlayback": true,
+          "microphonePermission": "Overcomers uses the microphone when you record a voice note or a video in chat, so the people you send it to can hear you."
         }
       ],
       [
@@ -101,7 +106,14 @@
       "expo-asset",
       "expo-image",
       "expo-status-bar",
-      "@maplibre/maplibre-react-native"
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-calendar",
+        {
+          "calendarPermission": "Overcomers adds a service, meeting or event to your calendar only when you tap Add to calendar.",
+          "remindersPermission": "Overcomers only uses reminders if you ask it to remind you about a service or meeting."
+        }
+      ]
     ],
     "extra": {
       "router": {
