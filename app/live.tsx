@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Card } from '../components/Card';
 import { useAccessProfile } from '../lib/accessControl';
 import { friendlyError } from '../lib/errorMessages';
-import { LIVE_TITLE_MAX, MANUAL_LIVE_HOURS, NOT_LIVE, checkedText, detectionText, endLive, fetchServiceTimes, goLive, liveBadge, liveFacts, liveTitle, serviceTimeText, startedText, useLiveStatus, watchActionFor } from '../lib/liveService';
+import { LIVE_TITLE_MAX, MANUAL_LIVE_HOURS, NOT_LIVE, checkedText, detectionText, endLive, fetchServiceTimes, goLive, hideEndsText, liveBadge, liveFacts, liveTitle, serviceTimeText, showLiveAgain, startedText, useLiveStatus, watchActionFor } from '../lib/liveService';
 import type { LiveState, ServiceTime } from '../lib/liveService';
 import { useNowPlaying } from '../lib/nowPlaying';
 import { colors, createThemedStyles } from '../lib/theme';
@@ -331,7 +331,8 @@ function LeaderPanel({
   /** This phone could not read the live status at all, so `state` is a placeholder. */
   unknown: boolean;
   startOpen: boolean;
-  onChanged: () => Promise<void>;
+  /** Reloads and hands back what the app shows now, or null when that could not be read. */
+  onChanged: () => Promise<LiveState | null>;
   onCheckNow: () => Promise<LiveState>;
   styles: Styles;
   theme: AppTheme;
@@ -348,7 +349,10 @@ function LeaderPanel({
   const working = useRef(false);
   const [checking, setChecking] = useState(false);
   const [factsOpen, setFactsOpen] = useState(false);
-  const [checkedNote, setCheckedNote] = useState<string | null>(null);
+  // A flag, not a sentence: the words are worked out from the state on screen
+  // at the moment of drawing, so a minute-timer poll that changes the answer
+  // can never leave "we are live" sitting above facts that say we are not.
+  const [checkedShown, setCheckedShown] = useState(false);
   const [checkProblem, setCheckProblem] = useState<string | null>(null);
   const now = Date.now();
   const endsAt = state.manualEndsAt ? new Date(state.manualEndsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
@@ -358,15 +362,11 @@ function LeaderPanel({
     if (checking) return;
     setChecking(true);
     setCheckProblem(null);
-    setCheckedNote(null);
+    setCheckedShown(false);
     try {
-      const next = await onCheckNow();
+      await onCheckNow();
       setFactsOpen(true);
-      setCheckedNote(
-        next.isLive
-          ? 'The app says we are live. Everyone sees the live card on Home.'
-          : 'The app says we are not live. Here is exactly what the server last saw.'
-      );
+      setCheckedShown(true);
     } catch (err) {
       setCheckProblem(friendlyError(err, 'We could not reach the live checker just now. Please try again in a moment.'));
     } finally {
@@ -405,7 +405,34 @@ function LeaderPanel({
     try {
       await endLive(state);
       setConfirmEnd(false);
-      setDone('Live has ended in the app.');
+      // Say what the app really shows now, not what we meant to happen. End
+      // live holds down the ONE stream this phone knew about; if YouTube has
+      // since started a different one — or a hand-started live was cleared
+      // while YouTube's own stream was running — the live card is still up
+      // for everyone, and "Live has ended in the app" would be a plain
+      // untruth on the screen of the person who has to fix it.
+      const after = await onChanged();
+      setDone(after?.isLive
+        ? 'That one is off, but the app is live again already: YouTube is showing a different stream. Press End live again to take that one down.'
+        : 'Live has ended in the app.');
+    } catch (err) {
+      setProblem(friendlyError(err, 'That did not save. Please check your connection and try again.'));
+    } finally {
+      working.current = false;
+      setBusy(false);
+    }
+  }
+
+  /** Undo an End live that is still holding one stream down. */
+  async function showAgain() {
+    if (working.current) return;
+    working.current = true;
+    setBusy(true);
+    setProblem(null);
+    setDone(null);
+    try {
+      await showLiveAgain();
+      setDone('The hold is off. This phone shows the live card now; other phones catch up within about a minute.');
       await onChanged();
     } catch (err) {
       setProblem(friendlyError(err, 'That did not save. Please check your connection and try again.'));
@@ -414,6 +441,8 @@ function LeaderPanel({
       setBusy(false);
     }
   }
+
+  const hiddenUntil = hideEndsText(state.endedHideUntil);
 
   return (
     <Card style={styles.card}>
@@ -432,7 +461,7 @@ function LeaderPanel({
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Check now whether we are live"
-        accessibilityHint="Asks the server again and shows what it found"
+        accessibilityHint="Asks the server for its newest answer. It looks at YouTube about once a minute"
         onPress={checkNow}
         disabled={checking}
         style={({ pressed }) => [styles.secondaryButton, checking && styles.busy, pressed && styles.pressed]}
@@ -440,8 +469,12 @@ function LeaderPanel({
         {checking ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name="search" size={20} color={theme.colors.textPrimary} />}
         <Text style={styles.secondaryText}>{checking ? 'Checking…' : 'Check now'}</Text>
       </Pressable>
-      {checkedNote ? (
-        <Text style={styles.body} accessibilityLiveRegion="polite">{checkedNote}</Text>
+      {checkedShown ? (
+        <Text style={styles.body} accessibilityLiveRegion="polite">
+          {state.isLive
+            ? 'The app says we are live. Everyone sees the live card on Home.'
+            : 'The app says we are not live. Here is exactly what the server last saw.'}
+        </Text>
       ) : null}
       {checkProblem ? (
         <View style={styles.problemRow} accessibilityLiveRegion="assertive">
@@ -476,6 +509,30 @@ function LeaderPanel({
           </Text>
         </View>
       ) : null}
+      {/* Somebody pressed End live and YouTube is still streaming that very
+          stream. Nothing else on this screen would say so, and OBS coming back
+          to the same scheduled broadcast keeps the same video id — so the
+          service would never appear. Say it, and offer the way back. */}
+      {state.endedHideUntil ? (
+        <View style={styles.heldBox}>
+          <Text style={styles.body}>
+            A leader pressed End live on the stream YouTube is showing now, so the app is keeping it off everyone’s
+            phone{hiddenUntil ? ` until ${hiddenUntil}` : ''}. If the service is really on, show it again.
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Show this stream again"
+            accessibilityHint="Takes the hold off, so the live stream shows for everyone again"
+            onPress={showAgain}
+            disabled={busy}
+            style={({ pressed }) => [styles.secondaryButton, busy && styles.busy, pressed && styles.pressed]}
+          >
+            {busy ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name="eye-outline" size={20} color={theme.colors.textPrimary} />}
+            <Text style={styles.secondaryText}>Show it again</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
       {state.isLive && state.via === 'manual' ? (
         <Text style={styles.body}>
           A leader started this by hand. It switches off by itself{endsAt ? ` at ${endsAt}` : ` after ${MANUAL_LIVE_HOURS} hours`}.
@@ -748,6 +805,9 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   timeText: { flex: 1, gap: 2 },
   timeTitle: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.cardTitle - 1 },
   factsBox: { gap: 10, padding: 12, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.border },
+  // Opaque, like every other raised surface here (DO-NOT-BREAK #43), and
+  // outlined in the warning colour so a leader's eye lands on it first.
+  heldBox: { gap: 10, padding: 12, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.warning },
   factRow: { gap: 2 },
   factLabel: { color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.meta, textTransform: 'uppercase', letterSpacing: 0.5 },
   factValue: { color: t.colors.textPrimary, fontSize: t.type.body, lineHeight: 22 },

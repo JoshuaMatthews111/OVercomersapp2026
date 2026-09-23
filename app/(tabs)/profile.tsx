@@ -414,7 +414,17 @@ export default function ProfileScreen() {
     // Every role has a walkthrough, so this row is not role-gated. It is
     // hidden only when there is no user id to key the flag on, because
     // resetWelcomeTour has nothing to forget without one.
-    ...(tourUserId ? [{ label: 'Show me around again', icon: 'compass-outline' as const, action: () => { void resetWelcomeTour(tourUserId); } }] : []),
+    // The walkthrough opens the moment this is tapped: resetWelcomeTour tells
+    // the mounted tour before it touches the disk. If the disk write is the
+    // part that fails, the tour is already open and the only cost is that it
+    // may open once more next launch — so it is caught and logged rather than
+    // left as an unhandled rejection with nothing on screen to explain it.
+    // 'inline', not a page. It opens the walkthrough over the tabs where you
+    // are standing (components/WelcomeTour.tsx is mounted in the tab layout and
+    // hears resetWelcomeTour at once). A chevron-forward here promised another
+    // screen and none arrives — which is the exact complaint the rest of this
+    // list was rebuilt to answer.
+    ...(tourUserId ? [{ label: 'Show me around again', icon: 'compass-outline' as const, kind: 'inline' as const, action: () => { resetWelcomeTour(tourUserId).catch((err) => console.warn('Walkthrough could not be reset:', err instanceof Error ? err.message : 'unknown problem')); } }] : []),
     { label: 'Support Center', icon: 'headset-outline', action: () => router.push('/support' as any) },
     { label: 'Community Standards', icon: 'people-outline', action: () => router.push('/community-standards' as any) },
     { label: 'About Overcomers Global Network', icon: 'information-circle-outline', action: () => router.push('/settings/about' as any) },

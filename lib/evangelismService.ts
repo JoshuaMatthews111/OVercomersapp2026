@@ -9,7 +9,18 @@ import { hasSupabase } from './publicEnv';
 export type LatLng = { latitude: number; longitude: number };
 
 /** A person on the outreach team, as anyone signed in may see them: name and picture. */
-export type Person = { id: string; displayName: string; avatarUrl?: string };
+export type Person = {
+  id: string;
+  displayName: string;
+  avatarUrl?: string;
+  /**
+   * One short phrase telling two people with the same name apart — their
+   * outreach role, or the region they are on the team for. Absent when the
+   * person doing the searching is not allowed to know, which is the honest
+   * answer rather than a guess.
+   */
+  hint?: string;
+};
 
 /**
  * A territory plus the one extra field the map needs and types/models.ts does
@@ -332,19 +343,63 @@ export async function updateTerritoryMetrics(
 // about a PLACE, not a person: a door, an apartment, a shop. Anyone on the
 // outreach team sees everyone else's visits on the map.
 //
-// TABLE AND COLUMNS THIS CODE EXPECTS (see handoff notes):
+// THE TABLE AS IT REALLY IS (read from the live database, 2026-09-23):
 //   public.evangelism_visits (
 //     id uuid pk, territory_id uuid null, created_by uuid,
-//     place_label text, unit_number text null, notes text null,
-//     lat double precision null, lng double precision null,
-//     visited_at timestamptz, created_at timestamptz )
+//     place_label text, unit_number text null, notes text null, outcome text,
+//     latitude double precision null, longitude double precision null,
+//     visited_at timestamptz, created_at timestamptz, updated_at timestamptz )
 //
-// lat/lng are plain numbers on purpose, matching evangelism_checkins. A
+// Corrected 2026-09-23. This file asked for `lat`, `lng` and `visited_at`; the
+// table has `latitude`, `longitude` and (until today) no `visited_at` at all,
+// so every read came back 42703 and the map said "The visits could not load
+// just now" for a table that was working perfectly. `visited_at` was added and
+// latitude/longitude were allowed to be empty by
+// supabase/2026-09-23-outreach-media.sql; the code below writes the real names
+// and still understands a database that has not had that migration yet.
+//
+// The numbers are plain doubles on purpose, matching evangelism_checkins. A
 // PostGIS geography column comes back through PostgREST as hex EWKB, which is
 // what made the outreach-contact pins disappear. Plain numbers cannot do that.
 
 export const VISITS_TABLE = 'evangelism_visits';
-const VISIT_COLUMNS = 'id, territory_id, created_by, place_label, unit_number, notes, lat, lng, visited_at';
+// Everything, because the two shapes above do not have the same column list and
+// a named column that is not there fails the whole read.
+const VISIT_COLUMNS = '*';
+
+/** Postgres's "that column does not exist", which is how the old shape shows up. */
+function isUndefinedColumn(error: any): boolean {
+  return String(error?.code || '') === '42703';
+}
+
+/**
+ * The row to write for one visit.
+ *
+ * `shape` is the column names to use. Both shapes use `latitude`/`longitude`,
+ * because that is what the table has always had — `lat`/`lng` were this file's
+ * mistake and have never existed in any database. The only real difference is
+ * `visited_at`, which supabase/2026-09-23-outreach-media.sql adds: 'current'
+ * writes it, 'legacy' leaves it out so a database that has not had the
+ * migration still takes the visit and falls back to created_at.
+ *
+ * Writing lat/lng in the retry would have been a second guaranteed 42703 — the
+ * fallback would have looked present and never once worked. Pure, so the
+ * payload is checked in qa/outreach-media.test.mjs rather than against a live
+ * database.
+ */
+export function visitInsertPayload(input: SaveVisitInput, userId: string, visitedAt: string, shape: 'current' | 'legacy' = 'current'): Record<string, unknown> {
+  const base = {
+    territory_id: input.territoryId || null,
+    created_by: userId,
+    place_label: input.placeLabel,
+    unit_number: input.unitNumber || null,
+    notes: input.notes || null,
+    latitude: input.location?.latitude ?? null,
+    longitude: input.location?.longitude ?? null,
+  };
+  if (shape === 'legacy') return base;
+  return { ...base, visited_at: visitedAt };
+}
 
 export type VisitPin = {
   id: string;
@@ -387,14 +442,18 @@ async function lookupDisplayNames(userIds: (string | null | undefined)[]): Promi
   return new Map([...people.values()].map((person) => [person.id, person.displayName]));
 }
 
-function mapVisitRow(row: any, names: Map<string, string>): VisitPin {
+export function mapVisitRow(row: any, names: Map<string, string>): VisitPin {
+  // Both column shapes are understood, so a database that has had the
+  // 2026-09-23 migration and one that has not both draw the same pin.
+  const latitude = typeof row.latitude === 'number' ? row.latitude : typeof row.lat === 'number' ? row.lat : null;
+  const longitude = typeof row.longitude === 'number' ? row.longitude : typeof row.lng === 'number' ? row.lng : null;
   return {
     id: row.id,
     territoryId: row.territory_id || undefined,
     placeLabel: row.place_label || 'A place we visited',
     unitNumber: row.unit_number || undefined,
     notes: row.notes || undefined,
-    location: typeof row.lat === 'number' && typeof row.lng === 'number' ? { latitude: row.lat, longitude: row.lng } : undefined,
+    location: latitude !== null && longitude !== null ? { latitude, longitude } : undefined,
     visitedAt: row.visited_at || row.created_at || new Date().toISOString(),
     createdBy: row.created_by || undefined,
     authorName: (row.created_by && names.get(row.created_by)) || 'A team member',
@@ -403,11 +462,20 @@ function mapVisitRow(row: any, names: Map<string, string>): VisitPin {
 
 export async function getVisits(): Promise<VisitsResult> {
   if (!hasSupabase) return { ready: false, reason: 'unavailable' };
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from(VISITS_TABLE)
     .select(VISIT_COLUMNS)
     .order('visited_at', { ascending: false })
     .limit(500);
+  // An older database has no visited_at to sort by. The rows are still there,
+  // so fall back to when they were written rather than showing nothing.
+  if (error && isUndefinedColumn(error)) {
+    ({ data, error } = await supabase
+      .from(VISITS_TABLE)
+      .select(VISIT_COLUMNS)
+      .order('created_at', { ascending: false })
+      .limit(500));
+  }
   if (error) return { ready: false, reason: isMissingRelation(error) ? 'not-switched-on' : 'unavailable' };
   if (!data) return { ready: true, visits: [] };
   const names = await lookupDisplayNames(data.map((row: any) => row.created_by));
@@ -431,20 +499,22 @@ export async function saveVisit(input: SaveVisitInput): Promise<SaveVisitResult>
   const { data: userResult } = await supabase.auth.getUser();
   if (!userResult.user) throw new Error('Sign in before saving a visit.');
   const visitedAt = new Date().toISOString();
-  const { data, error } = await supabase
+  const userId = userResult.user.id;
+  let { data, error } = await supabase
     .from(VISITS_TABLE)
-    .insert({
-      territory_id: input.territoryId || null,
-      created_by: userResult.user.id,
-      place_label: input.placeLabel,
-      unit_number: input.unitNumber || null,
-      notes: input.notes || null,
-      lat: input.location?.latitude ?? null,
-      lng: input.location?.longitude ?? null,
-      visited_at: visitedAt,
-    })
+    .insert(visitInsertPayload(input, userId, visitedAt, 'current'))
     .select(VISIT_COLUMNS)
     .single();
+  // A database that has not had the 2026-09-23 migration still uses lat/lng and
+  // has no visited_at. One retry in the old shape, so a visit logged at a door
+  // is never lost to a column name.
+  if (error && isUndefinedColumn(error)) {
+    ({ data, error } = await supabase
+      .from(VISITS_TABLE)
+      .insert(visitInsertPayload(input, userId, visitedAt, 'legacy'))
+      .select(VISIT_COLUMNS)
+      .single());
+  }
   if (error) {
     if (isMissingRelation(error)) return { ok: false, reason: 'not-switched-on' };
     throw error;
@@ -805,35 +875,117 @@ export async function setRegionTeamRole(member: Pick<TeamMember, 'assignmentId' 
  * back with at most themselves — which is right, because only leaders and
  * admins may assign.
  */
-export async function searchOutreachTeam(query: string, limit: number = 20): Promise<Person[]> {
+export async function searchOutreachTeam(query: string, limit: number = 20, signal?: AbortSignal): Promise<Person[]> {
   if (!hasSupabase) return [];
-  const { data: roleRows, error: roleError } = await supabase
-    .from('user_roles')
-    .select('user_id, role')
-    .in('role', OUTREACH_ROLE_NAMES)
-    .limit(2000);
+  let roleRequest = supabase.from('user_roles').select('user_id, role').in('role', OUTREACH_ROLE_NAMES).limit(2000);
+  if (signal) roleRequest = roleRequest.abortSignal(signal);
+  const { data: roleRows, error: roleError } = await roleRequest;
   if (roleError) throw roleError;
   const ids = Array.from(new Set((roleRows || []).map((row: any) => row.user_id).filter(Boolean)));
   if (!ids.length) return [];
+  // The most senior role a person holds is the one worth showing beside their
+  // name; it is already in hand, so this costs no extra request.
+  const roleByUser = new Map<string, string>();
+  for (const row of (roleRows || []) as any[]) {
+    const current = roleByUser.get(row.user_id);
+    if (!current || ROLE_RANK.indexOf(String(row.role)) > ROLE_RANK.indexOf(current)) roleByUser.set(row.user_id, String(row.role));
+  }
   const term = query.trim();
   let request = supabase.from('chat_profiles').select('id, display_name, avatar_url').in('id', ids).order('display_name').limit(limit);
   if (term) request = request.ilike('display_name', `%${term.replace(/[%_]/g, '')}%`);
+  if (signal) request = request.abortSignal(signal);
   const { data, error } = await request;
   if (error) throw error;
-  return (data || []).map((row: any) => ({ id: row.id, displayName: row.display_name || 'OGN member', avatarUrl: row.avatar_url || undefined }));
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    displayName: row.display_name || 'OGN member',
+    avatarUrl: row.avatar_url || undefined,
+    hint: roleLabel(roleByUser.get(row.id)),
+  }));
 }
 
-/** Find anyone in the church by name (a home cell's host need not be on the outreach team). */
-export async function searchChurchPeople(query: string, limit: number = 20): Promise<Person[]> {
+/** Least to most senior, so the most senior role is the one shown. */
+const ROLE_RANK = ['outreach_worker', 'outreach', 'staff', 'leader', 'admin', 'super_admin'];
+
+const ROLE_LABELS: Record<string, string> = {
+  outreach_worker: 'Outreach worker',
+  outreach: 'Outreach',
+  staff: 'Staff',
+  leader: 'Leader',
+  admin: 'Admin',
+  super_admin: 'Admin',
+};
+
+function roleLabel(role: string | undefined): string | undefined {
+  return role ? ROLE_LABELS[role] : undefined;
+}
+
+/**
+ * Find anyone in the church by name (a home cell's host need not be on the
+ * outreach team).
+ *
+ * `signal` is passed straight to PostgREST, so a name that is still being typed
+ * stops the request it started rather than just ignoring the answer.
+ */
+export async function searchChurchPeople(query: string, limit: number = 20, signal?: AbortSignal): Promise<Person[]> {
   if (!hasSupabase) return [];
   const term = query.trim().replace(/[%_]/g, '');
   if (term.length < 2) return [];
-  const { data, error } = await supabase
+  let request = supabase
     .from('chat_profiles')
     .select('id, display_name, avatar_url')
     .ilike('display_name', `%${term}%`)
     .order('display_name')
     .limit(limit);
+  if (signal) request = request.abortSignal(signal);
+  const { data, error } = await request;
   if (error) throw error;
-  return (data || []).map((row: any) => ({ id: row.id, displayName: row.display_name || 'OGN member', avatarUrl: row.avatar_url || undefined }));
+  const people: Person[] = (data || []).map((row: any) => ({
+    id: row.id,
+    displayName: row.display_name || 'OGN member',
+    avatarUrl: row.avatar_url || undefined,
+  }));
+  return addRegionHints(people, signal);
+}
+
+/**
+ * "Leads Akron" / "On the Akron team" beside a name, so two people called
+ * Joshua can be told apart.
+ *
+ * One extra request for the handful of names found, and only for someone whose
+ * row security lets them read `territory_assignments` — which is the outreach
+ * team, the only people who ever see these screens. If it cannot be read, the
+ * names simply have no hint: a guess would be worse than nothing.
+ */
+async function addRegionHints(people: Person[], signal?: AbortSignal): Promise<Person[]> {
+  if (!people.length) return people;
+  try {
+    let request = supabase
+      .from('territory_assignments')
+      .select('user_id, role, territory_id')
+      .in('user_id', people.map((person) => person.id))
+      .limit(200);
+    if (signal) request = request.abortSignal(signal);
+    const { data, error } = await request;
+    if (error || !data?.length) return people;
+
+    const regionIds = Array.from(new Set((data as any[]).map((row) => row.territory_id).filter(Boolean)));
+    let namesRequest = supabase.from('territories').select('id, name').in('id', regionIds).limit(200);
+    if (signal) namesRequest = namesRequest.abortSignal(signal);
+    const { data: regions } = await namesRequest;
+    const regionName = new Map<string, string>((regions || []).map((row: any) => [row.id, row.name]));
+
+    const hintFor = new Map<string, string>();
+    for (const row of data as any[]) {
+      const name = regionName.get(row.territory_id);
+      if (!name) continue;
+      // A lead beats a plain place on the team, and the first one found wins
+      // over a second region, so the phrase stays one short line.
+      const isLead = row.role === 'lead';
+      if (isLead || !hintFor.has(row.user_id)) hintFor.set(row.user_id, isLead ? `Leads ${name}` : `On the ${name} team`);
+    }
+    return people.map((person) => (hintFor.has(person.id) ? { ...person, hint: hintFor.get(person.id) } : person));
+  } catch {
+    return people;
+  }
 }

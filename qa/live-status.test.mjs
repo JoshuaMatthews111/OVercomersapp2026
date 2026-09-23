@@ -150,6 +150,7 @@ test('the edge function and the app agree on every YouTube link shape lib/embed.
     'https://www.youtube-nocookie.com/embed/G5h7XID3Re8',
     'https://www.youtube.com/watch?v=G5h7XID3Re8https://www.youtube.com/watch?v=G5h7XID3Re8',
     'https://www.youtube.com/@overcomersglobalnetwork',
+    'https://music.youtube.com/watch?v=G5h7XID3Re8',
   ];
   for (const url of shapes) assert.equal(logic.youtubeIdFromLink(url), embed.youtubeVideoId(url), url);
 });
@@ -290,7 +291,16 @@ test('screen copy stays honest about locked phones and never promises lock-scree
   assert.match(screen, /Keep the app open to keep watching\. The stream stops if you lock your phone or switch to another app\./);
   assert.doesNotMatch(screen, /lock-screen listening is coming|coming soon/i);
   const banner = read('components/LiveBanner.tsx');
-  assert.match(banner, /if \(!canManageLive \|\| !state\) return null;/, 'members see nothing when not live');
+  // Changed by the 2026-09-23 review: a leader now keeps a way to the live
+  // screen when the check itself failed. A member still sees nothing at all,
+  // and the way that is guaranteed is that the role is asked BEFORE anything
+  // other than a real live card is drawn.
+  assert.match(banner, /if \(!canManageLive\) return null;/, 'members see nothing when not live');
+  const afterCard = banner.slice(banner.indexOf('if (state?.isLive)'));
+  assert.ok(
+    afterCard.indexOf('if (!canManageLive) return null;') < afterCard.indexOf('<Pressable'),
+    'the leaders-only gate comes before the only other thing this banner draws'
+  );
   assert.match(banner, /state\.isLive \? \(/, 'the LIVE pill only draws when live');
 });
 
@@ -557,4 +567,99 @@ test('a live service is watched at the live edge — never rewound to where some
   // Nothing else claims to be live, so the resume the owner asked for still
   // works everywhere a recording is played.
   assert.doesNotMatch(read('app/chat-room.tsx'), /live: true/);
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial review 2026-09-23: End live holds ONE stream down for twelve
+// hours, and OBS reconnecting to the same scheduled broadcast comes back with
+// the SAME video id. Until this review the leader's panel showed "YouTube
+// shows us live" above "Are we live in the app? No", gave no reason, and had
+// no way back — the service would simply never appear.
+// ---------------------------------------------------------------------------
+
+test('review: a stream a leader ended is named as held back, and can be shown again', () => {
+  const held = {
+    ...autoLive,
+    embeddable: true,
+    manual_override: { mode: 'ended', video_id: autoLive.video_id, set_by: 'u', set_at: iso(-60 * MIN), expires_at: iso(11 * 60 * MIN) },
+  };
+  const state = logic.resolveLiveState(held, NOW);
+  assert.equal(state.isLive, false, 'End live still means not live');
+  assert.equal(state.endedHideUntil, new Date(NOW + 11 * 60 * MIN).toISOString());
+
+  const facts = Object.fromEntries(live.liveFacts(state, NOW).map((f) => [f.label, f.value]));
+  assert.match(facts['Is a leader holding it back?'], /someone pressed End live/);
+  assert.match(facts['Is a leader holding it back?'], /Show it again/);
+  // And the panel no longer forgets what the row plainly knows about embedding.
+  assert.match(facts['Plays inside the app?'], /^Yes/);
+
+  // Nothing is "held back" when YouTube is not reporting that stream any more.
+  const overTaken = logic.resolveLiveState({ ...held, is_live: false, detail: 'offline: the last stream has ended' }, NOW);
+  assert.equal(overTaken.endedHideUntil, null);
+  assert.ok(!live.liveFacts(overTaken, NOW).some((f) => f.label === 'Is a leader holding it back?'));
+
+  // A different stream is never held back by yesterday's End live.
+  const nextStream = logic.resolveLiveState({ ...held, video_id: 'NH5dJesdcAw' }, NOW);
+  assert.equal(nextStream.isLive, true);
+  assert.equal(nextStream.endedHideUntil, null);
+});
+
+test('review: "Show it again" clears the hold, and only leaders can press it', () => {
+  const service = read('lib/liveService.ts');
+  assert.match(service, /export async function showLiveAgain\(\): Promise<void> \{\s*await writeOverride\(null\);/);
+  // writeOverride is the one write path, and it turns a refusal into words.
+  assert.match(service, /Only leaders and the media team can start or end a live stream\./);
+  const screen = read('app/live.tsx');
+  assert.match(screen, /accessibilityLabel="Show this stream again"/);
+  assert.match(screen, /\{state\.endedHideUntil \? \(/, 'the way back is only offered when the hold is real');
+  // It lives inside the leaders-only panel, like Go live and End live.
+  const panel = screen.slice(screen.indexOf('function LeaderPanel'));
+  assert.ok(panel.includes('showLiveAgain'), 'the undo is in the leaders-only panel');
+});
+
+test('review: the "Check now" sentence can never outlive the answer it described', () => {
+  const screen = read('app/live.tsx');
+  // No stored sentence: the words are worked out from the state being drawn.
+  assert.doesNotMatch(screen, /setCheckedNote/);
+  assert.match(screen, /\{checkedShown \? \(/);
+  assert.match(screen, /\{state\.isLive\s*\?\s*'The app says we are live/);
+  // And the hint no longer promises a fresh look at YouTube the cache may refuse.
+  assert.match(screen, /It looks at YouTube about once a minute/);
+});
+
+test('review: a phone keeps the two new facts only when the server really sent them', () => {
+  const good = logic.normalizeLiveState({ ...logic.NOT_LIVE, isLive: false, endedHideUntil: iso(60 * MIN), lastSeenEmbeddable: false });
+  assert.equal(good.endedHideUntil, new Date(NOW + 60 * MIN).toISOString());
+  assert.equal(good.lastSeenEmbeddable, false);
+  const junk = logic.normalizeLiveState({ ...logic.NOT_LIVE, isLive: false, endedHideUntil: 'soon', lastSeenEmbeddable: 'maybe' });
+  assert.equal(junk.endedHideUntil, null);
+  assert.equal(junk.lastSeenEmbeddable, null);
+  // An older copy of the edge function simply leaves them out; nothing breaks.
+  const older = logic.normalizeLiveState({ isLive: false });
+  assert.equal(older.endedHideUntil, null);
+  assert.equal(older.lastSeenEmbeddable, null);
+});
+
+test('review: "Check now" reads the row the function just wrote, so an older deployed function cannot hide a fact', () => {
+  const service = read('lib/liveService.ts');
+  const body = /export async function checkLiveNow\(\): Promise<LiveState> \{([\s\S]*?)\n\}/.exec(service);
+  assert.ok(body, 'checkLiveNow is still there');
+  const invokeAt = body[1].indexOf("supabase.functions.invoke('live-status'");
+  const readAt = body[1].indexOf('readLiveRow(');
+  assert.ok(invokeAt >= 0 && readAt > invokeAt, 'the row is read AFTER the function has refreshed it');
+  assert.match(body[1], /if \(row\) return resolveLiveState\(row, Date\.now\(\)\);/);
+  // The function's own reply is still the fallback when the read is refused.
+  assert.match(body[1], /normalizeLiveState\(fresh\.data\)/);
+  assert.match(service, /async function readLiveRow\(\): Promise<LiveRow \| null> \{[\s\S]*?from\('live_status'\)/);
+
+  // Review 2026-09-23: the ORDINARY once-a-minute check must do the same. It
+  // did not, so the copy of the function deployed that day (which does not
+  // send endedHideUntil) could hide a leader's own End live from the panel
+  // written to undo it.
+  const fetchBody = /export async function fetchLiveState\([\s\S]*?\n\}/.exec(service);
+  assert.ok(fetchBody, 'fetchLiveState is still there');
+  const fetchInvoke = fetchBody[0].indexOf("supabase.functions.invoke('live-status'");
+  const fetchRead = fetchBody[0].indexOf('readLiveRow(', fetchInvoke);
+  assert.ok(fetchInvoke >= 0 && fetchRead > fetchInvoke, 'the row is read back after the function has run');
+  assert.match(fetchBody[0], /if \(written\) return resolveLiveState\(written, Date\.now\(\)\);/);
 });

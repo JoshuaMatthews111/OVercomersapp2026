@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { FunctionsHttpError } from '@supabase/supabase-js';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Card } from '../../components/Card';
 import { Screen } from '../../components/Screen';
 import { friendlyError } from '../../lib/errorMessages';
@@ -154,9 +154,22 @@ export default function DeleteAccountScreen() {
       Alert.alert('Almost there', 'Write DELETE in the box first, so we know this is really what you want.');
       return;
     }
+    const question = 'Delete your account?';
+    const detail = 'Your profile, your photo, your prayer requests and the files you sent will be removed for good. Messages you have written in a shared prayer room stay in the conversation, but they will no longer carry your name. This cannot be undone.';
+    // Alert.alert with buttons does NOTHING in a web browser (react-native-web),
+    // so on web this last question — and with it the whole deletion — never
+    // arrived: the button looked dead. The browser's own confirm box asks
+    // there instead. Same words, same two answers, and the phone build is
+    // untouched. It is the pattern app/follow-ups.tsx already uses.
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && typeof window.confirm === 'function' && window.confirm(`${question}\n\n${detail}`)) {
+        void deleteAccount();
+      }
+      return;
+    }
     Alert.alert(
-      'Delete your account?',
-      'Your profile, your photo, your prayer requests and the files you sent will be removed for good. Messages you have written in a shared prayer room stay in the conversation, but they will no longer carry your name. This cannot be undone.',
+      question,
+      detail,
       [
         { text: 'Keep my account', style: 'cancel' },
         { text: 'Delete it', style: 'destructive', onPress: () => { void deleteAccount(); } },
@@ -267,6 +280,11 @@ export default function DeleteAccountScreen() {
         contentContainerStyle={styles.scroll}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        // The More tab's ScrollView carried this when the deletion panel lived
+        // there, and the box you write DELETE into is near the bottom of a long
+        // page. Without it, iOS leaves that box — and the button under it —
+        // behind the keyboard, and Apple 5.1.1(v) deletion cannot be finished.
+        automaticallyAdjustKeyboardInsets
         refreshControl={
           <RefreshControl
             refreshing={rechecking}
@@ -546,7 +564,7 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
   },
   dangerButtonIdle: { opacity: 0.55 },
-  dangerButtonText: { color: t.colors.danger, fontWeight: '900', fontSize: t.type.body + 1 },
+  dangerButtonText: { flexShrink: 1, textAlign: 'center', color: t.colors.danger, fontWeight: '900', fontSize: t.type.body + 1 },
   deleteHint: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 18, textAlign: 'center' },
   deleteErrorBox: {
     flexDirection: 'row',

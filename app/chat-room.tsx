@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, AppStateStatus, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert as SystemAlert, AlertButton, AppState, AppStateStatus, FlatList, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../lib/accessControl';
 import {
@@ -31,6 +31,7 @@ import {
   chatRoomTitle,
   clearChatGroupPicture,
   deleteChatMessageForEveryone,
+  discardChatAttachment,
   getChatMembers,
   getChatMessages,
   getChatRoom,
@@ -51,6 +52,7 @@ import {
   unblockChatUser,
   uploadChatAttachment,
   uploadChatGroupPicture,
+  wasRefusedBeforeSaving,
 } from '../lib/chatService';
 import { AttachSheet, AttachmentBubble, AttachmentPreview, PhotoViewer, PickedFile } from '../components/ChatAttachments';
 import {
@@ -84,6 +86,36 @@ import { currentUserId, friendlyUploadError } from '../lib/uploadService';
 import { AppTheme, createThemedStyles } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
 import { ChatRoom } from '../types/models';
+
+/**
+ * Alert that also reaches the person on the web build.
+ *
+ * THIRD REVIEW, 2026-09-23. react-native-web ships
+ * `class Alert { static alert() {} }` — it does nothing at all. So in a
+ * browser every notice on this screen said nothing, and worse, both "are you
+ * sure" questions here were DEAD BUTTONS: tapping Delete for everyone, or
+ * Remove the group picture, opened no question, ran no code and showed no
+ * error. DO-NOT-BREAK #29 names Delete for everyone as protected behaviour and
+ * #47 already says a question has to work in a browser; this puts the whole
+ * screen on the same footing instead of one page at a time.
+ *
+ * The phone path is untouched: exactly the Alert that shipped. In a browser a
+ * plain notice becomes window.alert, and a question becomes window.confirm on
+ * the one action beside Cancel — which is the shape both questions here have,
+ * and the same shape app/follow-ups.tsx and app/settings/delete-account.tsx
+ * already use. A longer menu belongs in ChatActionSheet, which is a real view
+ * and works everywhere, not in a pop-up.
+ */
+const Alert = {
+  alert(title: string, body?: string, buttons?: AlertButton[]) {
+    if (Platform.OS !== 'web') { SystemAlert.alert(title, body, buttons); return; }
+    const words = body ? `${title}\n\n${body}` : title;
+    const go = (buttons || []).filter((button) => button.style !== 'cancel' && typeof button.onPress === 'function');
+    if (typeof window === 'undefined') return;
+    if (!go.length) { window.alert?.(words); return; }
+    if (typeof window.confirm === 'function' && window.confirm(words)) void go[0].onPress?.();
+  },
+};
 
 /**
  * One room, full screen. Header with the room's name and a back arrow, the
@@ -337,7 +369,18 @@ function ChatRoomView() {
       const one = await getChatRoom(roomId);
       if (alive.current && one) { setRoom(one); return; }
       const rooms = await getChatRooms();
-      if (alive.current) setRoom(rooms.find((item) => item.id === roomId) || null);
+      const found = rooms.find((item) => item.id === roomId) || null;
+      if (!alive.current) return;
+      setRoom(found);
+      // Second review, 2026-09-23: getChatRoom() answers null for a row it
+      // could not READ as well as for one that is not there, and it never
+      // throws, so the catch below was not the safety net its note claimed.
+      // Without the row there are no post limits, and postingRights() then
+      // reads as the old everything-allowed default — an open message box in
+      // a room that may well refuse every word of it.
+      if (!found && !roomRef.current) {
+        setError("We could not load this group's settings. Pull down to try again.");
+      }
     } catch (err) {
       // The room's own name came in on the route, so the header still reads.
       // But the post limits live on this row: if we never got them, say so
@@ -599,9 +642,13 @@ function ChatRoomView() {
       setMessages((current) => current.map((item) => (item.id === localId ? { ...item, sendingProgress: fraction } : item)));
     };
 
+    // Remembered outside the try so a refused message can take its own file
+    // back out of the private bucket (second review, 2026-09-23).
+    let uploadedPath: string | null = null;
     try {
       await joinChatRoom(roomId);
       const uploaded = await uploadChatAttachment(roomId, file, { onProgress });
+      uploadedPath = uploaded.path;
       const sent = await sendChatMessage(roomId, caption, uploaded, undefined, { parentMessageId: answering?.id });
       if (!alive.current) return;
       setMessages((current) => [...current.filter((item) => item.id !== localId && item.id !== sent.id), {
@@ -611,6 +658,11 @@ function ChatRoomView() {
       }]);
       if (sent.isFlagged) setCareNotice({ tone: mentionsSelfHarm(caption) ? 'care' : 'held' });
     } catch (err) {
+      // The database refusing is the one case where we KNOW no message was
+      // written, so the uploaded file is an orphan nothing can ever reach.
+      // Take it back. A dropped connection is left alone: the message may
+      // well have saved.
+      if (wasRefusedBeforeSaving(err)) void discardChatAttachment(uploadedPath);
       if (!alive.current) return;
       setMessages((current) => current.filter((item) => item.id !== localId));
       // Keep the reply, so trying again answers the same message.
@@ -660,9 +712,11 @@ function ChatRoomView() {
       if (!alive.current) return;
       setMessages((current) => current.map((item) => (item.id === localId ? { ...item, sendingProgress: fraction } : item)));
     };
+    let uploadedPath: string | null = null;
     try {
       await joinChatRoom(roomId);
       const uploaded = await uploadChatAttachment(roomId, { uri: note.uri, name, mimeType: VOICE_NOTE_MIME }, { onProgress });
+      uploadedPath = uploaded.path;
       const sent = await sendChatMessage(roomId, '', { ...uploaded, durationMs: note.durationMs }, undefined, { parentMessageId: answering?.id });
       if (!alive.current) return;
       setMessages((current) => [...current.filter((item) => item.id !== localId && item.id !== sent.id), {
@@ -672,6 +726,9 @@ function ChatRoomView() {
       }]);
       if (sent.isFlagged) setCareNotice({ tone: 'held' });
     } catch (err) {
+      // Same as a photo: a refusal means nothing saved, so the recording does
+      // not stay behind in the private bucket with nothing pointing at it.
+      if (wasRefusedBeforeSaving(err)) void discardChatAttachment(uploadedPath);
       if (!alive.current) return;
       setMessages((current) => current.filter((item) => item.id !== localId));
       if (answering) setReplyTo((current) => current || answering);
@@ -1262,9 +1319,10 @@ function ChatRoomView() {
             {rights.roomNote ? (
               <View style={styles.roomRuleLine}>
                 <Ionicons name="lock-closed" size={11} color={theme.colors.accent} />
-                {/* Two lines: at the largest iOS text size all three limits on
-                    one line would be cut off mid-sentence. */}
-                <Text numberOfLines={2} style={styles.roomRuleText}>{rights.roomNote}</Text>
+                {/* Three lines: at the largest iOS text size all three limits
+                    ("Only leaders can post • Photos and videos are off • Voice
+                    notes are off") do not fit in two. */}
+                <Text numberOfLines={3} style={styles.roomRuleText}>{rights.roomNote}</Text>
               </View>
             ) : null}
           </Pressable>
@@ -1955,7 +2013,10 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   // The line under the room's name. Wraps to nothing when the group has no
   // limits, so an ordinary room looks exactly as it did.
   roomRuleLine: { flexDirection: 'row', alignItems: 'flex-start', gap: 4, marginTop: 1 },
-  roomRuleText: { flex: 1, color: t.colors.accent, fontWeight: '800', fontSize: t.type.overline, lineHeight: 15 },
+  // No fixed lineHeight: the font size grows with the phone's text setting and
+  // a hard 15pt line box does not, so at the largest sizes the words were cut
+  // through the middle (second review, 2026-09-23).
+  roomRuleText: { flex: 1, color: t.colors.accent, fontWeight: '800', fontSize: t.type.overline },
   // What sits where the message box would be when this person cannot post.
   composerClosed: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingHorizontal: 16, paddingVertical: 14, minHeight: 56 },
   composerClosedText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 20, fontWeight: '700' },

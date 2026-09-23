@@ -11,15 +11,23 @@ import {
   BIBLE_BOOKS,
   BibleBook,
   BiblePassage,
+  BibleRange,
   BibleReadMode,
   BibleSelection,
+  BibleVerseText,
   DEFAULT_BIBLE_SELECTION,
   QUICK_SCRIPTURES,
+  bibleRangeLabel,
+  buildScriptureShare,
   getBibleBook,
   getBiblePassage,
+  getBibleRangeReference,
   getBibleReference,
   getBibleVerseNumbers,
+  isVerseHighlighted,
+  nextBibleRange,
   normalizeBibleSelection,
+  versesInBibleRange,
 } from '../../lib/bibleProvider';
 import { saveBibleFavorite } from '../../lib/contentService';
 import { friendlyError } from '../../lib/errorMessages';
@@ -77,7 +85,7 @@ const art = {
 };
 
 export default function BibleScreen() {
-  const params = useLocalSearchParams<{ bookId?: string; chapter?: string; verse?: string; version?: string }>();
+  const params = useLocalSearchParams<{ bookId?: string; chapter?: string; verse?: string; verseEnd?: string; version?: string }>();
   const { theme, dark } = useAppTheme();
   const styles = useStyles(theme);
 
@@ -97,6 +105,12 @@ export default function BibleScreen() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [placeNote, setPlaceNote] = useState<string | null>(null);
   const [sharedVerse, setSharedVerse] = useState<SharedRef | null>(null);
+  /**
+   * The highlighted passage: nothing, one verse, or a run of verses. It only
+   * ever names verses that are on the page, and it is let go the moment the
+   * page changes (a new book, chapter, verse or translation).
+   */
+  const [range, setRange] = useState<BibleRange | null>(null);
   const [restored, setRestored] = useState(false);
 
   const requestRef = useRef(0);
@@ -148,13 +162,26 @@ export default function BibleScreen() {
   useEffect(() => {
     if (!params.bookId || !BIBLE_BOOKS.some((book) => book.id === params.bookId)) return;
     deepLinkedRef.current = true;
-    setSelection(normalizeBibleSelection({ bookId: params.bookId, chapter: Number(params.chapter) || 1, verse: Number(params.verse) || 1 }));
+    const linkedStart = Number(params.verse) || 1;
+    const linkedEnd = Number(params.verseEnd) || 0;
+    setSelection(normalizeBibleSelection({ bookId: params.bookId, chapter: Number(params.chapter) || 1, verse: linkedStart }));
     const linkedVersion = params.version as BibleVersion | undefined;
     if (linkedVersion && allVersions.includes(linkedVersion) && configuredVersions[linkedVersion]) setVersion(linkedVersion);
-    setReadMode('verse');
+    /*
+     * A card for a whole passage (John 3:16-18) opens the chapter with those
+     * verses already highlighted, so the reader sees what was sent. A card for
+     * one verse opens exactly as it always has.
+     */
+    if (linkedEnd > linkedStart) {
+      setReadMode('chapter');
+      setRange({ anchor: linkedStart, start: linkedStart, end: linkedEnd });
+    } else {
+      setReadMode('verse');
+      setRange(null);
+    }
     setPlaceNote(null);
     setRestored(true);
-  }, [params.bookId, params.chapter, params.verse, params.version]);
+  }, [params.bookId, params.chapter, params.verse, params.verseEnd, params.version]);
 
   useEffect(() => {
     if (!restored) return;
@@ -186,6 +213,12 @@ export default function BibleScreen() {
   );
 
   const hasScripture = Boolean(passage && (passage.content || passage.verses.length));
+  /** The numbered verses on the page right now — the only ones that can be highlighted. */
+  const pageVerses = useMemo<BibleVerseText[]>(
+    () => (readMode === 'chapter' ? chapterVerses : (passage?.verses ?? [])),
+    [readMode, chapterVerses, passage?.verses]
+  );
+  const rangeReference = range ? getBibleRangeReference(selection.bookId, selection.chapter, range.start, range.end) : '';
 
   /* ---------------------------------------------------------------- *
    * Loading a passage. Every failure ends up on screen in plain words
@@ -267,6 +300,38 @@ export default function BibleScreen() {
     }
   }
 
+  /**
+   * A tap on a verse. The first tap highlights it; the next tap stretches the
+   * highlight between the two. Tapping the one highlighted verse again lets it
+   * go. Nothing is fetched and nothing can fail here.
+   */
+  function tapVerse(verse: number) {
+    setRange((current) => nextBibleRange(current, verse));
+  }
+
+  /**
+   * "Send to chat" on the highlighted passage. This opens the same sharing
+   * sheet the Group button opens — nothing is sent from here, so the button
+   * cannot be fired twice into a room. The sheet carries the whole passage,
+   * its reference, its translation and the copyright line the Bible library
+   * sent with it, and the sheet's own Send is the thing that posts.
+   */
+  function openHighlightShare() {
+    if (!range) return;
+    const card = buildScriptureShare({
+      version,
+      bookId: selection.bookId,
+      chapter: selection.chapter,
+      verses: versesInBibleRange(pageVerses, range),
+      copyright: passage?.copyright,
+    });
+    if (!card) {
+      Alert.alert('Nothing to send yet', 'Open the passage so it is on screen, then send it to your group.');
+      return;
+    }
+    setSharedVerse(card);
+  }
+
   async function shareToGroup() {
     if (loading) return;
     try {
@@ -340,6 +405,7 @@ export default function BibleScreen() {
   function chooseVersion(next: BibleVersion) {
     if (configuredVersions[next]) {
       setPlaceNote(null);
+      setRange(null);
       setVersion(next);
       return;
     }
@@ -352,6 +418,7 @@ export default function BibleScreen() {
 
   function selectBook(book: BibleBook) {
     setPlaceNote(null);
+    setRange(null);
     setReadMode('chapter');
     setSelection({ bookId: book.id, chapter: 1, verse: 1 });
     setPickerMode(null);
@@ -359,6 +426,7 @@ export default function BibleScreen() {
 
   function selectChapter(chapter: number) {
     setPlaceNote(null);
+    setRange(null);
     setReadMode('chapter');
     setSelection((current) => normalizeBibleSelection({ ...current, chapter, verse: 1 }));
     setPickerMode(null);
@@ -366,6 +434,7 @@ export default function BibleScreen() {
 
   function selectVerse(verse: number) {
     setPlaceNote(null);
+    setRange(null);
     setReadMode('verse');
     setSelection((current) => normalizeBibleSelection({ ...current, verse }));
     setPickerMode(null);
@@ -373,6 +442,7 @@ export default function BibleScreen() {
 
   function selectQuickScripture(nextSelection: BibleSelection) {
     setPlaceNote(null);
+    setRange(null);
     setReadMode('verse');
     setSelection(normalizeBibleSelection(nextSelection));
     setPickerMode(null);
@@ -385,6 +455,7 @@ export default function BibleScreen() {
 
   function goPreviousChapter() {
     setPlaceNote(null);
+    setRange(null);
     setReadMode('chapter');
     setSelection((current) => {
       if (current.chapter > 1) return normalizeBibleSelection({ ...current, chapter: current.chapter - 1, verse: 1 });
@@ -396,6 +467,7 @@ export default function BibleScreen() {
 
   function goNextChapter() {
     setPlaceNote(null);
+    setRange(null);
     setReadMode('chapter');
     setSelection((current) => {
       const book = getBibleBook(current.bookId);
@@ -497,6 +569,36 @@ export default function BibleScreen() {
 
             {placeNote ? <Text style={styles.placeNote}>{placeNote}</Text> : null}
 
+            {range ? (
+              <View style={styles.highlightBar}>
+                <View style={styles.highlightCopy}>
+                  <Text style={styles.highlightCount}>{bibleRangeLabel(range)}</Text>
+                  <Text style={styles.highlightReference}>{rangeReference} • {version}</Text>
+                </View>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Send ${rangeReference} to a chat group`}
+                  onPress={openHighlightShare}
+                  style={styles.highlightSend}
+                >
+                  <Ionicons name="chatbubbles-outline" size={20} color={theme.colors.textOnAccent} />
+                  <Text style={styles.highlightSendText}>Send to chat</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Clear the highlighted verses"
+                  onPress={() => setRange(null)}
+                  style={styles.highlightClear}
+                >
+                  <Ionicons name="close" size={22} color={theme.colors.accent} />
+                </Pressable>
+              </View>
+            ) : !loading && !loadError && pageVerses.length > 1 ? (
+              <Text style={styles.highlightHint}>
+                Tap a verse to highlight it. Tap another verse to highlight everything in between.
+              </Text>
+            ) : null}
+
             {loading ? (
               <View style={styles.loadingRow}>
                 <ActivityIndicator color={theme.colors.accent} />
@@ -519,19 +621,33 @@ export default function BibleScreen() {
               </View>
             ) : readMode === 'chapter' && chapterVerses.length ? (
               chapterVerses.map((verse) => (
-                <View key={verse.verse} style={styles.chapterVerseRow}>
+                <VerseTap
+                  key={verse.verse}
+                  verse={verse.verse}
+                  selected={isVerseHighlighted(range, verse.verse)}
+                  rowStyle={styles.chapterVerseRow}
+                  theme={theme}
+                  onPress={() => tapVerse(verse.verse)}
+                >
                   <Text style={[styles.chapterVerseNum, scaled(18, scale)]}>{verse.verse}</Text>
                   <Text style={[styles.chapterVerseText, scaled(18, scale)]}>{verse.text}</Text>
-                </View>
+                </VerseTap>
               ))
             ) : readMode === 'chapter' && passage?.content ? (
               <Text style={[styles.chapterBody, scaled(18, scale)]}>{passage.content}</Text>
             ) : (
               (passage?.verses ?? []).map((verse) => (
-                <View key={verse.verse} style={styles.verseRow}>
+                <VerseTap
+                  key={verse.verse}
+                  verse={verse.verse}
+                  selected={isVerseHighlighted(range, verse.verse)}
+                  rowStyle={styles.verseRow}
+                  theme={theme}
+                  onPress={() => tapVerse(verse.verse)}
+                >
                   <Text style={[styles.verseNum, scaled(21, scale)]}>{verse.verse}</Text>
                   <Text style={[styles.verseText, scaled(21, scale)]}>{verse.text}</Text>
-                </View>
+                </VerseTap>
               ))
             )}
 
@@ -666,6 +782,44 @@ function Selector({ label, value, theme, onPress }: { label: string; value: stri
         <Text numberOfLines={2} adjustsFontSizeToFit style={styles.selectorValue}>{value}</Text>
         <Ionicons name="chevron-down" size={20} color={theme.colors.accent} />
       </View>
+    </Pressable>
+  );
+}
+
+/**
+ * One verse on the page, and the tap that highlights it.
+ *
+ * The row keeps its padding and its border whether or not it is highlighted,
+ * so highlighting a verse never shifts the words on the page. It is at least
+ * 48 points tall, which is what a fingertip needs, and it grows with the
+ * reader's text size rather than clipping.
+ */
+function VerseTap({
+  verse,
+  selected,
+  rowStyle,
+  theme,
+  onPress,
+  children,
+}: {
+  verse: number;
+  selected: boolean;
+  rowStyle: object;
+  theme: AppTheme;
+  onPress: () => void;
+  children: React.ReactNode;
+}) {
+  const styles = useStyles(theme);
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`Verse ${verse}`}
+      accessibilityHint="Highlights this verse. Tap another verse to highlight the whole passage."
+      accessibilityState={{ selected }}
+      onPress={onPress}
+      style={({ pressed }) => [rowStyle, styles.verseTap, selected && styles.verseTapOn, pressed && styles.verseTapPressed]}
+    >
+      {children}
     </Pressable>
   );
 }
@@ -986,6 +1140,64 @@ const useStyles = createThemedStyles((t: AppTheme) =>
       ...t.elevation.low,
     },
     retryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.cardTitle },
+
+    /* The highlighted passage: its count, where to send it, and how to let it go. */
+    highlightBar: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: 10,
+      padding: 12,
+      borderRadius: t.radius.lg,
+      backgroundColor: t.colors.accentMuted,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+      marginBottom: 16,
+    },
+    highlightCopy: { flexGrow: 1, flexShrink: 1, minWidth: 140 },
+    highlightCount: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+    highlightReference: { color: t.colors.textSecondary, fontWeight: '700', marginTop: 2 },
+    highlightSend: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      minHeight: 48,
+      paddingHorizontal: 18,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.accentSolid,
+      ...t.elevation.low,
+    },
+    highlightSendText: { color: t.colors.textOnAccent, fontWeight: '900' },
+    highlightClear: {
+      minWidth: 48,
+      minHeight: 48,
+      borderRadius: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: t.colors.surface,
+      borderWidth: 1,
+      borderColor: t.colors.accentBorder,
+    },
+    highlightHint: { color: t.colors.textMuted, fontSize: t.type.meta, lineHeight: 20, marginBottom: 16 },
+
+    /* Every verse is tappable. The see-through border is always there so a
+       highlight changes the colour and never the layout. */
+    verseTap: {
+      /* A verse row runs the width of the reading card, and is at least a
+         fingertip tall and wide — 48pt clears both Apple's 44 and Android's 48. */
+      alignSelf: 'stretch',
+      minWidth: 48,
+      minHeight: 48,
+      alignItems: 'flex-start',
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      marginHorizontal: -10,
+      borderRadius: t.radius.md,
+      borderWidth: 1,
+      borderColor: 'transparent',
+    },
+    verseTapOn: { backgroundColor: t.colors.accentMuted, borderColor: t.colors.accentBorder },
+    verseTapPressed: { opacity: 0.7 },
 
     verseRow: { flexDirection: 'row', gap: 14, marginBottom: 21 },
     verseNum: { color: t.colors.accent, fontWeight: '900', minWidth: 30 },

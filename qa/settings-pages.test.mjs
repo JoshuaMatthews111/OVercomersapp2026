@@ -69,7 +69,40 @@ test('Account Settings keeps the save behaviour that already shipped', () => {
   assert.match(account, /Alert\.alert\('Saved', 'Your profile is up to date\.'\)/);
   // The avatar is read before the upsert, so saving a name cannot wipe a photo.
   assert.match(account, /select\('avatar_url, display_name'\)/);
-  assert.match(account, /avatar_url: avatarUrl/);
+  assert.match(account, /row\.avatar_url = avatarUrl/);
+});
+
+// The photo is the part of this that can actually lose somebody's work. The
+// page writes the whole profile row, so it may only send `avatar_url` when it
+// has READ one. A failed read left `avatarUrl` null while the real photo was
+// alive on the server, and saving a name wrote that null over it — the photo
+// disappeared from chat bubbles and member lists with "Saved" on the screen.
+test('a name saved on a bad connection cannot wipe the profile photo', () => {
+  const account = read('app/settings/account.tsx');
+  assert.match(account, /const \[profileRead, setProfileRead\] = useState\(false\)/);
+  // Set only after the profile row actually came back...
+  assert.match(account, /setAvatarUrl\(profile\?\.avatar_url \?\? null\);\n\s*setProfileRead\(true\);/);
+  // ...cleared when the read failed...
+  assert.match(account, /catch \(err\) \{\n\s*setProfileRead\(false\);/);
+  // ...and the column is left out of the upsert unless it is true.
+  assert.match(account, /if \(profileRead\) row\.avatar_url = avatarUrl;/);
+  assert.doesNotMatch(
+    account,
+    /upsert\(\{[\s\S]{0,200}?avatar_url: avatarUrl/,
+    'avatar_url must not be written unconditionally',
+  );
+});
+
+// Alert.alert with buttons is a no-op in react-native-web, so on the browser
+// build the last question never arrived and Delete my account did nothing at
+// all. Same words, the browser's own box (app/follow-ups.tsx does this too).
+test('the last delete question is asked on web as well as on a phone', () => {
+  const page = read('app/settings/delete-account.tsx');
+  assert.match(page, /Platform\.OS === 'web'/);
+  assert.match(page, /window\.confirm\(`\$\{question\}/);
+  assert.match(page, /void deleteAccount\(\);/);
+  // And the phone path is untouched.
+  assert.match(page, /\{ text: 'Delete it', style: 'destructive', onPress: \(\) => \{ void deleteAccount\(\); \} \}/);
 });
 
 test('deleting an account moved verbatim — every message, the countdown and the edge function', () => {
@@ -97,6 +130,29 @@ test('deleting an account moved verbatim — every message, the countdown and th
   assert.match(profile, /router\.push\('\/settings\/delete-account'/, 'the More row still leads there');
 });
 
+// At the largest text size a button label like "Open my saved items" or
+// "overcomersglobalnetwork.com" is wider than the button. Without flexShrink
+// it is cut off mid-word instead of wrapping (app/live.tsx fixed the same
+// thing on the live screen after the 2026-09-22 review).
+test('button labels on the settings pages wrap instead of being cut off', () => {
+  const labelStyles = {
+    'app/settings/about.tsx': ['primaryText', 'secondaryText'],
+    'app/settings/account.tsx': ['primaryText', 'secondaryText', 'dangerLink'],
+    'app/settings/saved.tsx': ['primaryText'],
+    'app/settings/downloads.tsx': ['primaryText'],
+    'app/settings/delete-account.tsx': ['dangerButtonText'],
+  };
+  for (const [file, keys] of Object.entries(labelStyles)) {
+    const source = read(file);
+    for (const key of keys) {
+      const line = source.split('\n').find((l) => l.trim().startsWith(`${key}: {`));
+      assert.ok(line, `${file} has no ${key} style`);
+      assert.match(line, /flexShrink: 1/, `${file}: ${key} must shrink at large text sizes`);
+      assert.match(line, /textAlign: 'center'/, `${file}: ${key} must stay centred when it wraps`);
+    }
+  }
+});
+
 test('About OGN carries the ministry words plus vision, mission and contact', () => {
   const about = read('app/settings/about.tsx');
   assert.ok(about.includes('Overcomers Global Network exists to educate, equip, and evolve believers into victorious relationship with Christ while impacting lives and nations through the Gospel. One Vision. Every Nation. Eternal Impact.'));
@@ -108,7 +164,11 @@ test('About OGN carries the ministry words plus vision, mission and contact', ()
 
 test('Saved Media and Downloads keep their original words and destinations', () => {
   assert.ok(read('app/settings/saved.tsx').includes('Sermons, articles, videos and music you save are kept in the Media library.'));
-  assert.match(read('app/settings/saved.tsx'), /router\.push\('\/\(tabs\)\/messages'/);
+  // Saved items ARE the Downloads list on the Media tab — that is where
+  // getUserDownloads() shows them, and what the Media tab says after a save.
+  // Opening the tab's first section instead left the member looking at
+  // sermons, hunting for the thing they had just saved.
+  assert.match(read('app/settings/saved.tsx'), /pathname: '\/\(tabs\)\/messages', params: \{ tab: 'downloads' \}/);
   assert.ok(read('app/settings/downloads.tsx').includes('Anything the ministry marks as downloadable is kept on the Media tab, ready to play without a signal.'));
   assert.match(read('app/settings/downloads.tsx'), /params: \{ tab: 'downloads' \}/);
 });

@@ -249,3 +249,69 @@ test('a query string is never mistaken for a file name', () => {
   assert.ok(told.problem, 'it says why, in plain words');
   assert.equal(embed.mediaFileName('https://example.com/watch?file=video.mp4'), null);
 });
+
+// Adversarial review 2026-09-23: the live side accepts a YouTube Music link
+// (supabase/functions/live-status/logic.ts) and this side refused it with
+// "that link does not point to one video", which was simply untrue. One
+// answer for one link, or the two screens tell a leader different things.
+test('review: a YouTube Music link is the same video everywhere', () => {
+  const music = 'https://music.youtube.com/watch?v=G5h7XID3Re8';
+  assert.equal(embed.youtubeVideoId(music), 'G5h7XID3Re8');
+  const link = embed.classifyMediaLink(music);
+  assert.equal(link.problem, null);
+  assert.equal(link.host, 'youtube');
+  assert.equal(link.kind, 'embed');
+  assert.equal(link.keepsPlayingWithScreenOff, false, 'still YouTube: it stops when the app is left');
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial review 2026-09-23.
+// ---------------------------------------------------------------------------
+
+test('review: a signed Supabase link still posts, but is never called permanent', () => {
+  const signed = 'https://ljmzujrzdhwmvvapajlr.supabase.co/storage/v1/object/sign/sermon-media/music/chant.mp3?token=eyJhbGciOiJIUzI1NiJ9.abc.def';
+  const link = embed.classifyMediaLink(signed);
+  assert.equal(link.kind, 'audio', 'it is still a sound file the phone can play');
+  assert.equal(link.problem, null, 'it is not refused — sometimes a signed link is all somebody has');
+  assert.equal(link.temporary, true);
+  assert.match(link.note, /stops working after a while/);
+  assert.match(link.note, /object\/public/, 'and it says which link to copy instead');
+
+  // The permanent one is never warned about.
+  const permanent = embed.classifyMediaLink('https://ljmzujrzdhwmvvapajlr.supabase.co/storage/v1/object/public/sermon-media/music/chant.mp3');
+  assert.equal(permanent.temporary, false);
+  assert.doesNotMatch(permanent.note, /stops working/);
+
+  // An extensionless signed file, where the caller says what kind it is.
+  const noExt = embed.classifyMediaLink('https://ljmzujrzdhwmvvapajlr.supabase.co/storage/v1/object/sign/sermon-media/music/chant?token=abc', 'audio');
+  assert.equal(noExt.temporary, true);
+  assert.match(noExt.note, /stops working after a while/);
+});
+
+test('review: the pasted-link answer and the player never disagree about a link', () => {
+  // classifyMediaLink is the answer in words; playbackKind is the same rule in
+  // fewer words, and it is what the player actually asks. Nothing may make
+  // them differ — that is how a Facebook page ending ".mp4" got handed to the
+  // native player and died as "Would not play".
+  const urls = [
+    'https://www.youtube.com/watch?v=G5h7XID3Re8',
+    'https://music.youtube.com/watch?v=G5h7XID3Re8',
+    'https://youtu.be/G5h7XID3Re8',
+    'https://vimeo.com/123456789',
+    'https://www.facebook.com/ogn/videos/123456/clip.mp4',
+    'https://ljmzujrzdhwmvvapajlr.supabase.co/storage/v1/object/public/sermon-media/music/chant.mp3',
+    'https://ljmzujrzdhwmvvapajlr.supabase.co/storage/v1/object/sign/sermon-media/music/chant.mp3?token=abc',
+    'https://firebasestorage.googleapis.com/v0/b/x.appspot.com/o/a.mp4?alt=media',
+    'https://cdn.example.org/sermon.m4a',
+    'https://example.org/some/page',
+    'https://www.youtube.com/@overcomersglobalnetwork',
+  ];
+  for (const fallback of ['audio', 'video']) {
+    for (const url of urls) {
+      const said = embed.classifyMediaLink(url, fallback);
+      const played = embed.playbackKind(url, fallback);
+      const expected = said.kind === 'unknown' ? fallback : said.kind;
+      assert.equal(played, expected, `${url} (${fallback})`);
+    }
+  }
+});

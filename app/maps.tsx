@@ -45,6 +45,9 @@ import {
   updateTerritoryMetrics,
   type VisitPin,
 } from '../lib/evangelismService';
+import { OutreachMediaStrip } from '../components/OutreachMedia';
+import { OutreachPersonSearch } from '../components/OutreachPersonSearch';
+import { loadOutreachMedia, mediaCountLabel, subjectKey, type OutreachMediaBySubject, type OutreachMediaItem } from '../lib/outreachMedia';
 import { friendlyError } from '../lib/errorMessages';
 import { dueLabel, followUpDateFromInput } from '../lib/followUps';
 import { addressLine, directionsUrl, distanceLabel, getHomeCells, type HomeCell, meetingLabel, nearestHomeCells, preferredUnits } from '../lib/homeCells';
@@ -107,6 +110,9 @@ function timeAgo(iso?: string): string {
   return `${days} days ago`;
 }
 
+/** One shared empty list, so a record with no photos does not re-render on it. */
+const EMPTY_MEDIA: OutreachMediaItem[] = [];
+
 const UNITS = preferredUnits(typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().locale : undefined);
 
 export default function MapsWebScreen() {
@@ -133,9 +139,13 @@ export default function MapsWebScreen() {
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [teamNote, setTeamNote] = useState<string | null>(null);
   const [teamOff, setTeamOff] = useState(false);
-  const [teamQuery, setTeamQuery] = useState('');
-  const [teamResults, setTeamResults] = useState<Person[] | null>(null);
   const [teamBusy, setTeamBusy] = useState(false);
+  // Photos and clips the team added out in the field. The browser shows them
+  // and can take one off; adding is done from the phone, where the camera is.
+  const [mediaBySubject, setMediaBySubject] = useState<OutreachMediaBySubject>({});
+  // Said out loud rather than shown as an empty strip: a record with photos on
+  // it that silently shows none reads as "there were none", which is a lie.
+  const [mediaNote, setMediaNote] = useState<string | null>(null);
   const handledParamsRef = useRef('');
   // Shown under the date box: Alert.alert does nothing in a browser.
   const [dateNote, setDateNote] = useState<string | null>(null);
@@ -177,6 +187,32 @@ export default function MapsWebScreen() {
         : 'The visits could not load just now. Pull down to try again.');
     }
     setSelected((current) => (current ? territories.find((t) => t.id === current.id) || current : territories.find((t) => t.level !== 'global') || territories[0] || null));
+
+    // Photos last and on their own: a record never waits for its pictures, and
+    // a database without outreach_media simply shows none.
+    const media = await loadOutreachMedia([
+      ...(visitResult.ready ? visitResult.visits.map((visit) => ({ type: 'visit' as const, id: visit.id })) : []),
+      ...contactResult.rows.map((contact) => ({ type: 'contact' as const, id: contact.id })),
+    ]).catch(() => ({ ready: false, reason: 'unavailable' } as const));
+    setMediaBySubject(media.ready ? media.bySubject : {});
+    setMediaNote(media.ready
+      ? null
+      : media.reason === 'not-switched-on'
+        ? 'Photos on outreach records are not switched on yet.'
+        : 'The photos could not load just now. Reload this page to try again.');
+  }, []);
+
+  const mediaFor = useCallback(
+    (type: 'visit' | 'contact', id: string) => mediaBySubject[subjectKey(type, id)] || EMPTY_MEDIA,
+    [mediaBySubject]
+  );
+  const forgetMedia = useCallback((gone: OutreachMediaItem) => {
+    setMediaBySubject((current) => {
+      const key = subjectKey(gone.subjectType, gone.subjectId);
+      const list = current[key];
+      if (!list) return current;
+      return { ...current, [key]: list.filter((item) => item.id !== gone.id) };
+    });
   }, []);
 
   useEffect(() => {
@@ -273,18 +309,6 @@ export default function MapsWebScreen() {
   async function reloadTeam() {
     const result = await getRegionTeams();
     if (result.ready) { setTeam(result.members); setTeamNote(null); }
-  }
-
-  async function searchTeam() {
-    if (teamBusy) return;
-    setTeamBusy(true);
-    try {
-      setTeamResults(await searchOutreachTeam(teamQuery));
-    } catch (err) {
-      Alert.alert('Search did not work', friendlyError(err, 'The outreach team could not load just now.'));
-    } finally {
-      setTeamBusy(false);
-    }
   }
 
   async function runTeamChange(work: () => Promise<void>, fallback: string) {
@@ -622,21 +646,18 @@ export default function MapsWebScreen() {
               ))}
               {access.canManageContent && !teamOff ? (
                 <View style={styles.form}>
-                  <View style={styles.searchRow}>
-                    <TextInput accessibilityLabel="Search the outreach team by name" value={teamQuery} onChangeText={setTeamQuery} onSubmitEditing={searchTeam} returnKeyType="search" placeholder="Add someone on the outreach team" placeholderTextColor={theme.colors.textMuted} style={[styles.input, styles.rowBody]} />
-                    <PrimaryButton label={teamBusy ? 'Searching…' : 'Search'} variant="outline" onPress={searchTeam} />
-                  </View>
-                  {teamResults && !teamResults.length ? <Text style={styles.empty}>Nobody on the outreach team matches that name.</Text> : null}
-                  {teamResults?.map((person) => {
-                    const already = regionTeam.some((m) => m.userId === person.id);
-                    return (
-                      <Pressable key={person.id} accessibilityRole="button" accessibilityLabel={already ? `${person.displayName} is already on this team` : `Add ${person.displayName} to ${selected.name}`} accessibilityState={{ disabled: already || teamBusy }} disabled={already || teamBusy} onPress={() => runTeamChange(async () => { await addToRegionTeam(selected.id, person.id, regionTeam.length ? 'member' : 'lead'); setTeamResults(null); setTeamQuery(''); }, 'Only leaders and admins can change a region team.')} style={styles.personRow}>
-                        <Badge theme={theme} person={person} />
-                        <Text style={[styles.rowTitle, styles.rowBody]}>{person.displayName}</Text>
-                        <Text style={already ? styles.rowSub : styles.upLinkText}>{already ? 'On the team' : 'Add'}</Text>
-                      </Pressable>
-                    );
-                  })}
+                  {/* Typing finds them — no Search button (TestFlight 36). */}
+                  <OutreachPersonSearch
+                    theme={theme}
+                    label={`Add someone to ${selected.name}`}
+                    placeholder="Start typing their name"
+                    nobodyNoun="Nobody on the outreach team"
+                    pickLabel="Add"
+                    alreadyChosenNote="On the team"
+                    search={(term, signal) => searchOutreachTeam(term, 20, signal)}
+                    isAlreadyChosen={(person) => regionTeam.some((m) => m.userId === person.id)}
+                    onPick={(person) => runTeamChange(async () => { await addToRegionTeam(selected.id, person.id, regionTeam.length ? 'member' : 'lead'); }, 'Only leaders and admins can change a region team.')}
+                  />
                 </View>
               ) : null}
             </View>
@@ -671,14 +692,16 @@ export default function MapsWebScreen() {
 
         <Text style={styles.section}>Visits logged here</Text>
         {visitsNote ? <Text style={styles.empty}>{visitsNote}</Text> : null}
+        {mediaNote ? <Text style={styles.empty}>{mediaNote}</Text> : null}
         {!visitsNote && !relatedVisits.length ? <Text style={styles.empty}>No visits logged here yet. The team drops these from the phone app while they are out.</Text> : null}
         {relatedVisits.slice(0, 12).map((visit) => (
           <View key={visit.id} style={[styles.card, styles.rowCard]}>
             <View style={styles.visitIcon}><Ionicons name="footsteps" size={13} color={theme.colors.textOnBrand} /></View>
             <View style={styles.rowBody}>
               <Text style={styles.rowTitle}>{visit.placeLabel}</Text>
-              <Text style={styles.rowSub}>{visit.unitNumber ? `Unit ${visit.unitNumber} • ` : ''}{visit.authorName} • {timeAgo(visit.visitedAt)}</Text>
+              <Text style={styles.rowSub}>{visit.unitNumber ? `Unit ${visit.unitNumber} • ` : ''}{visit.authorName} • {timeAgo(visit.visitedAt)}{mediaCountLabel(mediaFor('visit', visit.id)) ? ` • ${mediaCountLabel(mediaFor('visit', visit.id))}` : ''}</Text>
               {visit.notes ? <Text style={styles.body}>{visit.notes}</Text> : null}
+              <OutreachMediaStrip theme={theme} items={mediaFor('visit', visit.id)} userId={access.userId} isStaff={access.canManageContent} onRemoved={forgetMedia} />
             </View>
           </View>
         ))}
@@ -711,6 +734,10 @@ export default function MapsWebScreen() {
               <Text style={styles.rowSub}>{contact.status.replace('_', ' ')} • {contact.followUpNeeded && contact.nextFollowUpAt ? `Next follow-up: ${dueLabel(contact.nextFollowUpAt)}` : contact.followUpNeeded ? 'Follow-up, no date set' : 'No follow-up set'}</Text>
               <Text style={styles.body}>{contact.prayerRequest || 'No prayer request written down.'}</Text>
               <NearestCellLine theme={theme} cells={homeCells} from={contact.location} />
+              {/* Whatever the team photographed at the door. Adding is done on
+                  the phone, where the camera is; here they can be looked at and
+                  taken off. */}
+              <OutreachMediaStrip theme={theme} items={mediaFor('contact', contact.id)} userId={access.userId} isStaff={access.canManageContent} onRemoved={forgetMedia} />
             </View>
           </View>
         ))}

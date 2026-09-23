@@ -11,6 +11,14 @@ import { useAppTheme } from '../../lib/themePreference';
  * Saved Media — its own page now. The words are the ones that were on the old
  * panel, unchanged; only the place they live has moved, so the chevron on the
  * More row leads somewhere instead of looking dead.
+ *
+ * Where the button goes was wrong, though, and is fixed here. Anything you
+ * bookmark is kept in the Media tab's DOWNLOADS list — that is the list
+ * `getUserDownloads()` fills, and the Media tab itself says so after a save
+ * ("… is in your Downloads tab now"). Sending somebody to the Media tab's
+ * first section instead left them looking at sermons, hunting for the thing
+ * they had saved. It now opens the list their saved items are actually in,
+ * the same address the Downloads row uses.
  */
 export default function SavedMediaScreen() {
   const { theme, dark } = useAppTheme();
@@ -43,15 +51,16 @@ export default function SavedMediaScreen() {
 
       <Card style={styles.card}>
         <Text style={styles.body}>Sermons, articles, videos and music you save are kept in the Media library.</Text>
+        <Text style={styles.body}>Tap the bookmark on anything in Media and it is kept for you under Downloads, on that same tab.</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Open the Media library"
-          onPress={() => router.push('/(tabs)/messages' as any)}
+          accessibilityLabel="Open your saved items on the Media tab"
+          onPress={() => router.push({ pathname: '/(tabs)/messages', params: { tab: 'downloads' } } as any)}
           style={styles.primaryButton}
           android_ripple={ripple}
         >
           <Ionicons name="library-outline" size={20} color={theme.colors.textOnAccent} />
-          <Text style={styles.primaryText}>Open Media Library</Text>
+          <Text style={styles.primaryText}>Open my saved items</Text>
         </Pressable>
       </Card>
     </Screen>
@@ -86,5 +95,5 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
     ...(t.dark ? t.elevation.none : t.elevation.low),
   },
-  primaryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
+  primaryText: { flexShrink: 1, textAlign: 'center', color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
 }));

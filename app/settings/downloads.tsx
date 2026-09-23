@@ -86,5 +86,5 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
     ...(t.dark ? t.elevation.none : t.elevation.low),
   },
-  primaryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
+  primaryText: { flexShrink: 1, textAlign: 'center', color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
 }));

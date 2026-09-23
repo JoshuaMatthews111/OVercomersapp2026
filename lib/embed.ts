@@ -87,7 +87,11 @@ function parseUrl(url: string): URL | null {
 export function youtubeVideoId(url: string): string | null {
   const parsed = parseUrl(url);
   if (!parsed) return null;
-  const host = parsed.hostname.replace(/^www\.|^m\./, '').toLowerCase();
+  // music.youtube.com too: the edge function's own reader accepts it
+  // (supabase/functions/live-status/logic.ts youtubeIdFromLink), and a link
+  // copied out of YouTube Music used to be refused here with "that link does
+  // not point to one video", which was not true.
+  const host = parsed.hostname.replace(/^www\.|^m\.|^music\./, '').toLowerCase();
 
   let candidate: string | null = null;
   if (host === 'youtu.be') {
@@ -135,7 +139,7 @@ export function thumbnailFromUrl(url: string): string | null {
 export function embedUrl(url: string): string | null {
   const parsed = parseUrl(url);
   if (!parsed) return null;
-  const host = parsed.hostname.replace(/^www\.|^m\./, '').toLowerCase();
+  const host = parsed.hostname.replace(/^www\.|^m\.|^music\./, '').toLowerCase();
 
   if (host === 'youtu.be' || host === 'youtube.com' || host === 'youtube-nocookie.com') {
     const id = youtubeVideoId(url);
@@ -166,9 +170,15 @@ export function playbackKind(url: string, fallback: 'audio' | 'video'): Playback
 // ─── One answer for a pasted media link (2026-09-23) ───────────────────────
 //
 // The owner: "make sure in future we can use supabase links or firebase [for
-// media]". The paste-a-link form and the player must agree about what a link
-// is, so both ask this one function. It is pure: no network, no guessing from
-// a file's contents, and it never throws.
+// media]". This is the full answer about a pasted link, in words: what it is,
+// what the app will do with it, and whether it keeps playing with the screen
+// off. It is pure: no network, no guessing from a file's contents, and it
+// never throws.
+//
+// Review 2026-09-23: this used to claim the player asks it too. The player
+// asks playbackKind() above, which is the same rule in fewer words (the HOST
+// before the file ending). They are held to the same answer by
+// qa/media-links.test.mjs so the two can never drift apart.
 
 /** Where a link lives, as far as the app can tell from the address alone. */
 export type MediaHost = 'youtube' | 'vimeo' | 'facebook' | 'supabase' | 'firebase' | 'web' | null;
@@ -185,6 +195,12 @@ export type MediaLink = {
   fileName: string | null;
   /** True only for a file the phone plays itself. */
   keepsPlayingWithScreenOff: boolean;
+  /**
+   * True for a signed storage link, which stops working on its own — often
+   * within the hour. The link still works today, so it is not a `problem`;
+   * `note` says so in words (DO-NOT-BREAK #49).
+   */
+  temporary: boolean;
   /** Set when the link cannot be used at all — plain words to show under the box. */
   problem: string | null;
   /** One honest sentence about what this link will do in the app. */
@@ -192,6 +208,22 @@ export type MediaLink = {
 };
 
 const SUPABASE_STORAGE_PATH = /^\/storage\/v1\/(object|render\/image)\//;
+
+/**
+ * A borrowed link. "Copy URL" in the Supabase dashboard offers two shapes: the
+ * public one (`/object/public/…`) works for ever, and the signed one
+ * (`/object/sign/…?token=`) carries its own expiry. Saying "it plays in the
+ * app and keeps playing when the screen is off" about the second one is a
+ * promise the link cannot keep: the song goes silent for the whole church an
+ * hour after the person who posted it heard it play.
+ */
+function isTemporaryStorageLink(parsed: URL, host: MediaHost): boolean {
+  if (host !== 'supabase') return false;
+  return parsed.pathname.includes('/object/sign/') || parsed.searchParams.has('token');
+}
+
+const TEMPORARY_NOTE =
+  'But it is a temporary link: it stops working after a while, often within the hour, and then nobody can play it. Copy the permanent link instead — the one with /object/public/ in it — or upload the file here.';
 
 /** Which of the hosts the ministry uses this link belongs to. */
 export function mediaHost(url: string): MediaHost {
@@ -217,7 +249,7 @@ export function classifyMediaLink(url: string, fallback: 'audio' | 'video' | nul
   const clean = (url || '').trim();
   const base: MediaLink = {
     kind: 'unknown', how: null, host: null, url: clean, fileName: null,
-    keepsPlayingWithScreenOff: false, problem: null, note: '',
+    keepsPlayingWithScreenOff: false, temporary: false, problem: null, note: '',
   };
   if (!clean) return { ...base, problem: 'Paste a link first.' };
   if (/\s/.test(clean)) return { ...base, problem: 'That link has a space in it. Copy it again and paste only the link.' };
@@ -232,6 +264,8 @@ export function classifyMediaLink(url: string, fallback: 'audio' | 'video' | nul
   const host = mediaHost(clean);
   const file = fileKind(clean);
   const fileName = mediaFileName(clean);
+  const temporary = isTemporaryStorageLink(parsed, host);
+  const lasts = temporary ? ` ${TEMPORARY_NOTE}` : '';
 
   // The host is asked BEFORE the file ending, exactly as playbackKind does.
   // A Facebook or Vimeo page whose address ends ".mp4" is still a page: the
@@ -258,9 +292,10 @@ export function classifyMediaLink(url: string, fallback: 'audio' | 'video' | nul
       host,
       fileName,
       keepsPlayingWithScreenOff: true,
-      note: file === 'audio'
+      temporary,
+      note: (file === 'audio'
         ? 'This is a sound file. It plays in the app and keeps playing when the screen is off.'
-        : 'This is a video file. It plays in the app and keeps playing when the screen is off.',
+        : 'This is a video file. It plays in the app and keeps playing when the screen is off.') + lasts,
     };
   }
 
@@ -279,7 +314,8 @@ export function classifyMediaLink(url: string, fallback: 'audio' | 'video' | nul
         host,
         fileName,
         keepsPlayingWithScreenOff: true,
-        note: 'This is an uploaded file. It plays in the app and keeps playing when the screen is off.',
+        temporary,
+        note: 'This is an uploaded file. It plays in the app and keeps playing when the screen is off.' + lasts,
       };
     }
     return {
@@ -290,7 +326,7 @@ export function classifyMediaLink(url: string, fallback: 'audio' | 'video' | nul
     };
   }
   if (fallback) {
-    return { ...base, kind: fallback, how: 'file', host, fileName, keepsPlayingWithScreenOff: true, note: 'The app will try to play this as a file.' };
+    return { ...base, kind: fallback, how: 'file', host, fileName, keepsPlayingWithScreenOff: true, temporary, note: 'The app will try to play this as a file.' + lasts };
   }
   return {
     ...base,

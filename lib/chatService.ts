@@ -522,6 +522,49 @@ export async function uploadChatAttachment(
   }
 }
 
+/**
+ * Take back a file that was uploaded for a message the database then refused.
+ *
+ * Second review, 2026-09-23. The order is upload first, insert second, so a
+ * group's own post limits (or the sensitive-content filter, or a lost race
+ * with a leader changing the rule) can refuse the message when the file is
+ * already sitting in the private bucket. Nothing points at it any more — no
+ * message row carries the path — so it would stay there for good, and this
+ * project is on a 1 GB plan where one refused video is a real bite out of it.
+ *
+ * Quiet and best effort: the person has already been told why their message
+ * did not go. A failure to tidy up must never become a second error on top of
+ * the first one. Only ever called with a path this phone just uploaded.
+ */
+/**
+ * "The database refused this; nothing was saved." Marked only where we have
+ * the database's own refusal in our hands, never for a dropped connection —
+ * the difference decides whether it is safe to take an uploaded file back.
+ */
+export function markRefusedBeforeSaving<T>(err: T): T {
+  // A frozen or primitive error is not worth failing a send over, so it is
+  // asked rather than tried.
+  if (err && typeof err === 'object' && Object.isExtensible(err)) {
+    (err as unknown as { refusedBeforeSaving?: boolean }).refusedBeforeSaving = true;
+  }
+  return err;
+}
+
+/** Was this the database refusing, with certainty that nothing was written? */
+export function wasRefusedBeforeSaving(err: unknown): boolean {
+  return Boolean((err as { refusedBeforeSaving?: boolean } | null | undefined)?.refusedBeforeSaving);
+}
+
+export async function discardChatAttachment(path?: string | null): Promise<boolean> {
+  if (!hasSupabase || !path) return false;
+  // The answer is returned rather than raised. The person has already been
+  // told why their message did not go, in their own words; a failure to tidy
+  // up behind it must never land on them as a second error on top of the
+  // first. Callers may look at it; nothing has to.
+  const result = await supabase.storage.from(ATTACHMENT_BUCKET).remove([path]).catch(() => null);
+  return Boolean(result && !result.error);
+}
+
 export type ChatProfileSearchResult = {
   id: string;
   displayName: string;
@@ -1277,7 +1320,15 @@ export async function sendChatMessage(
     // sentence the person should read — "Only leaders can post in this group."
     // — so it is shown as it is rather than as a permissions error.
     const limited = permissionWords(error, 'That could not be posted in this group. Please ask a leader.');
-    if (limited instanceof FriendlyError) throw limited;
+    if (limited instanceof FriendlyError) {
+      // The database said no, so we KNOW nothing was written. That is what
+      // lets the caller take back a file it had already uploaded for this
+      // message (discardChatAttachment) without any risk of stripping the
+      // file off a message that did in fact save. A dropped connection is a
+      // different error and is deliberately not marked.
+      markRefusedBeforeSaving(limited);
+      throw limited;
+    }
     throw error;
   }
   return {

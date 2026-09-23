@@ -23,6 +23,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAccessProfile } from '../lib/accessControl';
 import { friendlyError } from '../lib/errorMessages';
 import { initialsFor, lookupPeople, type Person, searchOutreachTeam } from '../lib/evangelismService';
+import { OutreachPersonSearch } from '../components/OutreachPersonSearch';
 import {
   buildFollowUpItems,
   dueLabel,
@@ -581,51 +582,20 @@ function FollowUpCard({
 /** Leaders and admins: find someone on the outreach team to hand a person to. */
 function ReassignPanel({ theme, contactName, onPick, onCancel }: { theme: AppTheme; contactName: string; onPick: (person: Person) => void; onCancel: () => void }) {
   const styles = useStyles(theme);
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState<Person[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function search() {
-    setSearching(true);
-    setError(null);
-    try {
-      setResults(await searchOutreachTeam(query));
-    } catch (err) {
-      setError(friendlyError(err, 'The outreach team could not load just now.'));
-    } finally {
-      setSearching(false);
-    }
-  }
-
   return (
     <View style={styles.reassign}>
-      <Text style={styles.formLabel}>Hand {contactName} to…</Text>
-      <View style={styles.searchRow}>
-        <TextInput
-          accessibilityLabel="Search the outreach team by name"
-          value={query}
-          onChangeText={setQuery}
-          onSubmitEditing={search}
-          returnKeyType="search"
-          placeholder="Name on the outreach team"
-          placeholderTextColor={theme.colors.textMuted}
-          style={[styles.input, styles.flex]}
-        />
-        <Pressable accessibilityRole="button" accessibilityLabel="Search" accessibilityState={{ busy: searching }} onPress={search} style={styles.smallButton}>
-          {searching ? <ActivityIndicator color={theme.colors.textPrimary} /> : <Ionicons name="search" size={18} color={theme.colors.textPrimary} />}
-          <Text style={styles.smallButtonText}>Search</Text>
-        </Pressable>
-      </View>
-      {error ? <Text style={styles.warnText}>{error}</Text> : null}
-      {results && !results.length ? <Text style={styles.body}>Nobody on the outreach team matches that name.</Text> : null}
-      {results?.map((person) => (
-        <Pressable key={person.id} accessibilityRole="button" accessibilityLabel={`Hand to ${person.displayName}`} onPress={() => onPick(person)} style={styles.personRow}>
-          <Avatar theme={theme} name={person.displayName} uri={person.avatarUrl} />
-          <Text style={[styles.itemName, styles.flex]}>{person.displayName}</Text>
-          <Ionicons name="chevron-forward" size={18} color={theme.colors.textMuted} />
-        </Pressable>
-      ))}
+      {/* Typing finds them — no Search button (TestFlight 36). The role beside
+          each name is what tells two people with the same name apart. */}
+      <OutreachPersonSearch
+        theme={theme}
+        label={`Hand ${contactName} to…`}
+        placeholder="Start typing their name"
+        nobodyNoun="Nobody on the outreach team"
+        pickLabel="Hand to"
+        search={(term, signal) => searchOutreachTeam(term, 20, signal)}
+        onPick={onPick}
+        autoFocus
+      />
       <Pressable accessibilityRole="button" accessibilityLabel="Cancel handing over" onPress={onCancel} style={styles.linkButton}>
         <Text style={styles.linkText}>Cancel</Text>
       </Pressable>
@@ -707,7 +677,6 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   busy: { opacity: 0.75 },
 
   reassign: { marginTop: t.spacing.sm, padding: t.spacing.md, borderRadius: t.radius.md, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.accentBorder, gap: t.spacing.sm },
-  searchRow: { flexDirection: 'row', gap: t.spacing.sm, alignItems: 'center' },
   personRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.md, minHeight: 56, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.colors.border },
   linkButton: { minHeight: 48, minWidth: 48, justifyContent: 'center', alignItems: 'center', alignSelf: 'flex-start', paddingHorizontal: 12 },
   linkText: { color: t.colors.accent, fontWeight: '800', fontSize: t.type.body },

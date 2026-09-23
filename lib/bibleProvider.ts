@@ -178,6 +178,147 @@ export function getBiblePassageId(selection: BibleSelection, mode: BibleReadMode
   return `${normalized.bookId}.${normalized.chapter}.${normalized.verse}`;
 }
 
+/* ---------------------------------------------------------------------------
+ * Highlighting a passage
+ *
+ * The owner asked for this in his own words: "let someone highlight bible
+ * scripture and send it to messaging with like a message under it."
+ *
+ * A person taps a verse, then taps another verse, and everything between the
+ * two is highlighted. All of that is worked out here, away from the screen,
+ * so it can be read and tested on its own. Nothing in here fetches anything:
+ * it only works on the verses already on the page, which is why highlighting
+ * a passage never fails and never waits.
+ * ------------------------------------------------------------------------- */
+
+/** One verse as it is rendered on the reading page. */
+export type BibleVerseText = { verse: number; text: string };
+
+/**
+ * A highlighted passage. `anchor` is the verse tapped first — the second tap
+ * is measured from it, so tapping backwards up the page works exactly like
+ * tapping forwards down it.
+ */
+export type BibleRange = { anchor: number; start: number; end: number };
+
+/**
+ * What a second tap does.
+ *
+ * Nothing highlighted -> that verse is highlighted on its own.
+ * One verse highlighted and it is tapped again -> the highlight is let go.
+ * Anything else -> the highlight stretches between the first tap and this one.
+ */
+export function nextBibleRange(current: BibleRange | null, tapped: number): BibleRange | null {
+  if (!Number.isFinite(tapped) || tapped < 1) return current;
+  const verse = Math.floor(tapped);
+  if (!current) return { anchor: verse, start: verse, end: verse };
+  if (current.start === current.end && current.start === verse) return null;
+  return {
+    anchor: current.anchor,
+    start: Math.min(current.anchor, verse),
+    end: Math.max(current.anchor, verse),
+  };
+}
+
+export function isVerseHighlighted(range: BibleRange | null, verse: number): boolean {
+  if (!range) return false;
+  return verse >= range.start && verse <= range.end;
+}
+
+export function bibleRangeCount(range: BibleRange | null): number {
+  if (!range) return 0;
+  return Math.max(0, range.end - range.start + 1);
+}
+
+/** "3 verses selected" — the count the reader sees, in plain words. */
+export function bibleRangeLabel(range: BibleRange | null): string {
+  const count = bibleRangeCount(range);
+  if (!count) return 'No verses selected';
+  return `${count} verse${count === 1 ? '' : 's'} selected`;
+}
+
+/** "John 3:16" for one verse, "John 3:16-18" for a passage. */
+export function getBibleRangeReference(bookId: string, chapter: number, start: number, end: number): string {
+  const book = getBibleBook(bookId);
+  const safeChapter = clampNumber(chapter, 1, book.chapters);
+  const first = Math.max(1, Math.floor(start));
+  const last = Math.max(first, Math.floor(end));
+  if (last > first) return `${book.name} ${safeChapter}:${first}-${last}`;
+  return `${book.name} ${safeChapter}:${first}`;
+}
+
+/** The verses of the page that fall inside the highlight, in reading order. */
+export function versesInBibleRange(verses: BibleVerseText[], range: BibleRange | null): BibleVerseText[] {
+  if (!range) return [];
+  return verses
+    .filter((row) => isVerseHighlighted(range, row.verse) && String(row.text || '').trim())
+    .sort((a, b) => a.verse - b.verse);
+}
+
+/**
+ * The words of a highlighted passage, ready to read in a chat card.
+ *
+ * One verse is quoted plainly, exactly as a single verse has always been
+ * shared. Two or more carry their verse numbers, one verse to a line, so a
+ * reader can see where each one starts.
+ */
+export function joinBibleVerses(verses: BibleVerseText[]): string {
+  const rows = verses.filter((row) => String(row.text || '').trim());
+  if (!rows.length) return '';
+  if (rows.length === 1) return rows[0].text.trim();
+  return rows.map((row) => `${row.verse}. ${row.text.trim()}`).join('\n');
+}
+
+/**
+ * The scripture card that goes into a chat room. Shaped to be a SharedRef
+ * (lib/chatService.ts) without this file having to know about chat at all.
+ *
+ * The copyright line the Bible library returns is carried through untouched.
+ * It is a licence condition for the NLT and the AMP, so nothing here may drop
+ * it and nothing here may invent one when the library did not send one.
+ */
+export type ScriptureShareCard = {
+  kind: 'scripture';
+  title: string;
+  scripture: {
+    bookId: string;
+    chapter: number;
+    verse: number;
+    version: BibleVersion;
+    text: string;
+    copyright?: string;
+  };
+};
+
+export function buildScriptureShare(input: {
+  version: BibleVersion;
+  bookId: string;
+  chapter: number;
+  verses: BibleVerseText[];
+  copyright?: string;
+}): ScriptureShareCard | null {
+  const rows = input.verses.filter((row) => String(row.text || '').trim()).sort((a, b) => a.verse - b.verse);
+  const text = joinBibleVerses(rows);
+  if (!text) return null;
+  const start = rows[0].verse;
+  const end = rows[rows.length - 1].verse;
+  const reference = getBibleRangeReference(input.bookId, input.chapter, start, end);
+  const book = getBibleBook(input.bookId);
+  return {
+    kind: 'scripture',
+    title: `${reference} (${input.version})`,
+    scripture: {
+      bookId: book.id,
+      chapter: clampNumber(input.chapter, 1, book.chapters),
+      /* The first verse of the passage: tapping the card opens the Bible here. */
+      verse: start,
+      version: input.version,
+      text,
+      copyright: input.copyright,
+    },
+  };
+}
+
 export async function getBibleVerseNumbers(version: BibleVersion, selection: BibleSelection): Promise<number[]> {
   const normalized = normalizeBibleSelection(selection);
   const apiKey = publicEnv('EXPO_PUBLIC_BIBLE_API_KEY');

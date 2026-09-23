@@ -66,8 +66,11 @@ export default function BookHomeScreen() {
     : 'Start reading';
 
   const open = useMemo(
-    () => (chapterId?: string, from?: 'start') => {
-      router.push({ pathname: '/book/read', params: { chapter: chapterId ?? '', from: from ?? '' } } as never);
+    () => (chapterId?: string, from?: 'start', listen?: boolean) => {
+      router.push({
+        pathname: '/book/read',
+        params: { chapter: chapterId ?? '', from: from ?? '', listen: listen ? '1' : '' },
+      } as never);
     },
     [],
   );
@@ -117,6 +120,25 @@ export default function BookHomeScreen() {
                 <Ionicons name={continueChapter ? 'bookmark' : 'book'} size={20} color={theme.colors.textOnAccent} />
                 <Text style={styles.primaryText}>{primaryLabel}</Text>
               </Pressable>
+              {/* The owner's TestFlight 36 note: "We should add audio feature to
+                  the book, to read it." This opens the reader with the Listen
+                  choices already showing — the same four voices, and the same
+                  place in the book, as the headphones button inside the reader. */}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={
+                  continueChapter
+                    ? `Listen to this book, carrying on from ${continueChapter.label}`
+                    : 'Listen to this book, from the beginning'
+                }
+                accessibilityHint="Opens the voice and speed choices"
+                onPress={() => open(continueChapter?.id ?? book.chapters[0].id, undefined, true)}
+                style={({ pressed }) => [styles.listen, pressed && styles.pressed]}
+              >
+                <Ionicons name="headset-outline" size={20} color={theme.colors.accent} />
+                <Text style={styles.listenText}>Listen to this book</Text>
+              </Pressable>
+
               {continueChapter ? (
                 <>
                   <Text style={styles.meta}>{`${continueChapter.title} · about ${percentLabel(overall)} of the book read`}</Text>
@@ -211,6 +233,21 @@ const useStyles = createThemedStyles((t: AppTheme) =>
       backgroundColor: t.colors.accentSolid,
     },
     primaryText: { flexShrink: 1, fontSize: 17, fontWeight: '700', color: t.colors.textOnAccent, textAlign: 'center' },
+    listen: {
+      marginTop: 10,
+      minHeight: 52,
+      alignSelf: 'stretch',
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 10,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: t.radius.lg,
+      borderWidth: 1,
+      borderColor: t.colors.borderStrong,
+    },
+    listenText: { flexShrink: 1, fontSize: 16, fontWeight: '700', color: t.colors.textPrimary, textAlign: 'center' },
     meta: { marginTop: 10, fontSize: 14, lineHeight: 20, color: t.colors.textSecondary, textAlign: 'center' },
     secondary: {
       marginTop: 10,

@@ -1,16 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import * as Speech from 'expo-speech';
 import { setStatusBarStyle } from 'expo-status-bar';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   AppState,
   GestureResponderEvent,
   LayoutChangeEvent,
   Modal,
   NativeScrollEvent,
   NativeSyntheticEvent,
+  Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -18,6 +22,38 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  BOOK_SLUG,
+  DEFAULT_LISTEN_SETTINGS,
+  LISTEN_SPEEDS,
+  ListenLibrary,
+  PHONE_VOICE_NOTE,
+  PhoneVoice,
+  RECORDED_VOICE_NOTE,
+  RankedPhoneVoices,
+  SPEECH_START_FAILED_NOTICE,
+  SPEECH_START_TIMEOUT_MS,
+  SpeechUnit,
+  TITLE_UNIT,
+  VoiceChoice,
+  betterVoicesNote,
+  chapterSpeech,
+  listenResume,
+  listenSummary,
+  loadListenLibrary,
+  loadListenSettings,
+  pickVoice,
+  rankPhoneVoices,
+  resolveVoiceChoices,
+  saveListenSettings,
+  secondsRemaining,
+  speechPauseStrategy,
+  speedLabel,
+  spokenSpeed,
+  timeLeftLabel,
+  unitAtFraction,
+} from '../../lib/bookAudio';
+import { useNowPlaying } from '../../lib/nowPlaying';
 import {
   BookBlock,
   DEFAULT_READER_SETTINGS,
@@ -56,9 +92,37 @@ import { useAppTheme } from '../../lib/themePreference';
  * page count and percentage are always shown. Past the end of a chapter the
  * next page is the next chapter.
  */
+/**
+ * LISTEN MODE (the owner's TestFlight 36 note: "We should add audio feature to
+ * the book, to read it").
+ *
+ * The rules and the four voices live in lib/bookAudio.ts, where they can be
+ * tested on a laptop. This file holds the buttons and the two engines:
+ *
+ *   phone     expo-speech reads the very same JSON the page is drawn from, so
+ *             the paragraph being spoken is the paragraph being highlighted.
+ *             Free, offline, and working on the day this shipped.
+ *   recorded  a file from public.book_audio, handed to the app's one player
+ *             (lib/nowPlaying.tsx) so it keeps playing with the screen off and
+ *             takes the lock screen, exactly like a sermon. No file exists yet;
+ *             the moment a row appears the picker uses it with no new build.
+ *
+ * Listen and the music player never talk over each other (DO-NOT-BREAK #36 is
+ * the same promise for voice notes, and this follows that file exactly):
+ * starting Listen pauses whatever the player was playing, and a song or sermon
+ * starting again stops Listen.
+ */
+type ListenPhase = 'off' | 'loading' | 'playing' | 'paused';
+type ListenEngine = 'phone' | 'recorded';
+
+const EMPTY_PHONE_VOICES: RankedPhoneVoices = { male: [], female: [], unknown: [], unknownGender: 0 };
+
+/** How close to the top of the page the paragraph being read is put. */
+const LISTEN_SCROLL_MARGIN = 28;
+
 export default function BookReaderScreen() {
   const book = gospelOfSalvation;
-  const params = useLocalSearchParams<{ chapter?: string; from?: string }>();
+  const params = useLocalSearchParams<{ chapter?: string; from?: string; listen?: string }>();
   const { theme: appTheme, dark: appDark } = useAppTheme();
   const insets = useSafeAreaInsets();
   const { width, fontScale } = useWindowDimensions();
@@ -96,6 +160,26 @@ export default function BookReaderScreen() {
   const readyRef = useRef(false);
   /** Set when a button inside the page took the touch, so it is not also read as a page tap. */
   const buttonTouch = useRef(false);
+  /** The chapter showing and the page's top padding, readable from a callback made earlier. */
+  const indexRef = useRef(index);
+  const topPadRef = useRef(0);
+
+  /* ------------------------------- Listen -------------------------------- */
+
+  const nowPlaying = useNowPlaying();
+  const [listenOpen, setListenOpen] = useState(false);
+  const [listenPhase, setListenPhase] = useState<ListenPhase>('off');
+  const [listenEngine, setListenEngine] = useState<ListenEngine>('phone');
+  const [unitIndex, setUnitIndex] = useState(0);
+  const [library, setLibrary] = useState<ListenLibrary | null>(null);
+  const [libraryProblem, setLibraryProblem] = useState(false);
+  const [phoneVoices, setPhoneVoices] = useState<RankedPhoneVoices>(EMPTY_PHONE_VOICES);
+  const [chosenVoiceId, setChosenVoiceId] = useState<string | null>(null);
+  const [speed, setSpeed] = useState<number>(DEFAULT_LISTEN_SETTINGS.speed);
+  const [listenNotice, setListenNotice] = useState<string | undefined>(undefined);
+  const [libraryRefreshing, setLibraryRefreshing] = useState(false);
+  /** Where each paragraph sits inside the page, so the one being read can be brought into view. */
+  const blockTops = useRef<Map<number, number>>(new Map());
 
   const chapter = book.chapters[index];
   const palette = useMemo(() => readerPalette(settings.look, appTheme), [settings.look, appTheme]);
@@ -198,6 +282,430 @@ export default function BookReaderScreen() {
     });
   }
 
+  /* --------------------------- Listen: the parts ------------------------- */
+
+  // The paragraphs of THIS chapter, exactly as the page draws them.
+  const units = useMemo<SpeechUnit[]>(() => chapterSpeech(chapter), [chapter]);
+  const choices = useMemo<VoiceChoice[]>(
+    () =>
+      resolveVoiceChoices({
+        voices: library?.voices ?? [],
+        tracks: library?.tracks ?? [],
+        phone: phoneVoices,
+        chapterId: chapter.id,
+      }),
+    [library, phoneVoices, chapter.id],
+  );
+  const chosen = useMemo(() => pickVoice(choices, chosenVoiceId), [choices, chosenVoiceId]);
+  const summary = useMemo(() => listenSummary(choices), [choices]);
+  const listening = listenPhase !== 'off';
+  /** The speed the strip's chip moves to next, so its label can say so. */
+  const nextSpeed = LISTEN_SPEEDS[(LISTEN_SPEEDS.indexOf(speed as (typeof LISTEN_SPEEDS)[number]) + 1) % LISTEN_SPEEDS.length];
+  const unit = units[unitIndex];
+  const speakingBlock = listening && unit ? unit.blockIndex : null;
+  /**
+   * Where pressing the headphones button will really start, and whether it is
+   * allowed to say "Continue listening". One answer, used by the label and by
+   * the button, so the words and the behaviour can never drift apart.
+   */
+  const resume = useMemo(
+    () => listenResume({ stoppedAt: unitIndex, pageUnit: unitAtFraction(units, fraction) }),
+    [unitIndex, units, fraction],
+  );
+
+  // Read with the CURRENT voice and speed from inside a callback that was
+  // created several paragraphs ago.
+  const engineRefs = useRef({ units, chosen, speed });
+  engineRefs.current = { units, chosen, speed };
+  /**
+   * Bumped every time speaking is stopped or restarted. Every callback carries
+   * the number it was started with, so a finished-or-cancelled utterance from a
+   * moment ago can never advance the paragraph that is being read now.
+   */
+  const speechRun = useRef(0);
+  /** Set when the chapter changed by itself at the end of a chapter, so reading carries on. */
+  const continueIntoChapter = useRef(false);
+  /** Which engine is running, readable from a cleanup that must have no deps. */
+  const listenEngineRef = useRef(listenEngine);
+  listenEngineRef.current = listenEngine;
+
+  /* --------------------------- Listen: loading --------------------------- */
+
+  const aliveRef = useRef(true);
+  useEffect(
+    () => () => {
+      aliveRef.current = false;
+    },
+    [],
+  );
+
+  /**
+   * Read the voices and every recorded chapter. A leader can add a recording
+   * at any moment, so this runs again every time the Listen sheet is opened
+   * and whenever the sheet is pulled down — a member never has to close the
+   * book to see a chapter that has just been recorded.
+   */
+  const refreshLibrary = useCallback(async () => {
+    setLibraryRefreshing(true);
+    try {
+      const loaded = await loadListenLibrary(BOOK_SLUG);
+      if (!aliveRef.current) return;
+      setLibrary(loaded);
+      setLibraryProblem(false);
+    } catch {
+      if (aliveRef.current) setLibraryProblem(true);
+    } finally {
+      if (aliveRef.current) setLibraryRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (listenOpen) refreshLibrary();
+  }, [listenOpen, refreshLibrary]);
+
+  useEffect(() => {
+    let active = true;
+    refreshLibrary();
+    loadListenSettings()
+      .then((saved) => {
+        if (!active) return;
+        setChosenVoiceId(saved.voiceId);
+        setSpeed(saved.speed);
+      })
+      .catch((error) => {
+        console.warn('Listen settings could not be read:', error instanceof Error ? error.message : 'unknown problem');
+      });
+    // The phone's own voices. On web the list arrives only after the browser
+    // has loaded them, and an empty list is a real answer, not a failure.
+    Speech.getAvailableVoicesAsync()
+      .then((voices) => {
+        if (!active) return;
+        setPhoneVoices(
+          rankPhoneVoices(
+            (voices || []).map(
+              (v): PhoneVoice => ({
+                identifier: v.identifier,
+                name: v.name,
+                language: v.language,
+                enhanced: String(v.quality) === 'Enhanced',
+              }),
+            ),
+          ),
+        );
+      })
+      .catch((error) => {
+        console.warn('The phone would not list its voices:', error instanceof Error ? error.message : 'unknown problem');
+        if (active) setPhoneVoices(EMPTY_PHONE_VOICES);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Open straight into the Listen sheet when the book's home asked for it.
+  useEffect(() => {
+    if (params.listen === '1') setListenOpen(true);
+  }, [params.listen]);
+
+  /* --------------------------- Listen: speaking -------------------------- */
+
+  /** Cleared by onStart. If it ever fires, the phone never began (see bookAudio). */
+  const startWatchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const stopSpeaking = useCallback(() => {
+    speechRun.current += 1;
+    if (startWatchdog.current) {
+      clearTimeout(startWatchdog.current);
+      startWatchdog.current = null;
+    }
+    Speech.stop().catch(() => undefined);
+  }, []);
+
+  const stopListening = useCallback(() => {
+    stopSpeaking();
+    setListenPhase('off');
+  }, [stopSpeaking]);
+
+  /**
+   * Read from this paragraph on. Every chunk is spoken on its own and the next
+   * one is asked for when it finishes, so the highlight can never run ahead of
+   * the voice.
+   */
+  const speakFrom = useCallback(
+    (startIndex: number) => {
+      stopSpeaking();
+      const run = speechRun.current;
+      const voice = engineRefs.current.chosen;
+      if (!voice || voice.source.kind !== 'phone') return;
+      setListenEngine('phone');
+      setListenPhase('playing');
+      setUnitIndex(startIndex);
+
+      const say = (index: number, chunk: number) => {
+        if (run !== speechRun.current) return;
+        const list = engineRefs.current.units;
+        const current = list[index];
+        if (!current) {
+          // The end of the chapter. A book carries on into the next one.
+          setListenPhase('off');
+          const next = indexRef.current + 1;
+          if (next < book.chapters.length) {
+            continueIntoChapter.current = true;
+            goToChapter(next, 0);
+          } else {
+            AccessibilityInfo.announceForAccessibility('You have reached the end of the book.');
+          }
+          return;
+        }
+        const text = current.chunks[chunk];
+        if (!text) {
+          setUnitIndex(index + 1);
+          say(index + 1, 0);
+          return;
+        }
+        if (chunk === 0) setUnitIndex(index);
+        const phone = engineRefs.current.chosen;
+        if (startWatchdog.current) clearTimeout(startWatchdog.current);
+        startWatchdog.current = setTimeout(() => {
+          if (run !== speechRun.current) return;
+          speechRun.current += 1;
+          Speech.stop().catch(() => undefined);
+          setListenPhase('off');
+          setListenNotice(SPEECH_START_FAILED_NOTICE);
+        }, SPEECH_START_TIMEOUT_MS);
+        Speech.speak(text, {
+          voice: phone && phone.source.kind === 'phone' ? phone.source.phone.identifier : undefined,
+          language: phone && phone.source.kind === 'phone' ? phone.source.phone.language : 'en-US',
+          rate: engineRefs.current.speed,
+          // iOS only. Left to the system on purpose: the app's own audio
+          // session is tuned for background sermons and music (DO-NOT-BREAK
+          // "Media lane"), and a reader must not be able to change it.
+          ...(Platform.OS === 'ios' ? { useApplicationAudioSession: false } : null),
+          onStart: () => {
+            if (startWatchdog.current) {
+              clearTimeout(startWatchdog.current);
+              startWatchdog.current = null;
+            }
+          },
+          onDone: () => {
+            if (run !== speechRun.current) return;
+            say(index, chunk + 1);
+          },
+          // Android only: iOS never sends this (expo-speech build/Speech.js),
+          // which is why the watchdog above exists as well.
+          onError: () => {
+            if (run !== speechRun.current) return;
+            if (startWatchdog.current) {
+              clearTimeout(startWatchdog.current);
+              startWatchdog.current = null;
+            }
+            setListenPhase('off');
+            setListenNotice(SPEECH_START_FAILED_NOTICE);
+          },
+        });
+      };
+
+      say(startIndex, 0);
+    },
+    [book.chapters.length, stopSpeaking],
+  );
+
+  /** The recorded file goes to the app's one player, which owns the lock screen. */
+  const playRecorded = useCallback(
+    (choice: VoiceChoice) => {
+      if (choice.source.kind !== 'recorded') return;
+      stopSpeaking();
+      setListenEngine('recorded');
+      setListenPhase('playing');
+      nowPlaying.play({
+        title: `${book.title} — ${chapter.label}`,
+        speaker: choice.voice.displayName,
+        url: choice.source.url,
+        type: 'audio',
+        // A book chapter is a teaching, not a song: shared to a group it must
+        // not turn up labelled "Song" (lib/nowPlaying.tsx `kind`).
+        kind: 'sermon',
+      });
+    },
+    [book.title, chapter.label, nowPlaying, stopSpeaking],
+  );
+
+  const startListening = useCallback(
+    (choice: VoiceChoice | null, startIndex: number) => {
+      setListenNotice(undefined);
+      if (!choice || !choice.usable) return;
+      if (choice.source.kind === 'recorded') {
+        playRecorded(choice);
+        return;
+      }
+      // Nothing may talk over the reading: the sermon or song steps aside.
+      if (nowPlaying.playing) nowPlaying.toggle();
+      speakFrom(startIndex);
+    },
+    [nowPlaying, playRecorded, speakFrom],
+  );
+
+  const pauseStrategy = speechPauseStrategy(Platform.OS);
+
+  const toggleListening = useCallback(() => {
+    if (listenEngine === 'recorded') {
+      nowPlaying.toggle();
+      setListenPhase((phase) => (phase === 'playing' ? 'paused' : 'playing'));
+      return;
+    }
+    if (listenPhase === 'playing') {
+      if (pauseStrategy === 'pause-resume') {
+        Speech.pause().catch(() => undefined);
+      } else {
+        // Android has no pause (expo-speech marks pause/resume ios and web
+        // only), so it stops and starts this paragraph again on Play.
+        stopSpeaking();
+      }
+      setListenPhase('paused');
+      return;
+    }
+    if (listenPhase === 'paused') {
+      if (pauseStrategy === 'pause-resume') {
+        Speech.resume().catch(() => undefined);
+        setListenPhase('playing');
+      } else {
+        speakFrom(unitIndex);
+      }
+      return;
+    }
+    // Switched on again: carry on from the paragraph it stopped on if the page
+    // is still there, otherwise from the paragraph in view (see listenResume).
+    startListening(chosen, resume.index);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chosen, listenEngine, listenPhase, nowPlaying, pauseStrategy, resume.index, speakFrom, startListening, stopSpeaking, unitIndex]);
+
+  const stepParagraph = useCallback(
+    (direction: 1 | -1) => {
+      if (listenEngine === 'recorded') return;
+      if (direction > 0 && unitIndex >= units.length - 1) {
+        // Past the last paragraph is the next chapter, exactly as it is when
+        // the voice gets there on its own.
+        speakFrom(units.length);
+        return;
+      }
+      const next = Math.min(units.length - 1, Math.max(0, unitIndex + direction));
+      if (next === unitIndex) return;
+      speakFrom(next);
+    },
+    [listenEngine, speakFrom, unitIndex, units.length],
+  );
+
+  const changeSpeed = useCallback(
+    (next: number) => {
+      setSpeed(next);
+      saveListenSettings({ voiceId: chosenVoiceId, speed: next }).catch(() => undefined);
+      AccessibilityInfo.announceForAccessibility(spokenSpeed(next));
+      // expo-speech fixes the rate when an utterance starts, so the new speed
+      // begins at the top of this paragraph rather than halfway through it.
+      if (listenEngine === 'phone' && listenPhase === 'playing') {
+        engineRefs.current = { ...engineRefs.current, speed: next };
+        speakFrom(unitIndex);
+      }
+    },
+    [chosenVoiceId, listenEngine, listenPhase, speakFrom, unitIndex],
+  );
+
+  const chooseVoice = useCallback(
+    (choice: VoiceChoice) => {
+      if (!choice.usable) return;
+      // A "that voice would not start" line must not hang over the voice the
+      // reader has just moved to instead.
+      setListenNotice(undefined);
+      setChosenVoiceId(choice.voice.id);
+      saveListenSettings({ voiceId: choice.voice.id, speed }).catch(() => undefined);
+      engineRefs.current = { ...engineRefs.current, chosen: choice };
+      if (listening) {
+        if (listenEngine === 'recorded') nowPlaying.stop();
+        startListening(choice, choice.source.kind === 'recorded' ? 0 : unitIndex);
+      }
+    },
+    [listenEngine, listening, nowPlaying, speed, startListening, unitIndex],
+  );
+
+  /* ------------------- Listen: getting along with the player ------------- */
+
+  // A song or a sermon starting again stops the reading. This mirrors
+  // components/VoiceNotePlayer.tsx, which makes the same promise for voice
+  // notes (DO-NOT-BREAK #36).
+  const playerWasPlaying = useRef(nowPlaying.playing);
+  useEffect(() => {
+    const started = nowPlaying.playing && !playerWasPlaying.current;
+    playerWasPlaying.current = nowPlaying.playing;
+    if (started && listenEngine === 'phone' && listenPhase !== 'off') stopListening();
+  }, [listenEngine, listenPhase, nowPlaying.playing, stopListening]);
+
+  // While a recording is the engine, the app's player IS Listen. If something
+  // else takes the player over, Listen is no longer the thing playing.
+  const recordedUrl = chosen && chosen.source.kind === 'recorded' ? chosen.source.url : null;
+  useEffect(() => {
+    if (listenEngine !== 'recorded' || listenPhase === 'off') return;
+    if (!nowPlaying.item || nowPlaying.item.url !== recordedUrl) {
+      setListenPhase('off');
+      return;
+    }
+    setListenPhase(nowPlaying.playing ? 'playing' : 'paused');
+  }, [listenEngine, listenPhase, nowPlaying.item, nowPlaying.playing, recordedUrl]);
+
+  // Leaving the book stops the voice. Nothing should still be reading aloud
+  // from a screen that is no longer there.
+  useEffect(
+    () => () => {
+      speechRun.current += 1;
+      if (startWatchdog.current) clearTimeout(startWatchdog.current);
+      Speech.stop().catch(() => undefined);
+    },
+    [],
+  );
+
+  /* ------------------ Listen: keeping the page with the voice ------------ */
+
+  // The chapter changed while Listen was on: read the new chapter from the top.
+  const spokenChapter = useRef(chapter.id);
+  useEffect(() => {
+    if (spokenChapter.current === chapter.id) return;
+    spokenChapter.current = chapter.id;
+    const carryOn = continueIntoChapter.current;
+    continueIntoChapter.current = false;
+    // A different chapter has a different first paragraph. Without this the
+    // headphones button on a chapter nobody had heard a word of still offered
+    // to "Continue listening" (listenResume in lib/bookAudio.ts).
+    setUnitIndex(0);
+    if (listenEngine === 'recorded') {
+      // A recording is one file per chapter, so a new chapter needs its own.
+      if (listenPhase !== 'off') {
+        nowPlaying.stop();
+        setListenPhase('off');
+      }
+      return;
+    }
+    if (carryOn || listenPhase !== 'off') speakFrom(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chapter.id]);
+
+  function onBlockLayout(blockIndex: number, y: number) {
+    blockTops.current.set(blockIndex, y);
+  }
+
+  // Bring the paragraph being read into view, unless the reader is scrolling
+  // by hand at that moment.
+  useEffect(() => {
+    if (listenPhase !== 'playing' || listenEngine !== 'phone') return;
+    if (dragging.current) return;
+    if (speakingBlock === null) return;
+    const y = speakingBlock === TITLE_UNIT ? 0 : blockTops.current.get(speakingBlock);
+    if (y === undefined) return;
+    const target = Math.min(maxScroll, Math.max(0, topPadRef.current + y - topCover - LISTEN_SCROLL_MARGIN));
+    turnTarget.current = null;
+    pendingRestore.current = null;
+    scrollRef.current?.scrollTo({ y: target, animated: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speakingBlock, listenPhase, listenEngine]);
+
   /* ------------------------- Status bar and a11y ------------------------- */
 
   // The page may be Sepia or Light while the app is dark (or the other way
@@ -209,6 +717,29 @@ export default function BookReaderScreen() {
       setStatusBarStyle(palette.dark ? 'light' : 'dark');
       return () => setStatusBarStyle(appDark ? 'light' : 'dark');
     }, [palette.dark, appDark]),
+  );
+
+  // Leaving the book stops the phone's voice. The unmount cleanup below is not
+  // enough: a pushed screen (a tapped notification opening a chat room, a
+  // teaching, a link) leaves this reader MOUNTED but off-screen, and the book
+  // carried on being read aloud over the top of it with its pause button two
+  // screens away. A recording is a different thing and is left alone — it is
+  // playing through the app's one player, which has a mini bar and the lock
+  // screen, and is meant to keep going (DO-NOT-BREAK "Media lane").
+  useFocusEffect(
+    useCallback(
+      () => () => {
+        if (listenEngineRef.current === 'recorded') return;
+        speechRun.current += 1;
+        if (startWatchdog.current) {
+          clearTimeout(startWatchdog.current);
+          startWatchdog.current = null;
+        }
+        Speech.stop().catch(() => undefined);
+        setListenPhase((phase) => (phase === 'off' ? phase : 'off'));
+      },
+      [],
+    ),
   );
 
   useEffect(() => {
@@ -226,8 +757,14 @@ export default function BookReaderScreen() {
   }, []);
 
   // With VoiceOver or TalkBack on, the controls never hide: a tap is how a
-  // screen-reader user moves focus, not how they turn a page.
-  const showChrome = chromeVisible || screenReader;
+  // screen-reader user moves focus, not how they turn a page. While the book
+  // is being read aloud they never hide either — a tap must not take away the
+  // pause button of something that is making a noise.
+  // ...and they stay up while there is something to say: the "your phone did
+  // not start reading" line is drawn in this chrome, and `listening` has just
+  // gone false by the time it appears. Without this it flashed away unread on
+  // any reader who had tapped the page to put the controls out of the way.
+  const showChrome = chromeVisible || screenReader || listening || Boolean(listenNotice);
 
   /* ------------------------------ Navigation ----------------------------- */
 
@@ -236,6 +773,10 @@ export default function BookReaderScreen() {
     persist();
     pendingRestore.current = land;
     turnTarget.current = null;
+    // Where the paragraphs of the chapter being left sat means nothing now.
+    // Cleared here, before the new chapter is drawn, so it can never wipe the
+    // positions the new page has just measured.
+    blockTops.current = new Map();
     setContentHeight(0);
     setScrollY(0);
     setIndex(nextIndex);
@@ -245,7 +786,13 @@ export default function BookReaderScreen() {
 
   function turnPage(direction: 1 | -1, fromButton = false) {
     // Like a Kindle, turning the page by tap or swipe puts the controls away.
-    if (!fromButton) setChromeVisible(false);
+    // Carrying on reading is an answer to "your phone did not start reading",
+    // so the line goes with them — otherwise it would hold the controls open
+    // for the rest of the book (see showChrome).
+    if (!fromButton) {
+      setChromeVisible(false);
+      setListenNotice(undefined);
+    }
     // With the controls showing they cover the top and bottom of the page, so
     // a button turn moves a little less and no line is hidden under them.
     const step = fromButton ? buttonStep : pageStep;
@@ -357,7 +904,10 @@ export default function BookReaderScreen() {
     if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 350 && !dragging.current) {
       if (pageX < width * 0.28) turnPage(-1);
       else if (pageX > width * 0.72) turnPage(1);
-      else setChromeVisible((v) => !v);
+      else {
+        setChromeVisible((v) => !v);
+        setListenNotice(undefined);
+      }
     }
   }
 
@@ -374,6 +924,8 @@ export default function BookReaderScreen() {
   // ever under a control bar, whatever size the bars are drawn at.
   const topPad = Math.max(56, topCover) + 12;
   const bottomPad = Math.max(160, bottomCover) + 24;
+  indexRef.current = index;
+  topPadRef.current = topPad;
 
   function onEscape() {
     // The VoiceOver "scrub" gesture: close the contents first, then the book.
@@ -445,7 +997,16 @@ export default function BookReaderScreen() {
           <Text style={styles.chapterTitle} accessibilityRole="header">{chapter.title}</Text>
           <View style={styles.titleRule} />
           {chapter.blocks.map((block, i) => (
-            <Block key={`${chapter.id}-${i}`} block={block} styles={styles} />
+            // The wrapper is ALWAYS drawn with the same padding and border
+            // width; only the colours change. A highlight that added space
+            // would re-flow the page under the reader's eye every paragraph.
+            <View
+              key={`${chapter.id}-${i}`}
+              onLayout={(event) => onBlockLayout(i, event.nativeEvent.layout.y)}
+              style={[styles.blockWrap, speakingBlock === i && styles.blockWrapSpoken]}
+            >
+              <Block block={block} styles={styles} />
+            </View>
           ))}
 
           <View style={styles.chapterEnd}>
@@ -515,6 +1076,97 @@ export default function BookReaderScreen() {
               </Pressable>
             </View>
 
+            {/* Listen. One row when it is off, the controls when it is on. */}
+            {listening ? (
+              <View style={styles.listenStrip}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Back one paragraph"
+                  accessibilityState={{ disabled: listenEngine === 'recorded' || unitIndex <= 0 }}
+                  disabled={listenEngine === 'recorded' || unitIndex <= 0}
+                  onPress={() => stepParagraph(-1)}
+                  style={[styles.chromeButton, (listenEngine === 'recorded' || unitIndex <= 0) && styles.disabled]}
+                >
+                  <Ionicons name="play-skip-back" size={22} color={palette.text} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={listenPhase === 'playing' ? 'Pause reading aloud' : 'Carry on reading aloud'}
+                  onPress={toggleListening}
+                  style={({ pressed }) => [styles.listenPlay, pressed && styles.pressed]}
+                >
+                  <Ionicons name={listenPhase === 'playing' ? 'pause' : 'play'} size={22} color={palette.onAccent} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Forward one paragraph"
+                  accessibilityState={{ disabled: listenEngine === 'recorded' }}
+                  disabled={listenEngine === 'recorded'}
+                  onPress={() => stepParagraph(1)}
+                  style={[styles.chromeButton, listenEngine === 'recorded' && styles.disabled]}
+                >
+                  <Ionicons name="play-skip-forward" size={22} color={palette.text} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`${spokenSpeed(speed)}. Changes to ${spokenSpeed(nextSpeed)}`}
+                  accessibilityState={{ disabled: listenEngine === 'recorded' }}
+                  disabled={listenEngine === 'recorded'}
+                  onPress={() => changeSpeed(nextSpeed)}
+                  style={[styles.speedChip, listenEngine === 'recorded' && styles.disabled]}
+                >
+                  <Text style={styles.speedChipText}>{speedLabel(speed)}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Voice and speed"
+                  onPress={() => setListenOpen(true)}
+                  style={styles.chromeButton}
+                >
+                  <Ionicons name="options-outline" size={22} color={palette.text} />
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Stop reading aloud"
+                  onPress={() => {
+                    if (listenEngine === 'recorded') nowPlaying.stop();
+                    stopListening();
+                  }}
+                  style={styles.chromeButton}
+                >
+                  <Ionicons name="close" size={22} color={palette.text} />
+                </Pressable>
+              </View>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={
+                  resume.continuing
+                    ? `Continue listening to ${chapter.label}, ${chapter.title}`
+                    : `Listen to ${chapter.label}, ${chapter.title}`
+                }
+                accessibilityHint="Opens the voice and speed choices"
+                onPress={() => setListenOpen(true)}
+                style={({ pressed }) => [styles.listenButton, pressed && styles.pressed]}
+              >
+                <Ionicons name="headset-outline" size={20} color={palette.accent} />
+                <Text style={styles.listenButtonText}>
+                  {resume.continuing ? 'Continue listening' : 'Listen to this chapter'}
+                </Text>
+              </Pressable>
+            )}
+            {listening && listenEngine === 'phone' ? (
+              <Text style={styles.listenLine} accessibilityLiveRegion="polite">
+                {`${chosen ? chosen.title : 'Reading aloud'} · ${timeLeftLabel(secondsRemaining(units, unitIndex, speed))}`}
+              </Text>
+            ) : null}
+            {listening && listenEngine === 'recorded' ? (
+              <Text style={styles.listenLine}>{RECORDED_VOICE_NOTE}</Text>
+            ) : null}
+            {listenNotice ? (
+              <Text style={styles.listenLine} accessibilityLiveRegion="polite">{listenNotice}</Text>
+            ) : null}
+
             <View style={styles.controlsRow}>
               <Text style={styles.controlsLabel}>Text size</Text>
               <Pressable
@@ -558,6 +1210,139 @@ export default function BookReaderScreen() {
           </View>
         </>
       ) : null}
+
+      <Modal visible={listenOpen} animationType="slide" transparent onRequestClose={() => setListenOpen(false)}>
+        <View style={styles.sheetBackdrop}>
+          <Pressable
+            style={styles.sheetDismiss}
+            accessibilityRole="button"
+            accessibilityLabel="Close the Listen choices"
+            onPress={() => setListenOpen(false)}
+          />
+          <View style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]} accessibilityViewIsModal>
+            <View style={styles.sheetHeader}>
+              <Text style={styles.sheetTitle} accessibilityRole="header">Listen</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close the Listen choices"
+                onPress={() => setListenOpen(false)}
+                style={styles.chromeButton}
+              >
+                <Ionicons name="close" size={24} color={palette.text} />
+              </Pressable>
+            </View>
+            <ScrollView
+              contentContainerStyle={styles.listenSheetBody}
+              refreshControl={
+                <RefreshControl
+                  refreshing={libraryRefreshing}
+                  onRefresh={refreshLibrary}
+                  tintColor={palette.accent}
+                  colors={[palette.accent]}
+                  title="Checking for new recordings"
+                  titleColor={palette.textSecondary}
+                />
+              }
+            >
+              <Text style={styles.listenChapterLine}>{`${chapter.label} · ${chapter.title}`}</Text>
+
+              {library === null && !libraryProblem ? (
+                <View style={styles.listenLoading}>
+                  <ActivityIndicator color={palette.accent} accessibilityLabel="Finding the voices" />
+                  <Text style={styles.listenLine}>Finding the voices…</Text>
+                </View>
+              ) : null}
+
+              {libraryProblem ? (
+                <Text style={styles.listenLine}>
+                  We could not reach the ministry&apos;s list of voices. Your phone&apos;s own voice can still read the book.
+                </Text>
+              ) : null}
+
+              {library ? (
+                <View accessibilityRole="radiogroup" accessibilityLabel="Who reads the book">
+                  {choices.map((choice) => {
+                    const selected = chosen?.voice.id === choice.voice.id;
+                    return (
+                      <Pressable
+                        key={choice.voice.id}
+                        accessibilityRole="radio"
+                        accessibilityLabel={`${choice.title}. ${choice.detail}`}
+                        accessibilityState={{ selected, checked: selected, disabled: !choice.usable }}
+                        disabled={!choice.usable}
+                        onPress={() => chooseVoice(choice)}
+                        style={({ pressed }) => [
+                          styles.voiceRow,
+                          selected && styles.voiceRowOn,
+                          !choice.usable && styles.disabled,
+                          pressed && styles.pressed,
+                        ]}
+                      >
+                        <Ionicons
+                          name={selected ? 'radio-button-on' : choice.usable ? 'radio-button-off' : 'time-outline'}
+                          size={22}
+                          color={selected ? palette.accent : palette.textSecondary}
+                        />
+                        <View style={styles.voiceRowText}>
+                          <Text style={styles.voiceRowTitle}>{choice.title}</Text>
+                          <Text style={styles.voiceRowDetail}>{choice.detail}</Text>
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              ) : null}
+
+              {summary ? <Text style={styles.listenLine}>{summary}</Text> : null}
+
+              <Text style={styles.listenSectionTitle} accessibilityRole="header">Speed</Text>
+              <View style={styles.speedRow} accessibilityRole="radiogroup" accessibilityLabel="Reading speed">
+                {LISTEN_SPEEDS.map((value) => {
+                  const selected = speed === value;
+                  return (
+                    <Pressable
+                      key={value}
+                      accessibilityRole="radio"
+                      accessibilityLabel={spokenSpeed(value)}
+                      accessibilityState={{ selected, checked: selected }}
+                      onPress={() => changeSpeed(value)}
+                      style={[styles.lookChip, selected && styles.lookChipOn]}
+                    >
+                      <Text style={[styles.lookText, selected && styles.lookTextOn]}>{speedLabel(value)}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <Text style={styles.listenNote}>{PHONE_VOICE_NOTE}</Text>
+              {betterVoicesNote(Platform.OS) ? (
+                <Text style={styles.listenNote}>{betterVoicesNote(Platform.OS)}</Text>
+              ) : null}
+
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={listening ? 'Stop reading aloud' : `Start reading aloud with ${chosen ? chosen.title : 'no voice'}`}
+                accessibilityState={{ disabled: !chosen }}
+                disabled={!chosen}
+                onPress={() => {
+                  if (listening) {
+                    if (listenEngine === 'recorded') nowPlaying.stop();
+                    stopListening();
+                    return;
+                  }
+                  setListenOpen(false);
+                  setChromeVisible(true);
+                  startListening(chosen, resume.index);
+                }}
+                style={({ pressed }) => [styles.listenPrimary, !chosen && styles.disabled, pressed && styles.pressed]}
+              >
+                <Ionicons name={listening ? 'stop' : 'play'} size={20} color={palette.onAccent} />
+                <Text style={styles.listenPrimaryText}>{listening ? 'Stop reading aloud' : 'Read this chapter aloud'}</Text>
+              </Pressable>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={contentsOpen} animationType="slide" transparent onRequestClose={() => setContentsOpen(false)}>
         <View style={styles.sheetBackdrop}>
@@ -667,6 +1452,31 @@ function makeStyles(p: ReaderPalette, type: ReturnType<typeof readingType>) {
     },
     titleRule: { alignSelf: 'center', width: 56, height: 2, backgroundColor: p.accent, marginTop: 18, marginBottom: 26 },
     paragraph: { ...body, marginBottom: Math.round(type.lineHeight * 0.7) },
+    /**
+     * The band around every paragraph. It is always drawn, always the same
+     * size, and only its colours change when the voice reaches it — so the
+     * page never re-flows under the reader while it is being read aloud. The
+     * negative margins put the words back exactly where they were before
+     * Listen existed.
+     */
+    blockWrap: {
+      // border (3) + padding (9) == -margin (12) on the left, and
+      // padding (8) == -margin (8) on the right. A transparent border still
+      // takes up its width, so a left padding of a full twelve here moved
+      // every paragraph in the book 3pt right and narrowed the text column
+      // the owner already approved. Checked by qa/book-listen.test.mjs.
+      paddingLeft: 9,
+      paddingRight: 8,
+      marginLeft: -12,
+      marginRight: -8,
+      borderLeftWidth: 3,
+      borderLeftColor: 'transparent',
+      borderRadius: 8,
+    },
+    // `raised` is the opaque surface of this palette (the same one the contents
+    // sheet uses), so the words keep their proven contrast on it in all four
+    // looks — Auto light, Auto dark, Light, Sepia.
+    blockWrapSpoken: { borderLeftColor: p.accent, backgroundColor: p.raised },
     heading: {
       fontFamily: READING_FONT,
       fontSize: type.headingSize,
@@ -762,6 +1572,50 @@ function makeStyles(p: ReaderPalette, type: ReturnType<typeof readingType>) {
     progressText: { fontSize: 13, color: p.textSecondary, textAlign: 'center', marginBottom: 6 },
     track: { height: 6, borderRadius: 3, backgroundColor: p.progressTrack, overflow: 'hidden' },
     fill: { height: '100%', borderRadius: 3, backgroundColor: p.progressFill },
+    listenButton: {
+      marginTop: 8,
+      minWidth: 48,
+      minHeight: 48,
+      alignSelf: 'stretch',
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: p.border,
+    },
+    listenButtonText: { flexShrink: 1, fontSize: 16, fontWeight: '700', color: p.text, textAlign: 'center' },
+    listenStrip: {
+      marginTop: 8,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+    },
+    listenPlay: {
+      minWidth: 56,
+      minHeight: 48,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: p.accentSolid,
+    },
+    speedChip: {
+      minWidth: 52,
+      minHeight: 48,
+      paddingHorizontal: 8,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: p.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    speedChipText: { fontSize: 14, fontWeight: '700', color: p.text },
+    listenLine: { marginTop: 6, fontSize: 13, lineHeight: 19, color: p.textSecondary, textAlign: 'center', paddingHorizontal: 12 },
     controlsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, paddingTop: 6, paddingHorizontal: 4 },
     controlsLabel: { flex: 1, fontSize: 14, fontWeight: '600', color: p.textSecondary, paddingLeft: 8 },
     sizeButton: {
@@ -811,5 +1665,42 @@ function makeStyles(p: ReaderPalette, type: ReturnType<typeof readingType>) {
     sheetLabel: { fontSize: 13, fontWeight: '700', letterSpacing: 0.4, color: p.accent },
     sheetRowTitle: { marginTop: 2, fontSize: 16, lineHeight: 22, color: p.text },
     sheetHere: { fontSize: 13, fontWeight: '700', color: p.textSecondary },
+
+    listenSheetBody: { paddingHorizontal: 20, paddingTop: 4, paddingBottom: 12 },
+    listenChapterLine: { fontSize: 14, lineHeight: 20, color: p.textSecondary, marginBottom: 10 },
+    listenLoading: { minHeight: 72, alignItems: 'center', justifyContent: 'center', gap: 8 },
+    voiceRow: {
+      minWidth: 48,
+      minHeight: 60,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      marginBottom: 8,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: p.border,
+    },
+    voiceRowOn: { borderColor: p.accent, borderWidth: 2 },
+    voiceRowText: { flex: 1 },
+    voiceRowTitle: { fontSize: 16, fontWeight: '700', color: p.text },
+    voiceRowDetail: { marginTop: 2, fontSize: 13, lineHeight: 18, color: p.textSecondary },
+    listenSectionTitle: { marginTop: 10, marginBottom: 6, fontSize: 15, fontWeight: '700', color: p.text },
+    speedRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+    listenNote: { marginTop: 14, fontSize: 13, lineHeight: 19, color: p.textSecondary },
+    listenPrimary: {
+      marginTop: 16,
+      minHeight: 52,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 10,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 12,
+      backgroundColor: p.accentSolid,
+    },
+    listenPrimaryText: { flexShrink: 1, fontSize: 17, fontWeight: '700', color: p.onAccent, textAlign: 'center' },
   });
 }

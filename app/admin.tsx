@@ -52,6 +52,8 @@ import {
   createAdminMediaItem,
   createAdminStory,
   postedConfirmation,
+  storyPostConfirmation,
+  storyWentOut,
   viewPostAction,
 } from '../lib/contentService';
 import { embedUrl, fetchEmbedMetadata, fileKind, thumbnailFromUrl, youtubeVideoId } from '../lib/embed';
@@ -244,7 +246,10 @@ export default function AdminScreen() {
   const styles = useStyles(theme);
   // The Chat tab's "Send" button deep-links straight to the notice form.
   const params = useLocalSearchParams<{ page?: string }>();
-  const [page, setPage] = useState<Page>(typeof params.page === 'string' && ['review', 'post', 'people', 'notice', 'library'].includes(params.page) ? (params.page as Page) : 'home');
+  // What was ASKED for — by a tap below, or by the address (/admin?page=notice).
+  // `page`, the settled answer this screen actually draws, is worked out from it
+  // a few lines down and is the only one the JSX uses.
+  const [requestedPage, setRequestedPage] = useState<Page>(typeof params.page === 'string' && ['review', 'post', 'people', 'notice', 'library'].includes(params.page) ? (params.page as Page) : 'home');
   const [workbench, setWorkbench] = useState<AdminWorkbench | null>(null);
   const [queue, setQueue] = useState<ContentQueue | null>(null);
   const [busy, setBusy] = useState(false);
@@ -295,11 +300,35 @@ export default function AdminScreen() {
     }, [canOpen, refresh])
   );
 
+  /**
+   * Which of the five pages this account may actually open.
+   *
+   * The rows on the home screen were already gated, but `page` can also be set
+   * from the address (`/admin?page=people` — the Chat tab deep-links to
+   * `?page=notice`), and nothing checked it. A moderator following a stale link
+   * landed straight in People, on a list of members' names and faces, with role
+   * buttons the database would refuse. Each page is now allowed by the same
+   * test that draws its row, so the two can never drift apart; anything else
+   * falls back to the Admin home rather than opening a page and refusing at the
+   * end of it.
+   */
+  const pageAllowed: Record<Page, boolean> = {
+    home: true,
+    review: access.canModerateChat || access.canManageContent || access.canManagePrayer,
+    post: access.canManageContent || access.canManageMedia,
+    people: access.canOverrideLeaderData,
+    // public.announcements takes an INSERT only from admin, super_admin,
+    // leader, moderator and staff.
+    notice: access.canManageContent || access.canModerateChat,
+    library: access.canManageContent || access.canManageMedia,
+  };
+  const page: Page = pageAllowed[requestedPage] ? requestedPage : 'home';
+
   // Android's back gesture must do what the on-screen back arrow does.
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (page !== 'home') {
-        setPage('home');
+        setRequestedPage('home');
         return true;
       }
       return false;
@@ -415,10 +444,17 @@ export default function AdminScreen() {
 
   const titles: Record<Page, string> = { home: 'Admin', review: 'Needs your look', post: 'Post something', people: 'People', notice: 'Send a notice', library: 'Library' };
 
+  // Whether the five rows below leave anything on screen for this account.
+  const anyAdminRow = access.canModerateChat
+    || access.canManageContent
+    || access.canManagePrayer
+    || access.canManageMedia
+    || access.canOverrideLeaderData;
+
   return (
     <Shell
       title={titles[page]}
-      onBack={() => (page === 'home' ? router.back() : setPage('home'))}
+      onBack={() => (page === 'home' ? router.back() : setRequestedPage('home'))}
       busy={busy}
       refreshing={refreshing}
       onRefresh={pullToRefresh}
@@ -438,18 +474,41 @@ export default function AdminScreen() {
               title="Needs your look"
               sub={reviewRowSub}
               badge={reviewCount}
-              onPress={() => setPage('review')}
+              onPress={() => setRequestedPage('review')}
             />
           ) : null}
           {access.canManageContent || access.canManageMedia ? (
-            <Row icon="add-circle-outline" tone="accent" title="Post something" sub="Story, sermon, video, music, event" onPress={() => setPage('post')} />
+            <Row icon="add-circle-outline" tone="accent" title="Post something" sub="Story, sermon, video, music, event" onPress={() => setRequestedPage('post')} />
           ) : null}
           {access.canOverrideLeaderData ? (
-            <Row icon="people-outline" tone="brand" title="People" sub="Make someone an admin or moderator" onPress={() => setPage('people')} />
+            <Row icon="people-outline" tone="brand" title="People" sub="Make someone an admin or moderator" onPress={() => setRequestedPage('people')} />
           ) : null}
-          <Row icon="megaphone-outline" tone="warning" title="Send a notice" sub="Push a message to phones" onPress={() => setPage('notice')} />
+          {/*
+            The only row that used to be shown to everybody who can open Admin.
+            `public.announcements` takes an INSERT from admin, super_admin,
+            leader, moderator and staff and nobody else — which is exactly
+            canManageContent OR canModerateChat — but canOpenAdmin is wider
+            (it also admits outreach, outreach_worker and media_admin). Those
+            accounts were offered "Send a notice", allowed to write it, asked
+            "Send to Everyone?", and then refused by row security. A rule the
+            database enforces has to be shown on the screen too.
+          */}
+          {access.canManageContent || access.canModerateChat ? (
+            <Row icon="megaphone-outline" tone="warning" title="Send a notice" sub="Push a message to phones" onPress={() => setRequestedPage('notice')} />
+          ) : null}
           {access.canManageContent || access.canManageMedia ? (
-            <Row icon="albums-outline" tone="success" title="Library" sub="Feature, hide, or delete what is live" onPress={() => setPage('library')} />
+            <Row icon="albums-outline" tone="success" title="Library" sub="Feature, hide, or delete what is live" onPress={() => setRequestedPage('library')} />
+          ) : null}
+          {/*
+            Every row is conditional, so an account that can open Admin without
+            holding any of these powers would have been left on a blank screen.
+          */}
+          {!anyAdminRow ? (
+            <Empty
+              icon="lock-closed-outline"
+              title="Nothing here for your account yet"
+              body="Your account can open Admin but has not been given anything to do here. Ask an OGN admin if you should be able to post, moderate or send notices."
+            />
           ) : null}
         </View>
       ) : null}
@@ -764,6 +823,19 @@ function StoryForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   const [transfer, setTransfer] = useState<{ label: string; fraction: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [posted, setPosted] = useState(0);
+  /**
+   * How many of those actually went out.
+   *
+   * The database decides, not this screen. A BEFORE INSERT trigger on
+   * app_stories can set `status` to 'draft' and hold the story until a leader
+   * reads it (DO-NOT-BREAK #18, the filter lives in the database), and the row
+   * still comes back looking perfectly saved — which is why
+   * lib/contentService.ts exports `storyWentOut()` and why app/(tabs)/index.tsx
+   * calls it on the member's side. This screen threw the saved row away and
+   * told every leader "It is on Home right now", then sent them to Home with
+   * "View post" to look for a story that was never there.
+   */
+  const [live, setLive] = useState(0);
   const working = saving || Boolean(transfer);
 
   async function pickMedia() {
@@ -808,12 +880,18 @@ function StoryForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
     if (!media.length) return Alert.alert('Pick a photo or video first', 'A story is a picture or a clip, with a few words if you want them.');
     setSaving(true);
     let done = 0;
+    let wentOut = 0;
     try {
       for (const item of media) {
         // The title is optional now (S9). A story with none shows the caption.
-        await createAdminStory({ title: title.trim() || undefined, body: caption.trim() || undefined, imageUrl: item.url });
+        const saved = await createAdminStory({ title: title.trim() || undefined, body: caption.trim() || undefined, imageUrl: item.url });
         done += 1;
+        // Ask the saved row whether it is live. A row with no status at all
+        // counts as held, which costs one extra sentence; the other way round
+        // tells a leader something untrue.
+        if (storyWentOut(saved)) wentOut += 1;
         setPosted(done);
+        setLive(wentOut);
       }
       setTitle('');
       setCaption('');
@@ -828,15 +906,20 @@ function StoryForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   }
 
   if (posted && !media.length) {
+    // What the saved rows say, not what we hoped. A held story has nothing on
+    // Home to open, so it gets the sentence that says where it really is
+    // instead of a button that lands on an empty ring.
+    const said = storyPostConfirmation(posted, live);
     return (
       <Success
-        title={posted > 1 ? `${posted} stories posted` : 'Story posted'}
-        body="It is on Home right now and stays there for 24 hours."
-        statusLabel="Published"
-        viewLabel="View post"
-        onView={() => router.push('/(tabs)' as any)}
+        title={said.title}
+        body={said.body}
+        statusLabel={said.statusLabel}
+        viewLabel={said.canOpenHome ? 'View post' : undefined}
+        onView={said.canOpenHome ? () => router.push('/(tabs)' as any) : undefined}
+        whereHint={said.canOpenHome ? undefined : said.whereHint}
         actionLabel="Post another"
-        onAction={() => { setPosted(0); onStartOver(); }}
+        onAction={() => { setPosted(0); setLive(0); onStartOver(); }}
       />
     );
   }
@@ -1321,9 +1404,16 @@ function NoticePage() {
             // and leaves you wondering where the notice went.
             setSent({ what: 'notice', title: noticeTitle, status: 'published' });
           } catch (err) {
+            // sendAdminPush saves the announcement FIRST and pushes second, so
+            // a failure here has two quite different causes: the row was never
+            // written (no signal, or the database refused it), or it was
+            // written and only the push to phones failed. This used to say "It
+            // is saved in Announcements either way" and tell the leader not to
+            // send it again — which, when the save was the half that failed,
+            // meant the notice never went anywhere and nobody knew.
             Alert.alert(
               'We could not confirm the send',
-              `${friendlyError(err, 'Please try again.')} It is saved in Announcements either way — check there before you send it a second time.`
+              `${friendlyError(err, 'Please try again.')} Look in Chat under Notices before you send it again: if it is there, it was saved and only the push to phones failed. If it is not there, nothing went out.`
             );
           } finally {
             setSending(false);
@@ -1695,6 +1785,10 @@ function Shell({
         <ScrollView
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
+          // iOS: make room for the keyboard, so the Post / Send button under
+          // the box being typed into is never hidden behind it. Android does
+          // this through app.json's softwareKeyboardLayoutMode "resize".
+          automaticallyAdjustKeyboardInsets
           showsVerticalScrollIndicator={false}
           refreshControl={
             onRefresh ? (

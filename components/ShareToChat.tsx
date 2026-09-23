@@ -11,6 +11,28 @@ import { friendlyError } from '../lib/errorMessages';
 import { AppTheme, createThemedStyles, getTheme } from '../lib/theme';
 import { ChatRoom } from '../types/models';
 
+/**
+ * How long a chat message may be.
+ *
+ * The database is the one that decides: `chat_messages.body` carries
+ * `check (char_length(body) <= 2000)` (supabase/schema.sql). Counting here in
+ * JavaScript's own units is never kinder than Postgres's char_length — an
+ * emoji counts as two on this side and one on that side — so a message this
+ * screen calls short enough always is.
+ */
+export const CHAT_MESSAGE_LIMIT = 2000;
+
+/** Start counting down only when the end is in sight. */
+export const CHAT_MESSAGE_COUNTDOWN_FROM = 200;
+
+/** The countdown under the message box, or nothing while there is plenty of room. */
+export function messageRoomLeft(text: string): string | null {
+  const left = CHAT_MESSAGE_LIMIT - String(text || '').length;
+  if (left > CHAT_MESSAGE_COUNTDOWN_FROM) return null;
+  if (left <= 0) return 'That is as long as a message can be.';
+  return `${left} character${left === 1 ? '' : 's'} left`;
+}
+
 const NOTE_TYPES: { key: NonNullable<SharedRef['noteType']>; label: string; icon: keyof typeof Ionicons.glyphMap; prompt: string }[] = [
   { key: 'takeaway', label: 'Takeaway', icon: 'sparkles', prompt: 'What hit home for you?' },
   { key: 'quote', label: 'Quote', icon: 'chatbox-ellipses', prompt: 'Type the part you want to quote' },
@@ -49,6 +71,13 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
 
   async function send() {
     if (!item || !roomId || sending) return;
+    // The box already stops at the limit; this is the second lock, for a
+    // paste on the web build that slipped past it. The database would refuse
+    // it anyway — this way the person is told in words they can act on.
+    if (text.trim().length > CHAT_MESSAGE_LIMIT) {
+      Alert.alert('That message is too long', `Please shorten it to ${CHAT_MESSAGE_LIMIT} characters or fewer, then send it again.`);
+      return;
+    }
     setSending(true);
     try {
       await joinChatRoom(roomId);
@@ -74,6 +103,7 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
   }
 
   const type = NOTE_TYPES.find((t) => t.key === noteType) || NOTE_TYPES[0];
+  const roomLeft = messageRoomLeft(text);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={dismiss}>
       <KeyboardAvoidingView style={styles.backdrop} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
@@ -99,6 +129,9 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
                 <Text style={styles.itemTitle}>{item.title}</Text>
                 {item.speaker ? <Text style={styles.itemMeta}>{item.speaker}</Text> : null}
                 {item.scripture ? <Text style={[styles.itemMeta, styles.itemScripture]}>{item.scripture.text}</Text> : null}
+                {/* Licence condition for the NLT and the AMP: the copyright the
+                    Bible library sent goes wherever its words go. */}
+                {item.scripture?.copyright ? <Text style={styles.itemCopyright}>{item.scripture.copyright}</Text> : null}
               </View>
             </View>
           ) : null}
@@ -118,15 +151,18 @@ export function ShareToChatSheet({ item, visible, dark, onClose }: { item: Share
               </Pressable>
             ))}
           </View>
+          <Text style={styles.label}>Add a message (optional)</Text>
           <TextInput
             value={text}
             onChangeText={setText}
             placeholder={type.prompt}
-            accessibilityLabel={type.prompt}
+            accessibilityLabel={`Add a message (optional). ${type.prompt}`}
             placeholderTextColor={theme.colors.textMuted}
             multiline
+            maxLength={CHAT_MESSAGE_LIMIT}
             style={styles.input}
           />
+          {roomLeft ? <Text style={styles.counter}>{roomLeft}</Text> : null}
 
           <Text style={styles.label}>Send to</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rooms}>
@@ -232,14 +268,21 @@ export function SharedCard({ shared, dark, own, onOpen }: { shared: SharedRef; d
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
           <Text numberOfLines={2} style={styles.cardTitle}>{shared.title}</Text>
-          <Text numberOfLines={1} style={styles.cardMeta}>{labelFor(shared.kind)}{shared.speaker ? ` • ${shared.speaker}` : ''}</Text>
+          <Text numberOfLines={1} style={styles.cardMeta}>
+            {labelFor(shared.kind)}
+            {/* Which translation this is, said on the card itself. */}
+            {shared.kind === 'scripture' && shared.scripture ? ` • ${shared.scripture.version}` : ''}
+            {shared.speaker ? ` • ${shared.speaker}` : ''}
+          </Text>
         </View>
         <Ionicons name={shared.kind === 'story' || shared.kind === 'article' || shared.kind === 'scripture' || shared.kind === 'give' ? 'open-outline' : 'play-circle'} size={24} color={theme.colors.accent} />
       </View>
       {shared.scripture ? (
         <>
-          <Text style={styles.cardTitle}>{shared.scripture.text}</Text>
-          {shared.scripture.copyright ? <Text style={styles.cardMeta}>{shared.scripture.copyright}</Text> : null}
+          {/* The whole passage, every verse of it, never cut short. */}
+          <Text style={styles.cardScripture}>{shared.scripture.text}</Text>
+          {/* Never dropped: the NLT and the AMP are licensed on it. */}
+          {shared.scripture.copyright ? <Text style={styles.cardCopyright}>{shared.scripture.copyright}</Text> : null}
         </>
       ) : null}
     </Pressable>
@@ -275,6 +318,8 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   itemTitle: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
   itemMeta: { color: t.colors.textSecondary, fontSize: t.type.meta },
   itemScripture: { marginTop: 8, lineHeight: 20 },
+  itemCopyright: { color: t.colors.textMuted, fontSize: t.type.overline, lineHeight: 16, marginTop: 6 },
+  counter: { color: t.colors.textMuted, fontSize: t.type.meta, alignSelf: 'flex-end' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 18, minHeight: 48, borderRadius: t.radius.pill, backgroundColor: t.colors.surface, borderWidth: 1, borderColor: t.colors.borderStrong },
   chipOn: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
@@ -297,6 +342,8 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   cardIcon: { width: 40, height: 40, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceRaised, alignItems: 'center', justifyContent: 'center' },
   cardTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.meta },
   cardMeta: { color: t.colors.textSecondary, fontSize: t.type.overline, marginTop: 2 },
+  cardScripture: { color: t.colors.textPrimary, fontSize: t.type.meta, lineHeight: 20, marginTop: 2 },
+  cardCopyright: { color: t.colors.textSecondary, fontSize: t.type.overline, lineHeight: 16, marginTop: 4 },
   eventCard: { padding: 0, overflow: 'hidden', width: 248, maxWidth: '100%' },
   eventBanner: { width: '100%', aspectRatio: 16 / 9, backgroundColor: t.colors.surfaceRaised },
   eventBody: { padding: 10, gap: 6 },

@@ -11,6 +11,7 @@ import type { AppTheme } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
 
 const NOT_LIVE_NOW = 'Not live right now';
+const CHECK_FAILED = 'We could not check if we are live';
 const GO_LIVE = 'Go live';
 
 /**
@@ -29,23 +30,37 @@ const GO_LIVE = 'Go live';
 export function LiveBanner() {
   const { theme } = useAppTheme();
   const styles = useStyles(theme);
-  const { state } = useLiveStatus();
+  const { state, loading, error } = useLiveStatus();
   const { access } = useAccessProfile();
   const canManageLive = access.canManageContent || access.canManageMedia;
 
   if (state?.isLive) return <LiveCard state={state} styles={styles} theme={theme} />;
-  if (!canManageLive || !state) return null;
+  // The role decides before anything else is drawn: a member sees nothing on
+  // Home unless a service is really on (DO-NOT-BREAK #2 and #14).
+  if (!canManageLive) return null;
+  // Still asking. Nothing yet, rather than a row that flickers on every open.
+  if (!state && loading) return null;
+  const checkFailed = !state;
+  // The check itself failed. This row is the ONLY way to /live anywhere in
+  // the app, so hiding it here shut a leader out of Go live at exactly the
+  // moment the screen's own "this phone could not read the live status"
+  // branch was written for. It says what happened rather than "Not live".
+  if (checkFailed && !error) return null;
 
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${NOT_LIVE_NOW}. ${GO_LIVE}`}
-      accessibilityHint="Opens the live page, where you can start a live stream in the app"
+      accessibilityLabel={`${checkFailed ? CHECK_FAILED : NOT_LIVE_NOW}. ${GO_LIVE}`}
+      accessibilityHint="Opens the live page, where you can check again or start a live stream in the app"
       onPress={() => router.push({ pathname: '/live', params: { manage: '1' } } as any)}
       style={({ pressed }) => [styles.slim, pressed && styles.pressed]}
     >
-      <Ionicons name="radio-outline" size={20} color={theme.colors.textSecondary} />
-      <Text style={styles.slimText}>{NOT_LIVE_NOW}</Text>
+      <Ionicons
+        name={checkFailed ? 'alert-circle-outline' : 'radio-outline'}
+        size={20}
+        color={checkFailed ? theme.colors.warning : theme.colors.textSecondary}
+      />
+      <Text style={styles.slimText}>{checkFailed ? CHECK_FAILED : NOT_LIVE_NOW}</Text>
       <View style={styles.slimAction}>
         <Text style={styles.slimActionText}>{GO_LIVE}</Text>
         <Ionicons name="chevron-forward" size={16} color={theme.colors.accent} />

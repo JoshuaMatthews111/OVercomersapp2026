@@ -181,9 +181,11 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = { textStep: DEFAULT_TEXT_
 
 /**
  * Positions are kept per person on the phone, so two people who share an
- * iPad each come back to their own page.
+ * iPad each come back to their own page. Exported so Listen mode
+ * (lib/bookAudio.ts) remembers the chosen voice against the same person, with
+ * one definition of "who is this".
  */
-async function currentUserKey(): Promise<string> {
+export async function currentUserKey(): Promise<string> {
   try {
     const { data } = await supabase.auth.getSession();
     return data.session?.user.id || 'signed-out';

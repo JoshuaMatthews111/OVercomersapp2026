@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Session } from '@supabase/supabase-js';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { Card } from '../../components/Card';
 import { Screen } from '../../components/Screen';
 import { useAccessProfile } from '../../lib/accessControl';
@@ -35,6 +35,17 @@ export default function AccountSettingsScreen() {
   const [loading, setLoading] = useState(false);
   const [reading, setReading] = useState(true);
   const [loadError, setLoadError] = useState('');
+  /**
+   * True only once this page has actually READ the profile row.
+   *
+   * It guards the photo. The save below writes the whole row, so it may only
+   * send `avatar_url` when it knows what that column holds. If the read failed
+   * — a weak signal, the row arriving late — `avatarUrl` is still null here
+   * while the member's photo is alive and well on the server, and saving a
+   * name used to write that null straight over it. The photo would vanish from
+   * chat bubbles and member lists, with "Saved" on screen.
+   */
+  const [profileRead, setProfileRead] = useState(false);
 
   /** True once the member has typed, so a refresh never overwrites them mid-edit. */
   const nameTouched = useRef(false);
@@ -57,11 +68,13 @@ export default function AccountSettingsScreen() {
         .maybeSingle();
       if (profileError) throw profileError;
       setAvatarUrl(profile?.avatar_url ?? null);
+      setProfileRead(true);
       if (!nameTouched.current) {
         setDisplayName(profile?.display_name || nextSession.user.user_metadata?.display_name || '');
       }
       setLoadError('');
     } catch (err) {
+      setProfileRead(false);
       setLoadError(friendlyError(err, 'We could not load your account just now. Check your connection and try again.'));
     }
   }, []);
@@ -83,11 +96,15 @@ export default function AccountSettingsScreen() {
     const nextName = displayName.trim() || session.user.user_metadata?.display_name || access.displayName || session.user.email || 'OGN Member';
     setLoading(true);
     try {
-      const { error } = await supabase.from('profiles').upsert({
+      // The photo is only written when this page actually read it. An upsert
+      // leaves a column it is not given exactly as it was, so a name can be
+      // saved on a bad connection without the photo being wiped.
+      const row: { id: string; display_name: string; avatar_url?: string | null } = {
         id: session.user.id,
         display_name: nextName,
-        avatar_url: avatarUrl,
-      });
+      };
+      if (profileRead) row.avatar_url = avatarUrl;
+      const { error } = await supabase.from('profiles').upsert(row);
       if (error) throw error;
       await supabase.auth.updateUser({ data: { display_name: nextName } });
       nameTouched.current = false;
@@ -106,7 +123,21 @@ export default function AccountSettingsScreen() {
   }
 
   return (
-    <Screen>
+    // scroll={false} plus this page's own ScrollView, the shape
+    // app/settings/delete-account.tsx already uses. The shared <Screen> scroll
+    // view has no keyboard inset, so on iOS the Display Name box and the Save
+    // button under it sat behind the keyboard: you could type, then had to
+    // dismiss the keyboard to find the button. The safe areas, the page colour
+    // and both themes still come from <Screen>.
+    <Screen scroll={false}>
+      <ScrollView
+        style={styles.scrollView}
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets
+      >
       <View style={styles.header}>
         <Pressable
           accessibilityRole="button"
@@ -222,11 +253,15 @@ export default function AccountSettingsScreen() {
           </Pressable>
         </Card>
       ) : null}
+      </ScrollView>
     </Screen>
   );
 }
 
 const useStyles = createThemedStyles((t) => StyleSheet.create({
+  // The same gutter <Screen> uses, so nothing shifts sideways coming off a tab.
+  scrollView: { flex: 1 },
+  scroll: { paddingHorizontal: t.spacing.lg, paddingTop: 10, paddingBottom: 112 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 18 },
   headerText: { flex: 1 },
   backButton: {
@@ -277,7 +312,7 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
     ...(t.dark ? t.elevation.none : t.elevation.low),
   },
-  primaryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
+  primaryText: { flexShrink: 1, textAlign: 'center', color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
   secondaryButton: {
     minHeight: 52,
     borderRadius: t.radius.pill,
@@ -289,8 +324,8 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
-  secondaryText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body + 1 },
-  dangerLink: { color: t.colors.danger, fontWeight: '900', fontSize: t.type.body + 1 },
+  secondaryText: { flexShrink: 1, textAlign: 'center', color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body + 1 },
+  dangerLink: { flexShrink: 1, textAlign: 'center', color: t.colors.danger, fontWeight: '900', fontSize: t.type.body + 1 },
   errorRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   errorText: { flex: 1, color: t.colors.danger, fontSize: t.type.body, lineHeight: 22 },
 }));

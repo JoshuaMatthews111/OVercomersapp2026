@@ -118,6 +118,19 @@ export type LiveState = {
   lastSeenVideoId: string | null;
   /** The title that went with it, so a leader recognises the stream on the screen. */
   lastSeenTitle: string | null;
+  /**
+   * What the last look at YouTube said about embedding, whatever the app is
+   * showing now. `embeddable` above is about the stream being watched; this
+   * one keeps the answer for the leader's panel once the stream is over.
+   */
+  lastSeenEmbeddable: boolean | null;
+  /**
+   * Set ONLY while a leader's "End live" is holding down a stream YouTube is
+   * still reporting as live: the time that hold runs out. Without it the
+   * leader's panel says "YouTube shows us live" and "Are we live in the app?
+   * No" with no reason on the screen and no way back.
+   */
+  endedHideUntil: string | null;
   /** The ministry's channel, for "Open our YouTube channel". */
   channelUrl: string;
 };
@@ -138,6 +151,8 @@ export const NOT_LIVE: LiveState = Object.freeze({
   autoVideoId: null,
   lastSeenVideoId: null,
   lastSeenTitle: null,
+  lastSeenEmbeddable: null,
+  endedHideUntil: null,
   channelUrl: OGN_CHANNEL_URL,
 }) as LiveState;
 
@@ -538,6 +553,8 @@ export function resolveLiveState(row: LiveRow | null | undefined, nowMs: number)
   const autoTrusted = row.is_live === true && Boolean(autoVideoId) && confirmed !== null && nowMs - confirmed <= AUTO_TRUST_MS;
   const override = parseOverride(row.manual_override, nowMs);
   const embeddable = row.embeddable === true ? true : row.embeddable === false ? false : null;
+  const endedOverride = override && override.mode === 'ended' ? override : null;
+  const hidden = Boolean(endedOverride && endedOverride.videoId !== null && endedOverride.videoId === autoVideoId);
   const common = {
     checkedAt: isoOrNull(row.checked_at),
     detection: detectionState,
@@ -546,6 +563,9 @@ export function resolveLiveState(row: LiveRow | null | undefined, nowMs: number)
     autoVideoId: autoTrusted ? autoVideoId : null,
     lastSeenVideoId: autoVideoId,
     lastSeenTitle: str(row.title),
+    lastSeenEmbeddable: embeddable,
+    // Only while the hold is really keeping a live stream off every phone.
+    endedHideUntil: hidden && autoTrusted && endedOverride ? endedOverride.expiresAt : null,
     channelUrl: OGN_CHANNEL_URL,
   };
 
@@ -564,7 +584,6 @@ export function resolveLiveState(row: LiveRow | null | undefined, nowMs: number)
       embeddable: override.videoId && override.videoId === validId(row.video_id) ? embeddable : null,
     };
   }
-  const hidden = override && override.mode === 'ended' && override.videoId !== null && override.videoId === autoVideoId;
   if (autoTrusted && !hidden && autoVideoId) {
     return {
       ...common,
@@ -671,6 +690,8 @@ export function normalizeLiveState(value: unknown): LiveState | null {
     autoVideoId: validId(v.autoVideoId),
     lastSeenVideoId: validId(v.lastSeenVideoId),
     lastSeenTitle: str(v.lastSeenTitle),
+    lastSeenEmbeddable: v.lastSeenEmbeddable === true ? true : v.lastSeenEmbeddable === false ? false : null,
+    endedHideUntil: isoOrNull(v.endedHideUntil),
     channelUrl: OGN_CHANNEL_URL,
   };
   if (state.isLive) {

@@ -106,6 +106,9 @@ import {
   updateTerritoryMetrics,
   type VisitPin,
 } from '../lib/evangelismService';
+import { OutreachMediaField, OutreachMediaStrip, useOutreachMediaDraft } from '../components/OutreachMedia';
+import { OutreachPersonSearch } from '../components/OutreachPersonSearch';
+import { loadOutreachMedia, mediaCountLabel, subjectKey, type OutreachMediaBySubject, type OutreachMediaItem } from '../lib/outreachMedia';
 import { friendlyError } from '../lib/errorMessages';
 import { dueLabel } from '../lib/followUps';
 import { addressLine, directionsUrl, distanceLabel, getHomeCells, type HomeCell, meetingLabel, nearestHomeCells, nearestSentence, preferredUnits, setHomeCellLocation } from '../lib/homeCells';
@@ -181,6 +184,8 @@ function withAlpha(hex: string, alpha: number) {
 }
 
 const BLANK_VISIT = { placeLabel: '', unitNumber: '', notes: '' };
+/** One shared empty list, so a record with no photos does not re-render on it. */
+const EMPTY_MEDIA: OutreachMediaItem[] = [];
 const UNITS = preferredUnits(typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().locale : undefined);
 
 export default function MapsScreen() {
@@ -241,9 +246,12 @@ export default function MapsScreen() {
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [teamNote, setTeamNote] = useState<string | null>(null);
   const [teamOff, setTeamOff] = useState(false);
-  const [teamQuery, setTeamQuery] = useState('');
-  const [teamResults, setTeamResults] = useState<Person[] | null>(null);
   const [teamBusy, setTeamBusy] = useState(false);
+  // Photos and clips on visits and records (TestFlight 36). One map keyed
+  // '<visit|contact>:<id>', filled after the records themselves land so a
+  // missing outreach_media table can never hold the map up.
+  const [mediaBySubject, setMediaBySubject] = useState<OutreachMediaBySubject>({});
+  const [mediaNote, setMediaNote] = useState<string | null>(null);
   // Pin-dropping for a home cell: the cell being placed and where the pin is.
   const [placing, setPlacing] = useState<HomeCell | null>(null);
   const [placeDraft, setPlaceDraft] = useState<LatLng | null>(null);
@@ -276,6 +284,46 @@ export default function MapsScreen() {
   useEffect(() => { selectedRef.current = selected; }, [selected]);
   const myLocationRef = useRef<LatLng | null>(null);
   useEffect(() => { myLocationRef.current = myLocation; }, [myLocation]);
+
+  // Photos and clips being added to the visit, and to the record, that are
+  // still being typed. They start uploading as soon as they are picked, so the
+  // person can carry on writing, and the rows are only written once the visit
+  // or record has an id of its own.
+  const visitMedia = useOutreachMediaDraft({ userId: access.userId, territoryId: selected?.id, subjectType: 'visit' });
+  const recordMedia = useOutreachMediaDraft({ userId: access.userId, territoryId: selected?.id, subjectType: 'contact' });
+  // A draft of photos belongs to the form it was started in, and to the region
+  // that form is filling in. Leaving either — by the tab strip above the sheet,
+  // or by picking another region under it — takes whatever has already gone up
+  // back out of the bucket. Without this, choosing a photo and then tapping
+  // "Visits" left it staged: the NEXT visit logged would have carried it, or,
+  // if the region had changed in between, refused it with a message about a
+  // photo the worker had never put on that record. A save empties the draft
+  // first, so this never touches a file that did get a row.
+  const visitDraftKey = sheet === 'visit' ? `visit:${selected?.id || 'no-region'}` : 'closed';
+  const recordDraftKey = sheet === 'record' ? `record:${selected?.id || 'no-region'}` : 'closed';
+  useEffect(() => () => { visitMedia.discardAll(); }, [visitDraftKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => { recordMedia.discardAll(); }, [recordDraftKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const mediaFor = useCallback(
+    (type: 'visit' | 'contact', id: string) => mediaBySubject[subjectKey(type, id)] || EMPTY_MEDIA,
+    [mediaBySubject]
+  );
+  /** One file has gone: drop it everywhere it is drawn, without a reload. */
+  const forgetMedia = useCallback((gone: OutreachMediaItem) => {
+    setMediaBySubject((current) => {
+      const key = subjectKey(gone.subjectType, gone.subjectId);
+      const list = current[key];
+      if (!list) return current;
+      return { ...current, [key]: list.filter((item) => item.id !== gone.id) };
+    });
+  }, []);
+  /** Newly attached files, put where the screen already looks for them. */
+  const rememberMedia = useCallback((type: 'visit' | 'contact', id: string, added: OutreachMediaItem[]) => {
+    if (!added.length) return;
+    setMediaBySubject((current) => {
+      const key = subjectKey(type, id);
+      return { ...current, [key]: [...(current[key] || []), ...added] };
+    });
+  }, []);
 
   const loadAll = useCallback(async () => {
     // Regions are what the screen is for, so only they can fail the load.
@@ -313,6 +361,22 @@ export default function MapsScreen() {
     setSelected((current) => (current
       ? territories.find((t) => t.id === current.id) || current
       : deselectedRef.current ? null : territories.find((t) => t.level !== 'global') || territories[0] || null));
+
+    // The photos and clips come last and on their own. A record must never wait
+    // for its pictures, and a database without outreach_media yet simply has no
+    // thumbnails — the same way visits behave when their table is missing.
+    const subjects = [
+      ...(visitResult.ready ? visitResult.visits.map((visit) => ({ type: 'visit' as const, id: visit.id })) : []),
+      ...contactResult.rows.map((contact) => ({ type: 'contact' as const, id: contact.id })),
+    ];
+    const media = await loadOutreachMedia(subjects).catch(() => ({ ready: false, reason: 'unavailable' } as const));
+    if (media.ready) { setMediaBySubject(media.bySubject); setMediaNote(null); }
+    else {
+      setMediaBySubject({});
+      setMediaNote(media.reason === 'not-switched-on'
+        ? 'Photos on outreach records are not switched on yet.'
+        : 'The photos could not load just now. Pull down on this panel to try again.');
+    }
   }, []);
 
   /** Who is on the field, refreshed on its own. A failure here says so quietly
@@ -854,9 +918,13 @@ export default function MapsScreen() {
         createdBy: 'You', createdAt: new Date().toISOString(),
         statusHistory: [{ status: 'contact_made', at: new Date().toISOString(), by: 'You' }],
       } as OutreachRecord, ...current]);
+      // The record exists now, so its photos get their rows.
+      const attached = await recordMedia.attachTo(saved.id, 'You');
+      rememberMedia('contact', saved.id, attached.attached);
       setRecord((current) => ({ ...current, name: '', phone: '', whatsapp: '', prayerRequest: '', notes: '' }));
       setSheet('summary');
-      Alert.alert('Saved', 'The record is attached to this region.');
+      if (attached.problem) Alert.alert('Record saved, photos not all attached', attached.problem);
+      else Alert.alert('Saved', 'The record is attached to this region.');
     } catch (err) {
       Alert.alert('Not saved', friendlyError(err, 'Your account may need evangelism permission.'));
     } finally {
@@ -911,9 +979,14 @@ export default function MapsScreen() {
         return;
       }
       setVisits((current) => [result.visit, ...current.filter((v) => v.id !== temporaryId)]);
+      // The visit is saved. Its photos are written now; anything that cannot be
+      // attached is reported beside it and never takes the visit down with it.
+      const attached = await visitMedia.attachTo(result.visit.id, 'You');
+      rememberMedia('visit', result.visit.id, attached.attached);
       setVisitForm(BLANK_VISIT);
       setVisitDraft(null);
       setSheet('visits');
+      if (attached.problem) Alert.alert('Visit saved, photos not all attached', attached.problem);
     } catch (err) {
       setVisits((current) => current.filter((v) => v.id !== temporaryId));
       Alert.alert('Visit not saved', friendlyError(err, 'Please try again in a moment.'));
@@ -1003,18 +1076,6 @@ export default function MapsScreen() {
     if (result.ready) { setTeam(result.members); setTeamNote(null); }
   }
 
-  async function searchTeam() {
-    if (teamBusy) return;
-    setTeamBusy(true);
-    try {
-      setTeamResults(await searchOutreachTeam(teamQuery));
-    } catch (err) {
-      Alert.alert('Search did not work', friendlyError(err, 'The outreach team could not load just now.'));
-    } finally {
-      setTeamBusy(false);
-    }
-  }
-
   async function addTeamMember(person: Person) {
     if (!selected || teamBusy) return;
     setTeamBusy(true);
@@ -1022,8 +1083,6 @@ export default function MapsScreen() {
       // The first person on a region's team leads it; a leader can change that.
       await addToRegionTeam(selected.id, person.id, regionTeam.length ? 'member' : 'lead');
       await reloadTeam();
-      setTeamResults(null);
-      setTeamQuery('');
     } catch (err) {
       Alert.alert('Not added', friendlyError(err, 'Only leaders and admins can change a region team, and only people on the outreach team can be added.'));
     } finally {
@@ -1426,6 +1485,8 @@ export default function MapsScreen() {
             <Pressable accessibilityRole="button" accessibilityLabel="Close" onPress={() => setVisitFocus(null)} hitSlop={16}><Ionicons name="close" size={18} color={theme.colors.textMuted} /></Pressable>
           </View>
           {visitFocus.notes ? <Text style={styles.calloutNotes}>{visitFocus.notes}</Text> : null}
+          {/* The pictures from that doorway, right on the pin. */}
+          <OutreachMediaStrip theme={theme} items={mediaFor('visit', visitFocus.id)} userId={access.userId} isStaff={access.canManageContent} onRemoved={forgetMedia} />
         </View>
       ) : null}
 
@@ -1613,15 +1674,17 @@ export default function MapsScreen() {
                 {!visitsReady && visitsNote ? <Text style={styles.empty}>{visitsNote}</Text> : null}
                 {visitsReady && !relatedVisits.length ? <Text style={styles.empty}>No visits logged here yet. Press and hold on the map, or use Log a visit.</Text> : null}
                 {relatedVisits.map((v) => (
-                  <Pressable key={v.id} accessibilityRole="button" accessibilityLabel={`${v.placeLabel}, ${timeAgo(v.visitedAt)}`} onPress={() => { setVisitFocus(v); if (v.location) flyTo(v.location, Math.max(zoomRef.current, 15), 500); }} style={styles.contactRow}>
+                  <Pressable key={v.id} accessibilityRole="button" accessibilityLabel={`${v.placeLabel}, ${timeAgo(v.visitedAt)}${mediaCountLabel(mediaFor('visit', v.id)) ? `, ${mediaCountLabel(mediaFor('visit', v.id))}` : ''}`} onPress={() => { setVisitFocus(v); if (v.location) flyTo(v.location, Math.max(zoomRef.current, 15), 500); }} style={styles.contactRow}>
                     <View style={styles.visitRowIcon}><Ionicons name="footsteps" size={13} color={colors.white} /></View>
                     <View style={{ flex: 1 }}>
                       <Text style={styles.contactName}>{v.placeLabel}</Text>
-                      <Text style={styles.contactSub}>{v.unitNumber ? `Unit ${v.unitNumber} • ` : ''}{v.authorName} • {timeAgo(v.visitedAt)}</Text>
+                      <Text style={styles.contactSub}>{v.unitNumber ? `Unit ${v.unitNumber} • ` : ''}{v.authorName} • {timeAgo(v.visitedAt)}{mediaCountLabel(mediaFor('visit', v.id)) ? ` • ${mediaCountLabel(mediaFor('visit', v.id))}` : ''}</Text>
                       {v.notes ? <Text style={styles.contactPrayer}>{v.notes}</Text> : null}
+                      <OutreachMediaStrip theme={theme} items={mediaFor('visit', v.id)} userId={access.userId} isStaff={access.canManageContent} onRemoved={forgetMedia} />
                     </View>
                   </Pressable>
                 ))}
+                {mediaNote ? <Text style={styles.empty}>{mediaNote}</Text> : null}
                 <View style={{ height: 10 }} />
                 <Pressable accessibilityRole="button" accessibilityLabel="Log a visit" onPress={() => beginVisit()} style={styles.goldButton}>
                   <Text style={styles.goldButtonText}>Log a visit</Text>
@@ -1635,14 +1698,19 @@ export default function MapsScreen() {
                 <TextInput accessibilityLabel="Place — a building, a shop, a corner" style={styles.input} value={visitForm.placeLabel} onChangeText={(placeLabel) => setVisitForm((c) => ({ ...c, placeLabel }))} placeholder="Place — a building, a shop, a corner" placeholderTextColor={theme.colors.textMuted} />
                 <TextInput accessibilityLabel="Apartment or unit number" style={styles.input} value={visitForm.unitNumber} onChangeText={(unitNumber) => setVisitForm((c) => ({ ...c, unitNumber }))} placeholder="Apartment or unit number" placeholderTextColor={theme.colors.textMuted} />
                 <TextInput accessibilityLabel="What happened while you were there" style={[styles.input, styles.textArea]} value={visitForm.notes} onChangeText={(notes) => setVisitForm((c) => ({ ...c, notes }))} placeholder="What happened while you were there?" placeholderTextColor={theme.colors.textMuted} multiline />
+                {/* Pictures start going up straight away, so the note can carry
+                    on being written while they do (TestFlight 36). */}
+                <OutreachMediaField theme={theme} draft={visitMedia} />
                 <Pressable accessibilityRole="button" accessibilityLabel="Save this visit" disabled={busy} onPress={saveVisitRecord} style={[styles.goldButton, busy && styles.buttonBusy]}>
                   {busy ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
                   <Text style={styles.goldButtonText}>{busy ? 'Saving…' : 'Save this visit'}</Text>
                 </Pressable>
-                <Pressable accessibilityRole="button" accessibilityLabel="Cancel this visit" onPress={() => { setVisitDraft(null); setSheet('summary'); }} style={styles.upLink}><Text style={styles.backText}>Cancel</Text></Pressable>
+                {visitMedia.busy ? <Text style={styles.empty}>A photo is still going up. Saving now keeps your note and attaches whatever has finished.</Text> : null}
+                <Pressable accessibilityRole="button" accessibilityLabel="Cancel this visit" onPress={() => { visitMedia.discardAll(); setVisitDraft(null); setSheet('summary'); }} style={styles.upLink}><Text style={styles.backText}>Cancel</Text></Pressable>
               </View>
             ) : null}
 
+            {sheet === 'people' && mediaNote ? <Text style={styles.empty}>{mediaNote}</Text> : null}
             {sheet === 'people' ? (
               relatedContacts.length ? relatedContacts.map((c) => {
                 // What an evangelist can say at the door: the nearest home cell.
@@ -1655,6 +1723,7 @@ export default function MapsScreen() {
                       <Text style={styles.contactSub}>{c.status.replace('_', ' ')}{c.followUpNeeded && c.nextFollowUpAt ? ` • ${dueLabel(c.nextFollowUpAt)}` : ''}{c.phone ? ` • ${c.phone}` : ''}</Text>
                       {c.prayerRequest ? <Text style={styles.contactPrayer}>{c.prayerRequest}</Text> : null}
                       {near ? <Text style={styles.cellLine}>Nearest home cell: {near.cell.name} · {meetingLabel(near.cell.meetingDay, near.cell.meetingTime)}{addressLine(near.cell) ? ` · ${addressLine(near.cell)}` : ''} · {distanceLabel(near.km, UNITS)}</Text> : null}
+                      <OutreachMediaStrip theme={theme} items={mediaFor('contact', c.id)} userId={access.userId} isStaff={access.canManageContent} onRemoved={forgetMedia} />
                     </View>
                   </View>
                 );
@@ -1684,6 +1753,8 @@ export default function MapsScreen() {
                   <Flag styles={styles} theme={theme} label="Follow up" value={record.followUpNeeded} onPress={() => setRecord((c) => ({ ...c, followUpNeeded: !c.followUpNeeded }))} />
                 </View>
                 <TextInput accessibilityLabel="Notes" style={[styles.input, styles.textArea]} value={record.notes} onChangeText={(notes) => setRecord((c) => ({ ...c, notes }))} placeholder="Notes" placeholderTextColor={theme.colors.textMuted} multiline />
+                <OutreachMediaField theme={theme} draft={recordMedia} />
+                {recordMedia.busy ? <Text style={styles.empty}>A photo is still going up. Saving now keeps everything you typed and attaches whatever has finished.</Text> : null}
                 <Pressable accessibilityRole="button" accessibilityLabel={myLocation ? 'Save at my location' : 'Save to this region'} disabled={busy} onPress={addRecord} style={[styles.goldButton, busy && styles.buttonBusy]}>
                   {busy ? <ActivityIndicator color={theme.colors.textOnAccent} /> : null}
                   <Text style={styles.goldButtonText}>{busy ? 'Saving…' : myLocation ? 'Save at my location' : 'Save to this region'}</Text>
@@ -1719,23 +1790,19 @@ export default function MapsScreen() {
                 {access.canManageContent && !teamOff ? (
                   <>
                     <Text style={styles.section}>Add someone</Text>
-                    <View style={styles.teamSearch}>
-                      <TextInput accessibilityLabel="Search the outreach team by name" style={[styles.input, { flex: 1 }]} value={teamQuery} onChangeText={setTeamQuery} onSubmitEditing={searchTeam} returnKeyType="search" placeholder="Name on the outreach team" placeholderTextColor={theme.colors.textMuted} />
-                      <Pressable accessibilityRole="button" accessibilityLabel="Search the outreach team" accessibilityState={{ busy: teamBusy }} disabled={teamBusy} onPress={searchTeam} style={styles.rowButton}>
-                        {teamBusy ? <ActivityIndicator color={theme.colors.textPrimary} /> : <Ionicons name="search" size={18} color={theme.colors.textPrimary} />}
-                      </Pressable>
-                    </View>
-                    {teamResults && !teamResults.length ? <Text style={styles.empty}>Nobody on the outreach team matches that name. Only people with outreach access can be added.</Text> : null}
-                    {teamResults?.map((person) => {
-                      const already = regionTeam.some((m) => m.userId === person.id);
-                      return (
-                        <Pressable key={person.id} accessibilityRole="button" accessibilityLabel={already ? `${person.displayName} is already on this team` : `Add ${person.displayName} to ${selected.name}`} accessibilityState={{ disabled: already || teamBusy }} disabled={already || teamBusy} onPress={() => addTeamMember(person)} style={styles.teamRow}>
-                          <PersonBadge styles={styles} person={person} />
-                          <Text style={[styles.contactName, { flex: 1 }]}>{person.displayName}</Text>
-                          <Text style={already ? styles.contactSub : styles.upLinkText}>{already ? 'On the team' : 'Add'}</Text>
-                        </Pressable>
-                      );
-                    })}
+                    {/* Typing finds them — no Search button (TestFlight 36). */}
+                    <OutreachPersonSearch
+                      theme={theme}
+                      label={`Add someone to ${selected.name}`}
+                      placeholder="Start typing their name"
+                      nobodyNoun="Nobody on the outreach team"
+                      pickLabel="Add"
+                      alreadyChosenNote="On the team"
+                      search={(term, signal) => searchOutreachTeam(term, 20, signal)}
+                      isAlreadyChosen={(person) => regionTeam.some((m) => m.userId === person.id)}
+                      onPick={addTeamMember}
+                    />
+                    <Text style={styles.empty}>Only people who already have outreach access can be added.</Text>
                   </>
                 ) : null}
               </View>

@@ -21,11 +21,12 @@ import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Linking, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { OutreachPersonSearch } from '../components/OutreachPersonSearch';
 import { useAccessProfile } from '../lib/accessControl';
 import { friendlyError } from '../lib/errorMessages';
-import { getTerritories, initialsFor, type Person, searchChurchPeople, type TerritoryWithActivity } from '../lib/evangelismService';
+import { getTerritories, type Person, searchChurchPeople, type TerritoryWithActivity } from '../lib/evangelismService';
 import {
   addressLine,
   DAY_SHORT,
@@ -408,6 +409,11 @@ export default function HomeCellsScreen() {
                 {finding ? <ActivityIndicator color={theme.colors.textOnAccent} /> : <Text style={styles.goldButtonText}>Find</Text>}
               </Pressable>
             </View>
+            {/* Names fill in as you type; an ADDRESS does not. The free map
+                service that turns an address into a place on the map allows one
+                lookup a second, so this one waits for the button — and says so,
+                rather than looking broken beside the name boxes that do not. */}
+            <Text style={styles.meta}>Addresses need the Find button. The free map service we use allows one lookup a second, so it is not searched while you type.</Text>
             {findNote ? <Text style={styles.warnText}>{findNote}</Text> : null}
             {from ? (
               nearby.length ? (
@@ -550,24 +556,8 @@ function CellForm({ theme, draft, setDraft, saving, finding, canRemove, onCancel
   onRemove: () => void;
 }) {
   const styles = useStyles(theme);
-  const [personQuery, setPersonQuery] = useState('');
-  const [people, setPeople] = useState<Person[] | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [personError, setPersonError] = useState<string | null>(null);
   const update = (patch: Partial<Draft>) => setDraft((current) => (current ? { ...current, ...patch } : current));
   const parsed = draft.timeText.trim() ? parseMeetingTime(draft.timeText) : null;
-
-  async function searchPeople() {
-    setSearching(true);
-    setPersonError(null);
-    try {
-      setPeople(await searchChurchPeople(personQuery));
-    } catch (error) {
-      setPersonError(friendlyError(error, 'People could not load just now.'));
-    } finally {
-      setSearching(false);
-    }
-  }
 
   return (
     <View style={[styles.card, styles.formCard]}>
@@ -587,25 +577,20 @@ function CellForm({ theme, draft, setDraft, saving, finding, canRemove, onCancel
           </Pressable>
         </View>
       ) : (
-        <View style={styles.searchRow}>
-          <TextInput accessibilityLabel="Find the leader in the app, optional" value={personQuery} onChangeText={setPersonQuery} onSubmitEditing={searchPeople} returnKeyType="search" placeholder="Link to their account (optional)" placeholderTextColor={theme.colors.textMuted} style={[styles.input, styles.flex]} />
-          <Pressable accessibilityRole="button" accessibilityLabel="Search people" accessibilityState={{ busy: searching }} onPress={searchPeople} style={styles.smallButton}>
-            {searching ? <ActivityIndicator color={theme.colors.textPrimary} /> : <Ionicons name="search" size={18} color={theme.colors.textPrimary} />}
-            <Text style={styles.smallButtonText}>Search</Text>
-          </Pressable>
-        </View>
+        // Typing finds them — no Search button. The owner's words, TestFlight
+        // 36: "a list should show with their profile pic as we type their
+        // name." A leader with no account is still fine: the typed name above
+        // is what is kept, and linking an account is the optional extra.
+        <OutreachPersonSearch
+          theme={theme}
+          label="Link to their account (optional)"
+          placeholder="Start typing their name"
+          nobodyNoun="Nobody in the church"
+          pickLabel="Link"
+          search={(term, signal) => searchChurchPeople(term, 20, signal)}
+          onPick={(person) => update({ leader: person, leaderName: draft.leaderName || person.displayName })}
+        />
       )}
-      {personError ? <Text style={styles.warnText}>{personError}</Text> : null}
-      {!draft.leader && people ? (
-        people.length ? people.map((person) => (
-          <Pressable key={person.id} accessibilityRole="button" accessibilityLabel={`Link ${person.displayName}`} onPress={() => { update({ leader: person, leaderName: draft.leaderName || person.displayName }); setPeople(null); setPersonQuery(''); }} style={styles.personRow}>
-            {person.avatarUrl
-              ? <Image source={{ uri: person.avatarUrl }} style={styles.avatarImage} accessibilityElementsHidden importantForAccessibility="no" />
-              : <View style={styles.avatar} accessibilityElementsHidden importantForAccessibility="no"><Text style={styles.avatarText}>{initialsFor(person.displayName)}</Text></View>}
-            <Text style={[styles.cellName, styles.flex]}>{person.displayName}</Text>
-          </Pressable>
-        )) : <Text style={styles.meta}>Nobody by that name. Type at least two letters of their name.</Text>
-      ) : null}
 
       <Text style={styles.formLabel}>Meets on</Text>
       <View style={styles.chips} accessibilityRole="radiogroup">
@@ -746,11 +731,7 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   chipText: { color: t.colors.textPrimary, fontWeight: '700', fontSize: t.type.meta },
   chipTextOn: { color: t.colors.textOnAccent, fontWeight: '900' },
   linkedRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.sm },
-  personRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.md, minHeight: 56, paddingVertical: 6, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: t.colors.border },
   switchRow: { flexDirection: 'row', alignItems: 'center', gap: t.spacing.sm, minHeight: 48, marginTop: 4 },
-  avatar: { minWidth: 40, minHeight: 40, borderRadius: 20, backgroundColor: t.colors.brandSolid, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
-  avatarImage: { width: 40, height: 40, borderRadius: 20 },
-  avatarText: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.meta },
 
   privacyNote: { color: t.colors.textMuted, fontSize: t.type.overline, lineHeight: 17, marginTop: t.spacing.lg, textAlign: 'center' },
 }));

@@ -30,20 +30,39 @@ export const LIVE_POLL_MS = 60_000;
 
 const LIVE_COLUMNS = 'id,source,video_id,url,title,is_live,started_at,checked_at,confirmed_at,detail,embeddable,manual_override';
 
+/** The one row, read straight from the table. null when the read was refused. */
+async function readLiveRow(): Promise<LiveRow | null> {
+  const read = await supabase.from('live_status').select(LIVE_COLUMNS).eq('id', 1).maybeSingle();
+  return read.error ? null : ((read.data || null) as LiveRow | null);
+}
+
 /**
  * The current answer. Reads the cached row; asks the edge function only when
  * the row is stale. If the function cannot be reached, the row we already
  * have still decides, so a hand-started live keeps showing.
+ *
+ * After the function has run, the ROW it just wrote is read back and the
+ * answer worked out here — the same rule checkLiveNow follows, and for the
+ * same reason (DO-NOT-BREAK #54). The function is deployed separately from
+ * the app, so an older copy of it leaves newer facts out of its reply.
+ * Review, 2026-09-23: the deployed copy does not send `endedHideUntil`, and
+ * that is the only thing on the live screen that tells a leader their own
+ * "End live" is holding the service down and offers "Show it again". Trusting
+ * the reply here left the twelve-hour hold with no way out of it except the
+ * leader happening to press Check now.
  */
 export async function fetchLiveState(nowMs: number = Date.now()): Promise<LiveState> {
   if (!hasSupabase) return { ...NOT_LIVE };
-  const read = await supabase.from('live_status').select(LIVE_COLUMNS).eq('id', 1).maybeSingle();
-  const row = read.error ? null : ((read.data || null) as LiveRow | null);
+  const row = await readLiveRow();
   if (row && !rowNeedsRefresh(row, nowMs)) return resolveLiveState(row, nowMs);
 
   const fresh = await supabase.functions.invoke('live-status', { body: {} });
-  const answer = fresh.error ? null : normalizeLiveState(fresh.data);
-  if (answer) return answer;
+  if (!fresh.error) {
+    const written = await readLiveRow();
+    if (written) return resolveLiveState(written, Date.now());
+    const answer = normalizeLiveState(fresh.data);
+    if (answer) return answer;
+  }
   if (row) return resolveLiveState(row, Date.now());
   throw new FriendlyError('We could not check whether we are live right now. Please try again in a moment.');
 }
@@ -129,12 +148,32 @@ export function detectionText(state: Pick<LiveState, 'detection'> & Partial<Pick
   }
 }
 
-/** Whether the app would play this stream itself, in words a leader understands. */
-export function embeddableText(state: Pick<LiveState, 'embeddable' | 'isLive' | 'source'>): string {
+/**
+ * Whether the app would play this stream itself, in words a leader understands.
+ * When nothing is live, the answer for the LAST stream the server looked at is
+ * still a fact worth showing, so the panel does not say "not known yet" about
+ * a row that plainly knows.
+ */
+export function embeddableText(state: Pick<LiveState, 'embeddable' | 'isLive' | 'source'> & Partial<Pick<LiveState, 'lastSeenEmbeddable'>>): string {
   if (state.source === 'facebook') return 'Facebook streams open in the Facebook app.';
-  if (state.embeddable === false) return 'No — YouTube will not let this one play inside the app, so Watch opens YouTube.';
-  if (state.embeddable === true) return 'Yes — it plays inside the app.';
+  // Review 2026-09-23: the stored answer is about the last stream YouTube
+  // reported. That is a fact worth showing once nothing is live — and it is
+  // NOT a fact about a different stream that is live now. A leader who
+  // hand-started a link was read the previous stream's "No" while Watch was
+  // plainly playing the new one inside the app. So while something is live,
+  // only what we know about THAT stream may be said (DO-NOT-BREAK #53).
+  const answer = state.isLive ? state.embeddable ?? null : state.embeddable ?? state.lastSeenEmbeddable ?? null;
+  if (answer === false) return 'No — YouTube will not let this one play inside the app, so Watch opens YouTube.';
+  if (answer === true) return state.isLive ? 'Yes — it plays inside the app.' : 'Yes — the last stream played inside the app.';
   return 'Not known yet. The app will try its own player first.';
+}
+
+/** "until 9:00 PM" for the hold a leader's End live puts on one stream. */
+export function hideEndsText(endedHideUntil: string | null): string {
+  if (!endedHideUntil) return '';
+  const at = Date.parse(endedHideUntil);
+  if (!Number.isFinite(at)) return '';
+  return new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 export type LiveFact = { label: string; value: string };
@@ -146,11 +185,19 @@ export type LiveFact = { label: string; value: string };
  * guess and never a blank.
  */
 export function liveFacts(state: LiveState, nowMs: number = Date.now()): LiveFact[] {
-  const videoId = state.videoId || state.autoVideoId || state.lastSeenVideoId;
+  // Same rule as embeddableText: while something is live, every line is about
+  // THAT stream. Falling back to the last stream YouTube saw put another
+  // service's title and video id under the plain labels "Stream title" and
+  // "Video id" — a guess wearing a fact's clothes.
+  const videoId = state.isLive ? state.videoId || state.autoVideoId : state.videoId || state.autoVideoId || state.lastSeenVideoId;
+  const videoIdText = videoId || (state.isLive && state.source === 'facebook' ? 'None — this is a Facebook stream' : 'None');
+  const titleText = state.isLive
+    ? state.title || 'None given — the app shows “Live service”'
+    : state.title || state.lastSeenTitle || 'None yet';
   const checkedClock = state.checkedAt && Number.isFinite(Date.parse(state.checkedAt))
     ? new Date(state.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
     : null;
-  return [
+  const facts: LiveFact[] = [
     {
       label: 'Are we live in the app?',
       value: state.isLive
@@ -158,14 +205,26 @@ export function liveFacts(state: LiveState, nowMs: number = Date.now()): LiveFac
         : 'No',
     },
     { label: 'What YouTube said', value: detectionText(state) },
-    { label: 'Stream title', value: state.title || state.lastSeenTitle || 'None yet' },
-    { label: 'Video id', value: videoId || 'None' },
+    { label: 'Stream title', value: titleText },
+    { label: 'Video id', value: videoIdText },
     {
       label: 'Last checked',
       value: checkedClock ? `${checkedText(state.checkedAt, nowMs)} (${checkedClock})` : checkedText(state.checkedAt, nowMs),
     },
     { label: 'Plays inside the app?', value: embeddableText(state) },
   ];
+  // The one thing the panel used to leave out. Without it a leader reads "No"
+  // under "YouTube shows us live" and has nothing to go on: End live holds one
+  // stream down for MANUAL_END_HOURS, and OBS reconnecting to the same
+  // scheduled broadcast comes back with the SAME video id.
+  if (state.endedHideUntil) {
+    const until = hideEndsText(state.endedHideUntil);
+    facts.splice(1, 0, {
+      label: 'Is a leader holding it back?',
+      value: `Yes — someone pressed End live on this stream, so the app hides it${until ? ` until ${until}` : ''}. Use “Show it again” below.`,
+    });
+  }
+  return facts;
 }
 
 /**
@@ -179,6 +238,13 @@ export async function checkLiveNow(): Promise<LiveState> {
   if (fresh.error) {
     throw new FriendlyError('We could not reach the live checker just now. Please check your connection and try again.');
   }
+  // The function has just looked at YouTube and written the row. Read that row
+  // and work the answer out here, so the panel shows everything this app knows
+  // how to show even when the deployed function is an older copy than the app
+  // (it is deployed separately, so the two are not always the same age). The
+  // function's own reply is the fallback if the read is refused.
+  const row = await readLiveRow();
+  if (row) return resolveLiveState(row, Date.now());
   const answer = normalizeLiveState(fresh.data);
   if (!answer) {
     throw new FriendlyError('The live checker gave an answer we could not read. Please try again in a moment.');
@@ -261,6 +327,15 @@ export async function goLive(input: { url: string; title?: string; notify: boole
 
 export async function endLive(state: Pick<LiveState, 'autoVideoId'>): Promise<void> {
   await writeOverride(endLiveOverride(state));
+}
+
+/**
+ * Undo an "End live" that is still holding a stream down. Clearing the column
+ * is the whole job: with no override left, YouTube's own answer decides again
+ * on the very next check, and this phone reloads straight away.
+ */
+export async function showLiveAgain(): Promise<void> {
+  await writeOverride(null);
 }
 
 // ---------------------------------------------------------------------------
@@ -368,7 +443,7 @@ export function useLiveStatus() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const alive = useRef(true);
-  const inFlight = useRef<Promise<void> | null>(null);
+  const inFlight = useRef<Promise<LiveState | null> | null>(null);
   // Every request gets a number; only the newest answer is shown. Without
   // this, a poll that set off before a leader pressed Go live could land
   // after it and put "not live" back on screen for a minute.
@@ -379,17 +454,25 @@ export function useLiveStatus() {
     return () => { alive.current = false; };
   }, []);
 
-  const run = useCallback(async () => {
+  /**
+   * Hands the new answer back as well as putting it on screen, and `null`
+   * when there is none — the check failed, or a newer one has already won.
+   * A caller that has just changed something (End live) needs to know what
+   * the app really shows now before it says so in words.
+   */
+  const run = useCallback(async (): Promise<LiveState | null> => {
     const mine = ++generation.current;
     try {
       const next = await fetchLiveState();
-      if (!alive.current || mine !== generation.current) return;
+      if (!alive.current || mine !== generation.current) return null;
       setState(next);
       setError(null);
+      return next;
     } catch (err) {
       if (alive.current && mine === generation.current) {
         setError(friendlyError(err, 'We could not check whether we are live right now. Please try again in a moment.'));
       }
+      return null;
     } finally {
       if (alive.current && mine === generation.current) setLoading(false);
     }

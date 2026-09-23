@@ -66,6 +66,28 @@ test('a Firebase download link plays with the app’s own player, encoded path a
   assert.equal(video.native, true);
 });
 
+// A signed Supabase link works in the admin's hands and dies later. The token
+// carries an expiry — an hour by default — and after it passes the address
+// answers 400, so the song the whole church was sent goes silent with nobody
+// watching. It still posts (sometimes it is all somebody has), but it is never
+// posted silently.
+test('a temporary Supabase link posts, and says out loud that it expires', () => {
+  const signed = judge(SUPABASE_SIGNED);
+  assert.equal(signed.ok, true, 'a signed link must still be postable');
+  assert.equal(signed.native, true);
+  assert.match(signed.warning || '', /temporary/i);
+  assert.match(signed.warning || '', /object\/public/, 'say which link to use instead');
+
+  // The permanent one carries no such warning.
+  assert.equal(judge(SUPABASE_PUBLIC).warning, undefined);
+
+  // A signed PDF is warned about too, not only audio and video.
+  const signedDoc = judge('https://ljmzujrzdhwmvvapajlr.supabase.co/storage/v1/object/sign/app-assets/notes/outline.pdf?token=eyJhbGciOiJIUzI1NiJ9.abc.def');
+  assert.equal(signedDoc.ok, true);
+  assert.equal(signedDoc.playback, 'document');
+  assert.match(signedDoc.warning || '', /temporary/i);
+});
+
 test('a Firebase link missing ?alt=media still posts, but says what is wrong', () => {
   const verdict = judge(FIREBASE_NO_ALT);
   assert.equal(verdict.ok, true);

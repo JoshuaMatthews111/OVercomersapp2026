@@ -655,6 +655,57 @@ export function storyWentOut(story: Pick<AppStoryRow, 'status'>): boolean {
 }
 
 /**
+ * The confirmation after posting stories from Admin, worked out from what the
+ * database actually saved.
+ *
+ * `total` is how many rows were written; `live` is how many of them came back
+ * published (counted with `storyWentOut` above). The screen used to say
+ * "It is on Home right now" every time and offer "View post" straight to Home
+ * — so a story the filter had held sent the leader to an empty ring with a
+ * tick on the screen behind them.
+ *
+ * Pure on purpose: it is the part worth testing without a phone
+ * (qa/settings-admin-truth.test.mjs).
+ */
+export function storyPostConfirmation(
+  total: number,
+  live: number
+): { title: string; body: string; statusLabel: 'Published' | 'Draft'; canOpenHome: boolean; whereHint?: string } {
+  const held = Math.max(0, total - live);
+  const title = total > 1 ? `${total} stories posted` : 'Story posted';
+
+  if (!held) {
+    return {
+      title,
+      statusLabel: 'Published',
+      body: total > 1
+        ? 'They are on Home right now and stay there for 24 hours.'
+        : 'It is on Home right now and stays there for 24 hours.',
+      canOpenHome: true,
+    };
+  }
+
+  if (!live) {
+    return {
+      title,
+      statusLabel: 'Draft',
+      body: total > 1
+        ? 'They are waiting for a leader to read them before they go on Home. Nothing has been lost.'
+        : 'It is waiting for a leader to read it before it goes on Home. Nothing has been lost.',
+      canOpenHome: false,
+      whereHint: 'You will find it here in Admin, under Needs your look.',
+    };
+  }
+
+  return {
+    title,
+    statusLabel: 'Draft',
+    body: `${live} of ${total} are on Home now. The rest are waiting for a leader to read them before they go up — nothing has been lost.`,
+    canOpenHome: true,
+  };
+}
+
+/**
  * Post a story as a leader. Returns the saved story so the screen can drop it
  * into the ring at once — no second read, no waiting.
  */
@@ -834,6 +885,26 @@ export function mediaExtension(url: string): string | null {
   return match ? match[1].toLowerCase() : null;
 }
 
+/**
+ * A Supabase link that is only borrowed.
+ *
+ * "Copy URL" in the Supabase dashboard offers two shapes. The public one
+ * (`/object/public/…`) works for ever. The signed one (`/object/sign/…?token=`)
+ * carries an expiry inside the token — an hour by default — and after that the
+ * address answers 400 and the song, sermon or PDF goes silent for the whole
+ * church, long after the person who posted it has heard it play.
+ *
+ * It still posts: sometimes a signed link is genuinely what somebody has. But
+ * it is never posted without being told what it is.
+ */
+function isBorrowedSupabaseLink(parsed: URL, isSupabase: boolean): boolean {
+  if (!isSupabase) return false;
+  return parsed.pathname.includes('/object/sign/') || parsed.searchParams.has('token');
+}
+
+const BORROWED_LINK_WARNING =
+  'That is a temporary link. It stops working after a while — often within the hour — and then nobody can play it. Copy the permanent link instead, the one with /object/public/ in it, or upload the file here.';
+
 function hostOf(url: string): string | null {
   try {
     return new URL(url.trim()).hostname.toLowerCase();
@@ -901,6 +972,8 @@ export function classifyMediaLink(
     || (extension && AUDIO_EXTENSIONS.includes(extension) ? 'audio' : null)
     || (extension && VIDEO_EXTENSIONS.includes(extension) ? 'video' : null);
 
+  const borrowed = isBorrowedSupabaseLink(parsed, isSupabase);
+
   if (kind) {
     const firebaseNeedsAltMedia = isFirebase && !parsed.searchParams.has('alt');
     return {
@@ -914,7 +987,9 @@ export function classifyMediaLink(
         : 'It will play as video in the app’s own player.',
       warning: firebaseNeedsAltMedia
         ? 'A Firebase link usually needs ?alt=media on the end. Without it the app is handed a web page instead of the file.'
-        : undefined,
+        : borrowed
+          ? BORROWED_LINK_WARNING
+          : undefined,
     };
   }
 
@@ -926,6 +1001,7 @@ export function classifyMediaLink(
       playback: 'document',
       native: false,
       message: 'It will open as a document, not a player.',
+      warning: borrowed ? BORROWED_LINK_WARNING : undefined,
     };
   }
 
@@ -1039,7 +1115,11 @@ export function whereItLives(posted: PostedThing): string {
     case 'music': return 'the Music section of the Media tab';
     case 'video': return 'the Videos section of the Media tab';
     case 'article': return 'the Articles section of the Media tab';
-    case 'devotional': return 'the Articles section of the Media tab';
+    // A devotional is listed WITH the sermons on the Media tab
+    // (byKind(['sermon', 'devotional']) in app/(tabs)/messages.tsx), not under
+    // Articles. Saying Articles sent the person who posted it to the blog list
+    // to hunt for something that was never going to be there.
+    case 'devotional': return 'the Sermons section of the Media tab';
     case 'live': return 'the Media tab';
     default: return 'the Sermons section of the Media tab';
   }
@@ -1073,7 +1153,9 @@ export function viewPostAction(
   }
 
   const url = (posted.url || '').trim();
-  if (posted.mediaType === 'article' || posted.mediaType === 'devotional') {
+  // Only a real article opens the blog list. A devotional sits with the
+  // sermons, so it falls through to the player / Media tab below.
+  if (posted.mediaType === 'article') {
     return { how: 'route', href: '/(tabs)/messages?tab=blog', label: 'View post', where };
   }
 

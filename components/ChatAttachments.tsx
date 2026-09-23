@@ -38,6 +38,26 @@ const CHOICES: Choice[] = [
   { key: 'document', label: 'Document', icon: 'document-text' },
 ];
 
+/**
+ * Say one thing to the person, on every build.
+ *
+ * THIRD REVIEW, 2026-09-23. react-native-web's Alert is
+ * `class Alert { static alert() {} }` — it does nothing at all. Every refusal
+ * in this sheet went through Alert.alert, so on the web build picking a file
+ * the group does not take, or one over the size limit, or a file the picker
+ * could not open, said NOTHING: the sheet closed, no bubble appeared, and the
+ * person was left to guess whether the app or their file was broken. That is
+ * the same trap DO-NOT-BREAK #47 names for a question; this is the same trap
+ * for a statement, so it takes the same way out.
+ */
+function say(title: string, body: string) {
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && typeof window.alert === 'function') window.alert(`${title}\n\n${body}`);
+    return;
+  }
+  Alert.alert(title, body);
+}
+
 async function pick(choice: Choice['key']): Promise<PickedFile | null> {
   if (choice === 'document') {
     const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
@@ -48,7 +68,7 @@ async function pick(choice: Choice['key']): Promise<PickedFile | null> {
   let result: ImagePicker.ImagePickerResult;
   if (choice === 'camera') {
     const permission = await ImagePicker.requestCameraPermissionsAsync();
-    if (!permission.granted) { Alert.alert('Camera access needed', 'Allow camera access in Settings, or choose a photo from your library.'); return null; }
+    if (!permission.granted) { say('Camera access needed', 'Allow camera access in Settings, or choose a photo from your library.'); return null; }
     result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images', 'videos'], quality: 0.85, videoMaxDuration: 120 });
   } else {
     // The system picker needs no library permission on iOS 14+ / Android 13+.
@@ -66,21 +86,54 @@ async function pick(choice: Choice['key']): Promise<PickedFile | null> {
 }
 
 /** Pictures and clips, however they are labelled. Kept beside the same list in
- *  the database trigger (supabase/2026-09-23-chat-post-rules-review-fixes.sql). */
+ *  the database trigger (supabase/2026-09-23-chat-post-rules-second-review.sql). */
 const MEDIA_FILE_NAME = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|avif|mp4|mov|m4v|avi|mkv|webm|3gp)$/i;
+/**
+ * Recordings, however they are labelled. Added by the second review,
+ * 2026-09-23: `kind` comes from the MIME type (attachmentKindFromMime), and a
+ * file chosen through Document on a provider that reports no MIME type comes
+ * back as 'file'. Without this list a recording walked straight into a group
+ * that had voice notes turned off — from the app, not only from the API.
+ * Same list as the database trigger.
+ */
+const AUDIO_FILE_NAME = /\.(m4a|mp3|wav|aac|ogg|oga|opus|caf|amr|flac|aiff?|wma|mpga)$/i;
 
 /**
  * The words a person reads when this group does not take this kind of file,
  * or null when it does. The same sentences the database raises, so the two
  * never say different things.
+ *
+ * Two answers are weighed: what the file says it is (`kind`, from its MIME
+ * type) and what it is named. A name only gets a say when the MIME type does
+ * not already disagree with it — so a recording named .mp4 is still a voice
+ * note rather than a video, and a picture named .m4a is still a picture.
  */
 export function refuseByRoomRules(file: PickedFile, allowMedia: boolean, allowVoiceNotes: boolean): string | null {
   const named = String(file.name || file.uri || '').split('?')[0];
-  const looksLikeMedia = file.kind === 'image' || file.kind === 'video'
-    || (file.kind !== 'audio' && MEDIA_FILE_NAME.test(named));
+  const saidMedia = file.kind === 'image' || file.kind === 'video';
+  const saidAudio = file.kind === 'audio';
+  const looksLikeMedia = saidMedia || (!saidAudio && MEDIA_FILE_NAME.test(named));
+  const looksLikeAudio = saidAudio || (!saidMedia && AUDIO_FILE_NAME.test(named));
   if (!allowMedia && looksLikeMedia) return 'Photos and videos are turned off in this group.';
-  if (!allowVoiceNotes && file.kind === 'audio') return 'Voice notes are turned off in this group.';
+  if (!allowVoiceNotes && looksLikeAudio) return 'Voice notes are turned off in this group.';
   return null;
+}
+
+/**
+ * The line at the top of the "Send something" sheet, or null when this group
+ * limits nothing. Second review, 2026-09-23: a group with voice notes off used
+ * to say nothing here at all, so picking a recording out of Files was refused
+ * only afterwards, in a pop-up. Now the sheet says it first.
+ */
+export function attachSheetNote(allowMedia: boolean, allowVoiceNotes: boolean): string | null {
+  if (allowMedia && allowVoiceNotes) return null;
+  if (!allowMedia && !allowVoiceNotes) {
+    return 'Photos, videos and recordings are turned off in this group. You can still send a document or a song.';
+  }
+  if (!allowMedia) {
+    return 'Photos and videos are turned off in this group. You can still send a document or a song.';
+  }
+  return 'Recordings are turned off in this group. Photos, videos and documents still work.';
 }
 
 export function AttachSheet({ visible, dark, onClose, onPicked, onSong, allowMedia = true, allowVoiceNotes = true }: {
@@ -119,7 +172,7 @@ export function AttachSheet({ visible, dark, onClose, onPicked, onSong, allowMed
       if (!file) return;
       // Say no here, instantly, rather than after a long upload that fails.
       if (file.size && file.size > chatAttachmentLimitBytes()) {
-        return Alert.alert('That file is too big to send', tooLargeMessage('chat-attachments', file.size));
+        return say('That file is too big to send', tooLargeMessage('chat-attachments', file.size));
       }
       // A group's own limits, checked BEFORE the upload starts (2026-09-23).
       // Document is still offered when photos are off, because a document is
@@ -128,10 +181,10 @@ export function AttachSheet({ visible, dark, onClose, onPicked, onSong, allowMed
       // a 40 MB video upload finish and only then reads that it was never
       // allowed, and nothing is left behind in the private bucket.
       const refusal = refuseByRoomRules(file, allowMedia, allowVoiceNotes);
-      if (refusal) return Alert.alert('That cannot be sent here', refusal);
+      if (refusal) return say('That cannot be sent here', refusal);
       onPicked(file);
     } catch (err) {
-      Alert.alert('We could not open that', friendlyError(err, 'Please try choosing the file again.'));
+      say('We could not open that', friendlyError(err, 'Please try choosing the file again.'));
     }
   }
 
@@ -159,8 +212,8 @@ export function AttachSheet({ visible, dark, onClose, onPicked, onSong, allowMed
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close attachment choices" />
         <View style={[styles.sheet, { marginBottom: Math.max(12, insets.bottom) }]}>
           <Text style={styles.sheetHeading}>Send something</Text>
-          {!allowMedia ? (
-            <Text style={styles.sheetNote}>Photos and videos are turned off in this group. You can still send a document or a song.</Text>
+          {attachSheetNote(allowMedia, allowVoiceNotes) ? (
+            <Text style={styles.sheetNote}>{attachSheetNote(allowMedia, allowVoiceNotes)}</Text>
           ) : null}
           <View style={styles.grid}>
             {(allowMedia ? CHOICES : CHOICES.filter((choice) => choice.key === 'document')).map((choice) => (
