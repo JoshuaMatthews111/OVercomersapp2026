@@ -30,7 +30,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 };
 
-const COLUMNS = 'id,source,video_id,url,title,is_live,started_at,checked_at,confirmed_at,detail,manual_override';
+const COLUMNS = 'id,source,video_id,url,title,is_live,started_at,checked_at,confirmed_at,detail,embeddable,manual_override';
 
 // A desktop browser asking in English. The consent cookies stop YouTube from
 // answering a server in Europe with its cookie banner instead of the page.
@@ -83,7 +83,7 @@ Deno.serve(async (req) => {
       const columns = detectionColumns(row, found, new Date().toISOString(), confirmedTitle);
       const saved = await db.from('live_status').update(columns).eq('id', 1).select(COLUMNS).maybeSingle();
       if (!saved.error && saved.data) row = saved.data as LiveRow;
-      console.log(JSON.stringify({ event: 'live-status-check', state: found.state, reason: found.reason, videoId: found.videoId }));
+      console.log(JSON.stringify({ event: 'live-status-check', state: found.state, reason: found.reason, videoId: found.videoId, embeddable: found.embeddable ?? null }));
     } else {
       const again = await db.from('live_status').select(COLUMNS).eq('id', 1).maybeSingle();
       if (!again.error && again.data) row = again.data as LiveRow;
@@ -109,18 +109,30 @@ async function lookAtYouTube(channelId: string): Promise<{ found: YouTubeDetecti
   if (found.state !== 'live' || !found.videoId) return { found, confirmedTitle: null };
 
   // Cross-check the live video through oEmbed: its real title, and whether it
-  // may be played inside another app at all.
+  // may be played inside another app at all. YouTube answers 401 (sometimes
+  // 403) for a video whose channel has turned embedding off — the app then
+  // offers "Watch on YouTube" instead of a player that could only show
+  // YouTube's own error screen.
   try {
     const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${found.videoId}`)}&format=json`;
     const reply = await fetchText(oembedUrl, { 'Accept-Language': 'en-US,en;q=0.9' }, 4000);
     if (reply.status === 200) {
       const parsed = JSON.parse(reply.text) as { title?: unknown };
       const title = typeof parsed.title === 'string' ? parsed.title.trim() : '';
-      return { found, confirmedTitle: title || null };
+      return { found: { ...found, embeddable: true }, confirmedTitle: title || null };
     }
     if (reply.status === 401 || reply.status === 403) {
-      return { found: { ...found, reason: `${found.reason}; embedding is turned off for this video, so it may only play in YouTube` }, confirmedTitle: null };
+      return {
+        found: {
+          ...found,
+          embeddable: false,
+          reason: `${found.reason}; embedding is turned off for this video, so it may only play in YouTube`,
+        },
+        confirmedTitle: null,
+      };
     }
+    // Any other answer (404, a timeout, YouTube having a bad minute) tells us
+    // nothing about embedding, so we do not claim to know.
     return { found, confirmedTitle: null };
   } catch {
     return { found, confirmedTitle: null };
@@ -128,7 +140,7 @@ async function lookAtYouTube(channelId: string): Promise<{ found: YouTubeDetecti
 }
 
 function unsure(reason: string): YouTubeDetection {
-  return { state: 'unsure', reason, videoId: null, title: null, channelId: null, startedAt: null };
+  return { state: 'unsure', reason, videoId: null, title: null, channelId: null, startedAt: null, embeddable: null };
 }
 
 async function fetchText(url: string, headers: Record<string, string>, timeoutMs: number) {

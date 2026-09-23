@@ -764,3 +764,349 @@ export async function createAdminEvent(input: {
   if (error) throw error;
   return data;
 }
+
+/**
+ * ---------------------------------------------------------------------------
+ * Posting: a pasted media link, and "View post" afterwards
+ * ---------------------------------------------------------------------------
+ * Two owner notes from TestFlight 36 live here:
+ *
+ *   "make sure in future we can use supabase links or firebase [for media]"
+ *   "when posting something there should be something like view post,
+ *    especially when media like I uploaded a song."
+ *
+ * Both are pure logic with no database and no React in them, so qa/ can test
+ * them directly (qa/settings-media-links.test.mjs, qa/postview.test.mjs).
+ *
+ * How the KIND is decided is NOT re-invented here. lib/embed.ts owns that —
+ * `fileKind()` for a real file and `embedUrl()` for YouTube / Vimeo / Facebook
+ * — and this only reads those answers and turns them into a sentence a person
+ * can act on. A file plays with the NATIVE player, which is what keeps a song
+ * going with the screen off; a YouTube page plays in a web view and does not.
+ * ---------------------------------------------------------------------------
+ */
+
+/** Where a pasted link comes from, as far as we can tell from the address alone. */
+export type MediaLinkSource = 'supabase' | 'firebase' | 'youtube' | 'vimeo' | 'facebook' | 'file' | 'unknown';
+
+/** How the app will play it. */
+export type MediaLinkPlayback = 'audio' | 'video' | 'document' | 'embed' | 'unknown';
+
+export type MediaLinkVerdict = {
+  /** True when this link is good enough to post. */
+  ok: boolean;
+  /** The trimmed address we judged. */
+  url: string;
+  source: MediaLinkSource;
+  playback: MediaLinkPlayback;
+  /** True when it plays with the app's own player (and so keeps going with the screen off). */
+  native: boolean;
+  /** One plain sentence for the person who pasted it. */
+  message: string;
+  /** Set when something about the link deserves a warning, even if it will post. */
+  warning?: string;
+};
+
+/** Files we can play or open. Kept beside lib/embed.ts's own list on purpose. */
+const AUDIO_EXTENSIONS = ['mp3', 'm4a', 'aac', 'wav', 'ogg'];
+const VIDEO_EXTENSIONS = ['mp4', 'm4v', 'mov', 'm3u8', 'webm'];
+const DOCUMENT_EXTENSIONS = ['pdf', 'doc', 'docx', 'ppt', 'pptx', 'txt', 'epub'];
+
+/**
+ * The file extension inside a storage address.
+ *
+ * Firebase writes the object's path INTO the url, percent-encoded
+ * (`/o/music%2FResilience.mp3`), and Supabase writes it plainly
+ * (`/object/public/sermon-media/music/Resilience.mp3`). Decoding first means
+ * both shapes answer the same question the same way.
+ */
+export function mediaExtension(url: string): string | null {
+  const beforeQuery = (url || '').split('?')[0].split('#')[0];
+  let path = beforeQuery;
+  try {
+    path = decodeURIComponent(beforeQuery);
+  } catch {
+    // A half-encoded address still has its extension on the end, so read it
+    // exactly as it was pasted rather than giving up on it.
+    path = beforeQuery;
+  }
+  const match = /\.([A-Za-z0-9]{1,5})$/.exec(path);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url.trim()).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Judge a pasted media address.
+ *
+ * `embedFor` and `kindFor` are handed in so the caller passes lib/embed.ts's
+ * own `embedUrl` and `fileKind` (app/admin.tsx does). Nothing here re-decides
+ * what those two functions already decide.
+ */
+export function classifyMediaLink(
+  raw: string,
+  helpers: { embedFor: (url: string) => string | null; kindFor: (url: string) => 'audio' | 'video' | null }
+): MediaLinkVerdict {
+  const url = (raw || '').trim();
+  const base: MediaLinkVerdict = { ok: false, url, source: 'unknown', playback: 'unknown', native: false, message: '' };
+
+  if (!url) {
+    return { ...base, message: 'Paste a link, or upload a file.' };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ...base, message: 'That is not a web address. Paste the whole link, starting with https://' };
+  }
+
+  if (parsed.protocol !== 'https:') {
+    return {
+      ...base,
+      message: 'Links have to start with https:// so the file is safe on the way to the phone.',
+    };
+  }
+
+  const host = (hostOf(url) || '').replace(/^www\./, '');
+  const extension = mediaExtension(url);
+  const isSupabase = host.endsWith('.supabase.co') || host.endsWith('.supabase.in');
+  const isFirebase = host === 'firebasestorage.googleapis.com' || host.endsWith('.firebasestorage.app') || host.endsWith('.appspot.com');
+
+  // A watch page: YouTube, Vimeo or Facebook. lib/embed.ts decides this.
+  if (helpers.embedFor(url)) {
+    const source: MediaLinkSource = host.includes('youtu') ? 'youtube' : host.includes('vimeo') ? 'vimeo' : 'facebook';
+    return {
+      ok: true,
+      url,
+      source,
+      playback: 'embed',
+      native: false,
+      message: 'It will play inside the app in a web player.',
+      warning: source === 'youtube'
+        ? 'A YouTube video stops when the screen goes off. Upload the file, or paste a direct link to it, if it has to keep playing.'
+        : undefined,
+    };
+  }
+
+  const source: MediaLinkSource = isSupabase ? 'supabase' : isFirebase ? 'firebase' : 'file';
+  const fileSays = helpers.kindFor(url);
+  const kind = fileSays
+    || (extension && AUDIO_EXTENSIONS.includes(extension) ? 'audio' : null)
+    || (extension && VIDEO_EXTENSIONS.includes(extension) ? 'video' : null);
+
+  if (kind) {
+    const firebaseNeedsAltMedia = isFirebase && !parsed.searchParams.has('alt');
+    return {
+      ok: true,
+      url,
+      source,
+      playback: kind,
+      native: true,
+      message: kind === 'audio'
+        ? 'It will play as sound in the app’s own player, and keep playing with the screen off.'
+        : 'It will play as video in the app’s own player.',
+      warning: firebaseNeedsAltMedia
+        ? 'A Firebase link usually needs ?alt=media on the end. Without it the app is handed a web page instead of the file.'
+        : undefined,
+    };
+  }
+
+  if (extension && DOCUMENT_EXTENSIONS.includes(extension)) {
+    return {
+      ok: true,
+      url,
+      source,
+      playback: 'document',
+      native: false,
+      message: 'It will open as a document, not a player.',
+    };
+  }
+
+  if (isSupabase || isFirebase) {
+    return {
+      ...base,
+      url,
+      source,
+      message: 'We can see it is a storage link, but not what kind of file it is. Use the link that ends in .mp3, .mp4 or .pdf.',
+      warning: 'This may be a page rather than a file.',
+    };
+  }
+
+  return {
+    ...base,
+    url,
+    message: 'That looks like a web page, not a media file. Paste a YouTube, Vimeo or Facebook link, or a direct link ending in .mp3, .mp4 or .pdf.',
+    warning: 'This may be a page rather than a file.',
+  };
+}
+
+export type MediaLinkCheck = {
+  /** 'ok' when the address answered, 'missing' when it said no, 'unknown' when we could not ask. */
+  reachable: 'ok' | 'missing' | 'unknown';
+  /** What the server said it is, when it said anything. */
+  contentType?: string;
+  /** One plain sentence, always. */
+  message: string;
+};
+
+/**
+ * Ask the address itself what it is, with a HEAD request.
+ *
+ * This is a courtesy, never a gate: plenty of storage buckets refuse HEAD, and
+ * a phone on a weak signal cannot ask at all. Every one of those cases comes
+ * back as 'unknown' with a sentence that says we could not check — it never
+ * pretends the link is bad and never pretends it is good.
+ */
+export async function checkMediaLink(
+  url: string,
+  options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}
+): Promise<MediaLinkCheck> {
+  const run = options.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  if (!run) return { reachable: 'unknown', message: 'We could not check that link from this phone. It will still post.' };
+
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs ?? 6000) : null;
+  try {
+    const response = await run(url, { method: 'HEAD', signal: controller?.signal });
+    const contentType = (response.headers?.get?.('content-type') || '').split(';')[0].trim().toLowerCase() || undefined;
+    if (!response.ok) {
+      return {
+        reachable: 'missing',
+        contentType,
+        message: `That link answered with ${response.status}. Check it is shared publicly, or upload the file instead.`,
+      };
+    }
+    if (contentType && contentType.startsWith('text/html')) {
+      return {
+        reachable: 'ok',
+        contentType,
+        message: 'That address gives back a web page, not a media file. It will not play in the app’s own player.',
+      };
+    }
+    return {
+      reachable: 'ok',
+      contentType,
+      message: contentType ? `The link answered, and it is ${contentType}.` : 'The link answered.',
+    };
+  } catch {
+    return { reachable: 'unknown', message: 'We could not check that link just now. It will still post.' };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * "View post"
+ * ---------------------------------------------------------------------------
+ * After something is saved, the person who posted it should be able to see the
+ * thing itself, not a tick and a dead end. This works out where it went.
+ */
+
+export type PostedThing = {
+  what: 'media' | 'event' | 'notice' | 'story';
+  /** For 'media': which kind of media item it is. */
+  mediaType?: MediaKind;
+  title: string;
+  status: 'published' | 'draft';
+  /** The file or link that was saved with it, when there is one. */
+  url?: string | null;
+  /** For 'event': the row id, so /event-detail can open exactly that one. */
+  eventId?: string | null;
+};
+
+export type ViewPostAction =
+  /** Open it in the app's one player. */
+  | { how: 'play'; playback: 'audio' | 'video' | 'embed'; label: string; where: string }
+  /** Push a screen. */
+  | { how: 'route'; href: string; label: string; where: string }
+  /** Nothing can be opened from here — say where it is instead. */
+  | { how: 'none'; label: ''; where: string };
+
+/** Where a posted thing lives, in words a church member would use. */
+export function whereItLives(posted: PostedThing): string {
+  if (posted.what === 'story') return 'Home, for the next 24 hours';
+  if (posted.what === 'event') return 'the Events list';
+  if (posted.what === 'notice') return 'Chat, under Notices';
+  switch (posted.mediaType) {
+    case 'music': return 'the Music section of the Media tab';
+    case 'video': return 'the Videos section of the Media tab';
+    case 'article': return 'the Articles section of the Media tab';
+    case 'devotional': return 'the Articles section of the Media tab';
+    case 'live': return 'the Media tab';
+    default: return 'the Sermons section of the Media tab';
+  }
+}
+
+/**
+ * What the "View post" button should do.
+ *
+ * A song, a sermon with a file, or a video opens in the app's one player, so
+ * the person hears exactly what they just uploaded. Everything else pushes the
+ * screen that holds it. If there is nothing openable, the caller shows
+ * `where` as a sentence rather than a button that goes nowhere.
+ */
+export function viewPostAction(
+  posted: PostedThing,
+  helpers: { embedFor: (url: string) => string | null; kindFor: (url: string) => 'audio' | 'video' | null }
+): ViewPostAction {
+  const where = whereItLives(posted);
+
+  if (posted.what === 'story') {
+    return { how: 'route', href: '/(tabs)', label: 'View post', where };
+  }
+
+  if (posted.what === 'event') {
+    if (!posted.eventId) return { how: 'route', href: '/events', label: 'Open events', where };
+    return { how: 'route', href: `/event-detail?id=${encodeURIComponent(posted.eventId)}`, label: 'View post', where };
+  }
+
+  if (posted.what === 'notice') {
+    return { how: 'route', href: '/(tabs)/community?section=notices', label: 'View notice', where };
+  }
+
+  const url = (posted.url || '').trim();
+  if (posted.mediaType === 'article' || posted.mediaType === 'devotional') {
+    return { how: 'route', href: '/(tabs)/messages?tab=blog', label: 'View post', where };
+  }
+
+  if (url) {
+    const fileSays = helpers.kindFor(url);
+    if (fileSays) return { how: 'play', playback: fileSays, label: fileSays === 'audio' ? 'Play it' : 'Watch it', where };
+    if (helpers.embedFor(url)) return { how: 'play', playback: 'embed', label: 'Watch it', where };
+  }
+
+  return { how: 'route', href: '/(tabs)/messages', label: 'Open Media', where };
+}
+
+/**
+ * The confirmation itself: a title, a sentence, and the live status, so nobody
+ * has to guess whether what they posted is actually in front of the church.
+ */
+export function postedConfirmation(posted: PostedThing): { title: string; body: string; statusLabel: 'Published' | 'Draft' } {
+  const statusLabel: 'Published' | 'Draft' = posted.status === 'published' ? 'Published' : 'Draft';
+  const name = posted.title.trim();
+  const noun = posted.what === 'media'
+    ? (posted.mediaType === 'music' ? 'Song'
+      : posted.mediaType === 'video' ? 'Video'
+      : posted.mediaType === 'article' ? 'Article'
+      : posted.mediaType === 'devotional' ? 'Devotional'
+      : 'Teaching')
+    : posted.what === 'event' ? 'Event'
+    : posted.what === 'notice' ? 'Notice'
+    : 'Story';
+
+  const title = `${noun} posted`;
+  const body = posted.status === 'published'
+    ? `${name ? `"${name}" is` : 'It is'} live in ${whereItLives(posted)}.`
+    : `${name ? `"${name}" is` : 'It is'} saved as a draft. It is not in front of the church yet — publish it from Library when you are ready.`;
+
+  return { title, body, statusLabel };
+}

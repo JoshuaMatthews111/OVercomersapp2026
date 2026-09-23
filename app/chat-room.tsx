@@ -33,11 +33,16 @@ import {
   deleteChatMessageForEveryone,
   getChatMembers,
   getChatMessages,
+  getChatRoom,
   getChatRooms,
   hideChatMessageForMe,
   holdChatMessage,
+  isRoomLeader,
   isUserBlocked,
   joinChatRoom,
+  postRuleSummary,
+  postingRights,
+  updateGroupPostRules,
   removeChatMember,
   reportChatMessage,
   searchChatProfiles,
@@ -135,6 +140,8 @@ function ChatRoomView() {
   const alive = useRef(true);
 
   const [room, setRoom] = useState<ChatRoom | null>(null);
+  /** The latest room row, readable inside callbacks without re-creating them. */
+  const roomRef = useRef<ChatRoom | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [body, setBody] = useState('');
@@ -171,6 +178,10 @@ function ChatRoomView() {
   /** The long-press menu that is open, if any. */
   const [sheet, setSheet] = useState<{ title: string; subtitle?: string; actions: ChatSheetAction[] } | null>(null);
   const [pictureBusy, setPictureBusy] = useState(false);
+  /** Which group post limit is being saved, so only that row shows a spinner. */
+  const [rulesBusy, setRulesBusy] = useState<null | 'who' | 'media' | 'voice'>(null);
+  /** What the group-settings card has to say — saved, or why it did not. */
+  const [rulesNote, setRulesNote] = useState<string | null>(null);
   /** The message being answered. Its quote sits above the message box, and stays while a voice note is recorded. */
   const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
   /** Everyone's delivered / read marks in this room, by person. */
@@ -313,16 +324,32 @@ function ChatRoomView() {
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
+  /**
+   * The room row itself — its name, its picture and, since 2026-09-23, its
+   * post limits. It is read again on every pull-to-refresh: a leader can
+   * change who may post while somebody is standing in the room, and that
+   * person has to be able to get the new answer without being thrown out of
+   * the app and back in.
+   */
+  const loadRoom = useCallback(async () => {
     if (!roomId) return;
-    let cancelled = false;
-    getChatRooms()
-      .then((rooms) => { if (!cancelled) setRoom(rooms.find((item) => item.id === roomId) || null); })
-      // The room's own name came in on the route, so the header still reads
-      // correctly. Nothing to tell anybody about.
-      .catch(() => { if (!cancelled) setRoom(null); });
-    return () => { cancelled = true; };
+    try {
+      const one = await getChatRoom(roomId);
+      if (alive.current && one) { setRoom(one); return; }
+      const rooms = await getChatRooms();
+      if (alive.current) setRoom(rooms.find((item) => item.id === roomId) || null);
+    } catch (err) {
+      // The room's own name came in on the route, so the header still reads.
+      // But the post limits live on this row: if we never got them, say so
+      // rather than letting somebody type into a box that will refuse them.
+      if (alive.current && !roomRef.current) {
+        setError(friendlyError(err, "We could not load this group's settings. Pull down to try again."));
+      }
+    }
   }, [roomId]);
+
+  useEffect(() => { roomRef.current = room; }, [room]);
+  useEffect(() => { void loadRoom(); }, [loadRoom]);
 
   /**
    * Messages and the member roster are loaded separately on purpose.
@@ -477,6 +504,8 @@ function ChatRoomView() {
       setRefreshing(false);
     }
     loadRoster();
+    // A leader may have changed who can post while this room was open.
+    void loadRoom();
     void loadCursors();
   }
 
@@ -859,7 +888,8 @@ function ChatRoomView() {
     if (message.deleted) {
       actions.push(forMe);
     } else if (own) {
-      actions.push(reply);
+      // Reply is only offered where a reply can actually be sent.
+      if (rights.canPost) actions.push(reply);
       actions.push({
         key: 'info',
         label: 'Message info',
@@ -884,7 +914,7 @@ function ChatRoomView() {
       ]);
       // A leader may not remove or hold an admin's message. An admin may.
       const outranked = writerIsAdmin && access.level !== 'super_admin';
-      actions.push(reply);
+      if (rights.canPost) actions.push(reply);
       if (access.canRemoveChatMessages && !outranked) {
         actions.push({
           key: 'delete-all',
@@ -940,6 +970,52 @@ function ChatRoomView() {
   const canManageRoom = Boolean(
     room && room.type !== 'direct' && (access.canModerateChat || (userId && room.createdBy === userId)),
   );
+
+  /* -------------------------------------------------------------------------
+   * Group post limits (owner's TestFlight 36 note, 2026-09-23)
+   *
+   * The database decides — a trigger on chat_messages refuses the insert. All
+   * of this is so nobody types a paragraph into a box that was never going to
+   * send it: the composer says why, the plus button stops offering photos, and
+   * the line under the room's name tells every member what kind of room this
+   * is.
+   *
+   * Who may CHANGE them is access.canModerateChat, which mirrors
+   * is_chat_moderator() — exactly who the chat_channels policy lets update the
+   * row. A member never sees the controls at all (not greyed out).
+   * ----------------------------------------------------------------------- */
+  const myRoomRole = useMemo(
+    () => roomMembers.find((member) => member.userId === userId)?.role,
+    [roomMembers, userId],
+  );
+  const isLeaderHere = isRoomLeader({ room, userId, canModerateChat: access.canModerateChat, myRoomRole });
+  const rights = useMemo(
+    () => postingRights({ room: room && room.type !== 'direct' ? room : undefined, isLeader: isLeaderHere }),
+    [room, isLeaderHere],
+  );
+  const ruleWords = postRuleSummary(room);
+  const canChangeRules = Boolean(room && room.type !== 'direct' && access.canModerateChat);
+
+  async function saveRules(which: 'who' | 'media' | 'voice', changes: Parameters<typeof updateGroupPostRules>[1]) {
+    if (!room || rulesBusy) return;
+    setRulesBusy(which);
+    setRulesNote(null);
+    try {
+      const next = await updateGroupPostRules(room.id, changes);
+      if (!alive.current) return;
+      setRoom((current) => (current ? { ...current, ...next } : current));
+      // The truth, not a promise the app cannot keep: rooms are not subscribed
+      // to changes on the channel row, so somebody standing in this room sees
+      // the new rule when they pull down or open it again. The database is
+      // already refusing anything the new rule does not allow, so nobody can
+      // act on the old answer in the meantime.
+      setRulesNote('Saved. It applies straight away; anyone already in the room sees the change when they pull down to refresh or open it again.');
+    } catch (err) {
+      if (alive.current) setRulesNote(friendlyError(err, 'That setting did not save. Please try again.'));
+    } finally {
+      if (alive.current) setRulesBusy(null);
+    }
+  }
 
   async function changeGroupPicture() {
     if (!room || pictureBusy) return;
@@ -1071,11 +1147,13 @@ function ChatRoomView() {
     const sending = message.sendingProgress !== undefined;
     const a11yActions = [
       { name: 'longpress', label: 'Message options' },
-      ...(!sending ? [{ name: 'reply', label: 'Reply' }] : []),
+      ...(!sending && rights.canPost ? [{ name: 'reply', label: 'Reply' }] : []),
       ...(own && !sending ? [{ name: 'info', label: 'Message info' }] : []),
     ];
+    // No swipe-to-reply where this person cannot post: a reply bar over a
+    // missing message box would be a control that does nothing.
     return (
-      <SwipeToReply enabled={!sending} dark={dark} onReply={() => startReply(message)}>
+      <SwipeToReply enabled={!sending && rights.canPost} dark={dark} onReply={() => startReply(message)}>
       <View style={[styles.messageRow, own && styles.messageRowOwn]}>
         {!own ? (
           <Pressable
@@ -1152,7 +1230,7 @@ function ChatRoomView() {
       </SwipeToReply>
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId, dark, styles, theme, access.canRemoveChatMessages, access.canModerateChat, access.level, cursors, memberIds, isDirect, messagesById, newestOwnId, flashId, recording]);
+  }, [userId, dark, styles, theme, access.canRemoveChatMessages, access.canModerateChat, access.level, cursors, memberIds, isDirect, messagesById, newestOwnId, flashId, recording, rights.canPost]);
 
   return (
     <View style={styles.root}>
@@ -1165,7 +1243,7 @@ function ChatRoomView() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={`${title}. Open group information and members.`}
-            onPress={() => { setMembersOpen(true); loadRoster(); }}
+            onPress={() => { setMembersOpen(true); setRulesNote(null); loadRoster(); void loadRoom(); }}
             style={styles.headerTitleWrap}
           >
             <Text numberOfLines={1} style={styles.headerTitle}>{title}</Text>
@@ -1176,6 +1254,19 @@ function ChatRoomView() {
                   : `${roomLabel(room.type)} • ${room.region || 'Global'} • ${roomMembers.length} ${roomMembers.length === 1 ? 'member' : 'members'}`
                 : ' '}
             </Text>
+            {/*
+              Group post limits, 2026-09-23: one short line so a member knows
+              what kind of room this is BEFORE they wonder where the message
+              box went. Its own line, so a long room name cannot squeeze it out.
+            */}
+            {rights.roomNote ? (
+              <View style={styles.roomRuleLine}>
+                <Ionicons name="lock-closed" size={11} color={theme.colors.accent} />
+                {/* Two lines: at the largest iOS text size all three limits on
+                    one line would be cut off mid-sentence. */}
+                <Text numberOfLines={2} style={styles.roomRuleText}>{rights.roomNote}</Text>
+              </View>
+            ) : null}
           </Pressable>
           {access.canManageChatMembers ? (
             <Pressable accessibilityRole="button" accessibilityLabel="Leader tools" onPress={() => setLeaderOpen(true)} style={styles.headerButton} hitSlop={8}>
@@ -1366,7 +1457,18 @@ function ChatRoomView() {
           ) : null}
 
           <SafeAreaView edges={['bottom']} style={styles.composerWrap}>
-            {recording ? (
+            {!rights.canPost ? (
+              /*
+                The message box is not shown at all, because the database would
+                refuse the message anyway. Saying so here — where the box used
+                to be — is the difference between a room that explains itself
+                and a Send button that looks broken.
+              */
+              <View style={styles.composerClosed} accessibilityLiveRegion="polite">
+                <Ionicons name="lock-closed-outline" size={18} color={theme.colors.accent} />
+                <Text style={styles.composerClosedText}>{rights.reason}</Text>
+              </View>
+            ) : recording ? (
               <VoiceNoteRecordingBar
                 dark={dark}
                 onCancel={() => setRecording(false)}
@@ -1375,7 +1477,13 @@ function ChatRoomView() {
               />
             ) : (
             <View style={styles.composer}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Add a photo, video, file or song" disabled={sendingFile} onPress={() => setAttachOpen(true)} style={styles.attachButton}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={rights.canSendMedia ? 'Add a photo, video, file or song' : 'Add a document or a song'}
+                disabled={sendingFile}
+                onPress={() => setAttachOpen(true)}
+                style={styles.attachButton}
+              >
                 <Ionicons name="add" size={24} color={theme.colors.accent} />
               </Pressable>
               <TextInput
@@ -1388,7 +1496,7 @@ function ChatRoomView() {
                 multiline
                 accessibilityLabel={replyTo ? `Write a reply to ${replyTo.displayName}` : `Write a message to ${title}`}
               />
-              {!body.trim() && !sending && canRecordVoiceNotes() ? (
+              {!body.trim() && !sending && canRecordVoiceNotes() && rights.canSendVoiceNote ? (
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={replyTo ? 'Record a voice note reply' : 'Record a voice note'}
@@ -1415,7 +1523,7 @@ function ChatRoomView() {
         </KeyboardAvoidingView>
       </SafeAreaView>
 
-      <AttachSheet visible={attachOpen} dark={dark} onClose={() => setAttachOpen(false)} onPicked={setPendingFile} onSong={() => setSongOpen(true)} />
+      <AttachSheet visible={attachOpen} dark={dark} onClose={() => setAttachOpen(false)} onPicked={setPendingFile} onSong={() => setSongOpen(true)} allowMedia={rights.canSendMedia} allowVoiceNotes={rights.canSendVoiceNote} />
       <SongPicker visible={songOpen} dark={dark} sending={sendingSong} onClose={() => setSongOpen(false)} onChoose={(song) => { void sendSong(song); }} />
       <AttachmentPreview
         file={pendingFile}
@@ -1476,12 +1584,89 @@ function ChatRoomView() {
               ) : null}
             </View>
           ) : null}
-          <Text style={styles.sheetSub}>{roomMembers.length} {roomMembers.length === 1 ? 'member' : 'members'} • Share encouragement, scripture, photos and videos.</Text>
+          {/*
+            The second half of this line used to promise photos and videos in
+            every room. It now says what THIS group actually allows.
+          */}
+          <Text style={styles.sheetSub}>
+            {roomMembers.length} {roomMembers.length === 1 ? 'member' : 'members'}
+            {' • '}
+            {room && room.allowMedia === false
+              ? (room.allowVoiceNotes === false
+                // Both switches off: promising voice notes here would be the
+                // same untrue line, one setting further along.
+                ? 'Share encouragement and scripture.'
+                : 'Share encouragement, scripture and voice notes.')
+              : 'Share encouragement, scripture, photos and videos.'}
+          </Text>
           <FlatList
             data={roomMembers}
             keyExtractor={(member) => member.userId}
             refreshing={refreshing}
             onRefresh={refreshRoom}
+            ListHeaderComponent={
+              /*
+                Group post limits, 2026-09-23. The owner's note said the
+                feature was not there, or not obvious. So it lives in the one
+                place people already open — the group's own information — with
+                the current state readable at a glance, above the members.
+                Members see the state; only leaders see the choices.
+              */
+              room && room.type !== 'direct' ? (
+                <View style={styles.rulesCard}>
+                  <View style={styles.rulesHeader}>
+                    <Ionicons name="shield-checkmark-outline" size={18} color={theme.colors.accent} />
+                    <Text style={styles.rulesCardTitle}>Who can post</Text>
+                  </View>
+                  <RuleRow
+                    styles={styles}
+                    theme={theme}
+                    title="Messages"
+                    hint={ruleWords.who === 'Everyone in the group'
+                      ? 'Anybody in this group can write here.'
+                      : 'Only admins and leaders can write here. Everyone else can read.'}
+                    value={ruleWords.who}
+                    busy={rulesBusy === 'who'}
+                    canChange={canChangeRules}
+                    current={room.postPolicy === 'leaders' ? 'leaders' : 'everyone'}
+                    choices={[{ key: 'everyone', label: 'Everyone' }, { key: 'leaders', label: 'Admins and leaders only' }]}
+                    onPick={(key) => { void saveRules('who', { postPolicy: key === 'leaders' ? 'leaders' : 'everyone' }); }}
+                  />
+                  <RuleRow
+                    styles={styles}
+                    theme={theme}
+                    title="Photos and videos"
+                    hint={room.allowMedia === false
+                      ? (room.allowVoiceNotes === false
+                        ? 'Nobody can send photos or videos here. Words and documents still work.'
+                        : 'Nobody can send photos or videos here. Words, documents and voice notes still work.')
+                      : 'Anybody who can post may send photos and videos.'}
+                    value={ruleWords.media}
+                    busy={rulesBusy === 'media'}
+                    canChange={canChangeRules}
+                    current={room.allowMedia === false ? 'off' : 'on'}
+                    choices={[{ key: 'on', label: 'Allowed' }, { key: 'off', label: 'Off' }]}
+                    onPick={(key) => { void saveRules('media', { allowMedia: key === 'on' }); }}
+                  />
+                  <RuleRow
+                    styles={styles}
+                    theme={theme}
+                    title="Voice notes"
+                    hint={room.allowVoiceNotes === false
+                      ? 'The microphone button is hidden in this group.'
+                      : 'Anybody who can post may record a voice note.'}
+                    value={ruleWords.voice}
+                    busy={rulesBusy === 'voice'}
+                    canChange={canChangeRules}
+                    current={room.allowVoiceNotes === false ? 'off' : 'on'}
+                    choices={[{ key: 'on', label: 'Allowed' }, { key: 'off', label: 'Off' }]}
+                    onPick={(key) => { void saveRules('voice', { allowVoiceNotes: key === 'on' }); }}
+                  />
+                  {rulesNote ? <Text style={styles.rulesNote} accessibilityLiveRegion="polite">{rulesNote}</Text> : null}
+                  {!canChangeRules ? <Text style={styles.rulesNote}>A leader sets these for the whole group.</Text> : null}
+                </View>
+              ) : null
+            }
             ListEmptyComponent={<Text style={styles.sheetSub}>{refreshing ? 'Loading members…' : rosterNote || 'No members to show yet.'}</Text>}
             renderItem={({ item }) => (
               <Pressable accessibilityRole="button" accessibilityLabel={`Open ${item.displayName} profile`} style={styles.memberRow} onPress={() => { setMembersOpen(false); router.push({ pathname: '/person', params: { id: item.userId, name: item.displayName } }); }}>
@@ -1561,6 +1746,64 @@ function ChatRoomView() {
           />
         </KeyboardAvoidingView>
       </Modal>
+    </View>
+  );
+}
+
+/**
+ * One group post limit: what it is, what it is set to right now, and — for a
+ * leader only — the two choices.
+ *
+ * A member is shown the state and no controls at all. Greying a control out
+ * would still promise something a member cannot have; leaving it out says the
+ * truth, which is that a leader sets this.
+ */
+function RuleRow({ styles, theme, title, hint, value, choices, current, onPick, busy, canChange }: {
+  styles: ReturnType<typeof useStyles>;
+  theme: AppTheme;
+  title: string;
+  hint: string;
+  value: string;
+  choices: { key: string; label: string }[];
+  current: string;
+  onPick: (key: string) => void;
+  busy: boolean;
+  canChange: boolean;
+}) {
+  return (
+    <View style={styles.ruleRow}>
+      <View style={styles.ruleHead}>
+        <Text style={styles.ruleTitle}>{title}</Text>
+        {busy
+          ? <ActivityIndicator size="small" color={theme.colors.accent} />
+          : <Text style={styles.ruleValue}>{value}</Text>}
+      </View>
+      <Text style={styles.ruleHint}>{hint}</Text>
+      {canChange ? (
+        <View style={styles.ruleChoices}>
+          {choices.map((choice) => {
+            const on = choice.key === current;
+            return (
+              <Pressable
+                key={choice.key}
+                accessibilityRole="button"
+                accessibilityState={{ selected: on, disabled: busy }}
+                accessibilityLabel={`${title}: ${choice.label}`}
+                disabled={busy}
+                onPress={() => { if (!on) onPick(choice.key); }}
+                style={[styles.ruleChoice, on && styles.ruleChoiceOn]}
+              >
+                <Ionicons
+                  name={on ? 'checkmark-circle' : 'ellipse-outline'}
+                  size={16}
+                  color={on ? theme.colors.textOnAccent : theme.colors.textSecondary}
+                />
+                <Text style={[styles.ruleChoiceText, on && styles.ruleChoiceTextOn]}>{choice.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -1707,4 +1950,30 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   memberInput: { marginHorizontal: 16, minHeight: 48, borderRadius: t.radius.md, borderWidth: 1, borderColor: t.colors.borderStrong, backgroundColor: t.colors.surfaceSunken, color: t.colors.textPrimary, paddingHorizontal: 14, fontSize: t.type.body },
   listLabel: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.overline, textTransform: 'uppercase', letterSpacing: 0.6, paddingHorizontal: 16, paddingTop: 14, paddingBottom: 6 },
   memberRow: { alignSelf: 'stretch', flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 64, paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: t.colors.border },
+
+  /* --- Group post limits (2026-09-23) ------------------------------------ */
+  // The line under the room's name. Wraps to nothing when the group has no
+  // limits, so an ordinary room looks exactly as it did.
+  roomRuleLine: { flexDirection: 'row', alignItems: 'flex-start', gap: 4, marginTop: 1 },
+  roomRuleText: { flex: 1, color: t.colors.accent, fontWeight: '800', fontSize: t.type.overline, lineHeight: 15 },
+  // What sits where the message box would be when this person cannot post.
+  composerClosed: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, paddingHorizontal: 16, paddingVertical: 14, minHeight: 56 },
+  composerClosedText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 20, fontWeight: '700' },
+  // The settings card at the top of the group's information.
+  rulesCard: { marginHorizontal: 16, marginTop: 4, marginBottom: 2, padding: 14, borderRadius: t.radius.lg, borderWidth: 1, borderColor: t.colors.border, backgroundColor: t.colors.surface },
+  rulesHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  rulesCardTitle: { flex: 1, color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
+  rulesNote: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19, marginTop: 10 },
+  ruleRow: { paddingTop: 12 },
+  // Wraps, so "Admins and leaders only" at the largest text size never clips.
+  ruleHead: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', columnGap: 10, rowGap: 2 },
+  ruleTitle: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
+  ruleValue: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.meta },
+  ruleHint: { color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 19, marginTop: 2 },
+  ruleChoices: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  // 48 x 48 at the very least, with the label almost always making it wider.
+  ruleChoice: { flexDirection: 'row', alignItems: 'center', gap: 7, minWidth: 48, minHeight: 48, paddingHorizontal: 17, borderRadius: t.radius.pill, borderWidth: 1, borderColor: t.colors.borderStrong, backgroundColor: t.colors.surfaceSunken },
+  ruleChoiceOn: { backgroundColor: t.colors.accentSolid, borderColor: t.colors.accentSolid },
+  ruleChoiceText: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.meta, flexShrink: 1 },
+  ruleChoiceTextOn: { color: t.colors.textOnAccent },
 }));

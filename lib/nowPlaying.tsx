@@ -100,10 +100,17 @@ import {
   playerProblemCopy,
   playerProblemFor,
   screenOffNoticeStep,
+  screenOffNoticeText,
   thumbnailFromUrl,
   youtubeVideoId,
   youtubeWatchUrl,
+  YOUTUBE_RESUME_KEY,
+  parseResumePositions,
+  rememberPosition,
+  resumeStartSeconds,
+  resumeText,
 } from './embed';
+import type { ResumePositions } from './embed';
 import { createThemedStyles } from './theme';
 import { useAppTheme } from './themePreference';
 
@@ -125,6 +132,15 @@ export type NowPlaying = {
    * audio is shared as a song and anything else as a video, as before.
    */
   kind?: 'sermon' | 'music' | 'video';
+  /**
+   * True for a stream that is happening NOW (the live service). A live stream
+   * is never resumed and its position is never remembered: YouTube's `start=`
+   * seeks backwards into the stream's rewind window, so "carrying on where you
+   * left off" would leave someone watching the service minutes behind the room
+   * and be told it was on purpose. Coming back to a live stream means going
+   * back to the live edge.
+   */
+  live?: boolean;
 };
 
 const MINISTRY = 'Overcomers Global Network';
@@ -364,6 +380,54 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
   // The one-time "YouTube pauses when your screen is off" note.
   const [screenOffNotice, setScreenOffNotice] = useState(false);
 
+  // Where each YouTube video got to. YouTube pauses its own player the moment
+  // the app leaves the front, and no app may stop that (DO-NOT-BREAK #17,
+  // #24). What we can do is put the person back where they were, so coming
+  // back to the app carries on instead of starting the teaching again.
+  const resumeRef = useRef<ResumePositions>({});
+  const resumeWrittenRef = useRef(0);
+  useEffect(() => {
+    let alive = true;
+    AsyncStorage.getItem(YOUTUBE_RESUME_KEY)
+      .then((value) => { if (alive) resumeRef.current = parseResumePositions(value); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, []);
+  // Worked out once per item, during the render that first shows it: the
+  // embedded page is built with this number in its address, so it must not
+  // change under the player afterwards (that would reload the video).
+  const resumeForRef = useRef<{ url: string | null; seconds: number }>({ url: null, seconds: 0 });
+  if (!item) {
+    // Nothing playing: forget the snapshot, so choosing the same teaching
+    // again asks where it got to rather than reusing a stale answer.
+    resumeForRef.current = { url: null, seconds: 0 };
+  } else if (resumeForRef.current.url !== item.url) {
+    // A live service is never resumed: `start=` on a live stream seeks back
+    // into YouTube's rewind window, so someone who took a phone call would
+    // come back to the service minutes behind everybody in the room — and be
+    // told "carrying on where you left off" as if that were meant.
+    resumeForRef.current = {
+      url: item.url,
+      seconds: item.live ? 0 : resumeStartSeconds(resumeRef.current, youtubeVideoId(item.url)),
+    };
+  }
+  const resumeAt = item && item.type === 'embed' && !item.live ? resumeForRef.current.seconds : 0;
+
+  const onEmbedTime = useCallback((seconds: number, duration: number) => {
+    // Same reason: nothing about a live stream is worth remembering, and a
+    // live video id kept here would follow the SAME stream into the recording
+    // YouTube leaves behind afterwards.
+    const id = item && !item.live ? youtubeVideoId(item.url) : null;
+    if (!id) return;
+    const next = rememberPosition(resumeRef.current, id, seconds, duration);
+    resumeRef.current = next;
+    // Written to the phone at most every 15 seconds of play: enough to come
+    // back to the right place, little enough not to write all through a sermon.
+    if (Math.abs(seconds - resumeWrittenRef.current) < 15) return;
+    resumeWrittenRef.current = seconds;
+    AsyncStorage.setItem(YOUTUBE_RESUME_KEY, JSON.stringify(next)).catch(() => undefined);
+  }, [item?.url, item?.live]);
+
   useEffect(() => {
     void restorePlaybackAudioMode();
   }, []);
@@ -373,6 +437,10 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
     setEmbedProblem(null);
     setScreenOffNotice(false);
     setAudioFailed(false);
+    // "How far from the last thing we wrote" is about the video we are on, not
+    // the one before it: a new video starting near the old video's position
+    // used to have its first minutes never written to the phone.
+    resumeWrittenRef.current = 0;
     setAudioWantsPlay(item?.type === 'audio');
     if (!item) return;
     let cancelled = false;
@@ -626,6 +694,8 @@ export function NowPlayingProvider({ children }: { children: React.ReactNode }) 
           embedProblem={embedProblem}
           onEmbedPlaying={setEmbedPlaying}
           onEmbedProblem={setEmbedProblem}
+          resumeAt={resumeAt}
+          onEmbedTime={onEmbedTime}
         />
       ) : null}
     </NowPlayingContext.Provider>
@@ -755,6 +825,9 @@ type LayerProps = {
   embedProblem: PlayerProblem | null;
   onEmbedPlaying: (playing: boolean) => void;
   onEmbedProblem: (problem: PlayerProblem | null) => void;
+  /** Seconds into the video to start at, so coming back to the app carries on. 0 starts at the top. */
+  resumeAt: number;
+  onEmbedTime: (seconds: number, duration: number) => void;
 };
 
 /**
@@ -762,7 +835,7 @@ type LayerProps = {
  * embedded video keeps going while minimized; minimized, it sits below the
  * bottom of the screen and takes no touches at all.
  */
-function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem, onEmbedPlaying, onEmbedProblem }: LayerProps) {
+function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem, onEmbedPlaying, onEmbedProblem, resumeAt, onEmbedTime }: LayerProps) {
   const { theme } = useAppTheme();
   const styles = useStyles(theme);
   const insets = useSafeAreaInsets();
@@ -813,8 +886,8 @@ function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem,
   const backdropOpacity = open.interpolate({ inputRange: [0, 1], outputRange: [0, 1] });
 
   const source = useMemo(
-    () => (item && isEmbed ? embedSource(item.url, { background: theme.colors.brandSolid }) : null),
-    [item?.url, isEmbed, theme.colors.brandSolid],
+    () => (item && isEmbed ? embedSource(item.url, { background: theme.colors.brandSolid, startSeconds: resumeAt }) : null),
+    [item?.url, isEmbed, theme.colors.brandSolid, resumeAt],
   );
   const youtubeId = item ? youtubeVideoId(item.url) : null;
   const watchElsewhere = youtubeId ? youtubeWatchUrl(youtubeId) : item?.url;
@@ -825,9 +898,10 @@ function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem,
     const message = parsePlayerMessage(event.nativeEvent.data);
     if (!message) return;
     if (message.type === 'state') onEmbedPlaying(message.playing);
+    else if (message.type === 'time') onEmbedTime(message.seconds, message.duration);
     else if (message.type === 'error') { onEmbedPlaying(false); onEmbedProblem(playerProblemFor(message.code)); }
     else if (message.type === 'timeout') { onEmbedPlaying(false); onEmbedProblem('no-start'); }
-  }, [onEmbedPlaying, onEmbedProblem]);
+  }, [onEmbedPlaying, onEmbedProblem, onEmbedTime]);
 
   const openElsewhere = useCallback(() => {
     if (!watchElsewhere) return;
@@ -1013,7 +1087,17 @@ function PlayerLayer({ ctx, videoPlayer, isVideo, isEmbed, webRef, embedProblem,
         {isEmbed && ctx.screenOffNotice ? (
           <View style={styles.noticeRow} accessibilityLiveRegion="polite">
             <Ionicons name="moon-outline" size={18} color={theme.colors.accent} />
-            <Text style={styles.noticeText}>{`${YOUTUBE_SCREEN_OFF_NOTICE}.`}</Text>
+            {/* The second sentence only when this teaching really has a
+                Listen version, so nobody is sent looking for a button that
+                is not on the screen. */}
+            <Text style={styles.noticeText}>{screenOffNoticeText(Boolean(item?.audioUrl))}</Text>
+          </View>
+        ) : null}
+
+        {isEmbed && resumeAt > 0 && !embedProblem ? (
+          <View style={styles.noticeRow}>
+            <Ionicons name="play-skip-forward-outline" size={18} color={theme.colors.accent} />
+            <Text style={styles.noticeText}>{resumeText(resumeAt)} — where you left off.</Text>
           </View>
         ) : null}
 

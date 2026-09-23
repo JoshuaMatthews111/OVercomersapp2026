@@ -43,8 +43,19 @@ import {
 import { useAccessProfile } from '../lib/accessControl';
 import { ChatProfileSearchResult, searchChatProfiles } from '../lib/chatService';
 import { CoverNeeded, getCoversNeeded, setSermonCover } from '../lib/adminService';
-import { createAdminMediaItem, createAdminStory } from '../lib/contentService';
-import { embedUrl, fetchEmbedMetadata, thumbnailFromUrl, youtubeVideoId } from '../lib/embed';
+import {
+  MediaLinkCheck,
+  MediaLinkVerdict,
+  PostedThing,
+  checkMediaLink,
+  classifyMediaLink,
+  createAdminMediaItem,
+  createAdminStory,
+  postedConfirmation,
+  viewPostAction,
+} from '../lib/contentService';
+import { embedUrl, fetchEmbedMetadata, fileKind, thumbnailFromUrl, youtubeVideoId } from '../lib/embed';
+import { useNowPlaying } from '../lib/nowPlaying';
 import { friendlyError } from '../lib/errorMessages';
 import { AppTheme, createThemedStyles } from '../lib/theme';
 import { useAppTheme } from '../lib/themePreference';
@@ -819,8 +830,11 @@ function StoryForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   if (posted && !media.length) {
     return (
       <Success
-        title={posted > 1 ? `${posted} stories are live` : 'Your story is live'}
+        title={posted > 1 ? `${posted} stories posted` : 'Story posted'}
         body="It is on Home right now and stays there for 24 hours."
+        statusLabel="Published"
+        viewLabel="View post"
+        onView={() => router.push('/(tabs)' as any)}
         actionLabel="Post another"
         onAction={() => { setPosted(0); onStartOver(); }}
       />
@@ -874,16 +888,30 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
   // The real title as the video provider gave it to us. Kept apart from what
   // the leader typed so it can stand in as the name without overwriting them.
   const [videoTitle, setVideoTitle] = useState('');
-  const [savedTitle, setSavedTitle] = useState('');
-  const [savedCover, setSavedCover] = useState('');
+  /** What was just posted, so the confirmation can offer "View post". */
+  const [posted, setPosted] = useState<PostedThing | null>(null);
   const working = saving || Boolean(transfer);
   // A pasted link is cleaned up before anything uses it — a double paste is
   // the owner's V2, and it used to sail through and post a dead video.
   const trimmedLink = useMemo(() => tidyLink(link), [link]);
-  const linkOk = useMemo(
-    () => !trimmedLink || Boolean(embedUrl(trimmedLink)) || /\.(mp3|mp4|m4a|m3u8|mov|pdf)(\?|$)/i.test(trimmedLink),
+  /**
+   * What the pasted address actually is.
+   *
+   * The owner asked to be able to post "supabase links or firebase" as well as
+   * uploads, so this accepts any https address that is a real media file — a
+   * Supabase public or signed url, a Firebase download url with ?alt=media, or
+   * anything ending .mp3 / .mp4 / .pdf — as well as the YouTube, Vimeo and
+   * Facebook pages that were already allowed. It also says PLAINLY which of the
+   * two it will play as, because a file keeps playing with the screen off and a
+   * YouTube page does not (DO-NOT-BREAK, media lane).
+   */
+  const linkVerdict: MediaLinkVerdict = useMemo(
+    () => classifyMediaLink(trimmedLink, LINK_HELPERS),
     [trimmedLink]
   );
+  const linkOk = !trimmedLink || linkVerdict.ok;
+  const [linkCheck, setLinkCheck] = useState<MediaLinkCheck | null>(null);
+  const [checkingLink, setCheckingLink] = useState(false);
   /**
    * The owner asked not to have to type a title every time. So we work one out:
    * the video's own title if we could read it, else the name of the file that
@@ -934,6 +962,33 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
       clearTimeout(timer);
     };
   }, [trimmedLink]);
+
+  /**
+   * Ask a direct file link whether it is really there, and what it is.
+   *
+   * Only for links we are going to play with the app's own player — a YouTube
+   * page answers nothing useful to a HEAD request. It is a courtesy and never
+   * a gate: if the host refuses HEAD, or the phone has no signal, the answer is
+   * "we could not check" and the Post button is not touched.
+   */
+  useEffect(() => {
+    setLinkCheck(null);
+    if (!trimmedLink || !linkVerdict.ok || !linkVerdict.native) return;
+    let alive = true;
+    const timer = setTimeout(async () => {
+      setCheckingLink(true);
+      try {
+        const answer = await checkMediaLink(trimmedLink, { timeoutMs: 6000 });
+        if (alive) setLinkCheck(answer);
+      } finally {
+        if (alive) setCheckingLink(false);
+      }
+    }, 600);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [trimmedLink, linkVerdict.ok, linkVerdict.native]);
 
   async function pickFile() {
     const result = await DocumentPicker.getDocumentAsync({ type: '*/*', copyToCacheDirectory: true, multiple: false });
@@ -997,8 +1052,15 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         isDownloadable: Boolean(fileUrl),
         isFeatured: featured,
       });
-      setSavedTitle(saved.title || finalTitle);
-      setSavedCover(saved.thumbnailUrl || '');
+      // createAdminMediaItem publishes straight away, so the status shown on
+      // the confirmation is the row's real one, not a hopeful guess.
+      setPosted({
+        what: 'media',
+        mediaType: kind,
+        title: saved.title || finalTitle,
+        status: 'published',
+        url: saved.fileUrl || saved.externalUrl || fileUrl || trimmedLink || null,
+      });
       setTitle('');
       setSpeaker('');
       setLink('');
@@ -1015,19 +1077,8 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
     }
   }
 
-  if (savedTitle) {
-    return (
-      <Success
-        title="It is live"
-        body={
-          savedCover
-            ? `"${savedTitle}" is in the Media tab now, with its cover picture.`
-            : `"${savedTitle}" is in the Media tab now. You can add a cover for it any time under Library.`
-        }
-        actionLabel="Post another"
-        onAction={() => { setSavedTitle(''); setSavedCover(''); onStartOver(); }}
-      />
-    );
+  if (posted) {
+    return <Posted posted={posted} onPostAnother={() => { setPosted(null); onStartOver(); }} />;
   }
 
   const showCover = cover || autoCover;
@@ -1053,7 +1104,7 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         label="Link"
         value={link}
         onChange={setLink}
-        placeholder="Paste a YouTube, Vimeo, or Facebook link"
+        placeholder="A YouTube link, or a direct link to an mp3, mp4 or PDF"
         autoCapitalize="none"
         keyboardType="url"
         autoCorrect={false}
@@ -1068,7 +1119,28 @@ function MediaForm({ onPosted, onStartOver }: { onPosted: () => Promise<void>; o
         </View>
       ) : null}
       {lookupNote ? <Text style={styles.cardMeta}>{lookupNote}</Text> : null}
-      {!linkOk ? <Text style={styles.warn}>That link will not play. Paste one YouTube, Vimeo or Facebook address, or a direct mp3 / mp4.</Text> : null}
+      {/* Say what the link IS, in plain words, before anything is posted. */}
+      {trimmedLink && linkVerdict.ok ? (
+        <View style={styles.linkVerdictRow}>
+          <Ionicons
+            name={linkVerdict.native ? 'musical-note' : linkVerdict.playback === 'document' ? 'document-text-outline' : 'globe-outline'}
+            size={16}
+            color={theme.colors.accent}
+          />
+          <Text style={styles.linkVerdictText}>{linkVerdict.message}</Text>
+        </View>
+      ) : null}
+      {trimmedLink && linkVerdict.warning ? <Text style={styles.warn}>{linkVerdict.warning}</Text> : null}
+      {checkingLink ? (
+        <View style={styles.inlineRow}>
+          <ActivityIndicator color={theme.colors.accent} />
+          <Text style={styles.cardMeta}>Checking that the link answers...</Text>
+        </View>
+      ) : null}
+      {linkCheck ? (
+        <Text style={linkCheck.reachable === 'missing' ? styles.warn : styles.cardMeta}>{linkCheck.message}</Text>
+      ) : null}
+      {trimmedLink && !linkVerdict.ok ? <Text style={styles.warn}>{linkVerdict.message}</Text> : null}
       <Field
         label="Title (optional)"
         value={title}
@@ -1227,6 +1299,8 @@ function NoticePage() {
   const [body, setBody] = useState('');
   const [audience, setAudience] = useState<PushAudience>('all');
   const [sending, setSending] = useState(false);
+  /** The notice that just went out, so the confirmation can open it. */
+  const [sent, setSent] = useState<PostedThing | null>(null);
   const ready = title.trim().length > 0 && body.trim().length > 0;
 
   function send() {
@@ -1239,10 +1313,13 @@ function NoticePage() {
         onPress: async () => {
           setSending(true);
           try {
-            await sendAdminPush({ title: title.trim(), body: body.trim(), audience });
+            const noticeTitle = title.trim();
+            await sendAdminPush({ title: noticeTitle, body: body.trim(), audience });
             setTitle('');
             setBody('');
-            Alert.alert('Notice sent', `It is on its way to ${who.toLowerCase()} and it is in Announcements.`);
+            // A confirmation you can act on, instead of an alert that closes
+            // and leaves you wondering where the notice went.
+            setSent({ what: 'notice', title: noticeTitle, status: 'published' });
           } catch (err) {
             Alert.alert(
               'We could not confirm the send',
@@ -1254,6 +1331,10 @@ function NoticePage() {
         },
       },
     ]);
+  }
+
+  if (sent) {
+    return <Posted posted={sent} onPostAnother={() => setSent(null)} />;
   }
 
   return (
@@ -1733,7 +1814,28 @@ function Progress({ label, fraction, indeterminate }: { label: string; fraction:
 }
 
 /** The confirmation the owner said looked cheap. It arrives, it moves, it is warm. */
-function Success({ title, body, actionLabel, onAction }: { title: string; body: string; actionLabel: string; onAction: () => void }) {
+function Success({
+  title,
+  body,
+  actionLabel,
+  onAction,
+  statusLabel,
+  viewLabel,
+  onView,
+  whereHint,
+}: {
+  title: string;
+  body: string;
+  actionLabel: string;
+  onAction: () => void;
+  /** "Published" or "Draft" — the item's live status, said out loud. */
+  statusLabel?: 'Published' | 'Draft';
+  /** The "View post" button. Left out when there is nothing to open. */
+  viewLabel?: string;
+  onView?: () => void;
+  /** Where to find it, shown when there is no button to press. */
+  whereHint?: string;
+}) {
   const { theme } = useAppTheme();
   const styles = useStyles(theme);
   const enter = useRef(new Animated.Value(0)).current;
@@ -1751,9 +1853,76 @@ function Success({ title, body, actionLabel, onAction }: { title: string; body: 
         <Ionicons name="checkmark" size={38} color={theme.colors.textOnAccent} />
       </Animated.View>
       <Text style={styles.successTitle}>{title}</Text>
+      {statusLabel ? (
+        <View style={[styles.statusPill, statusLabel === 'Draft' && styles.statusPillDraft]}>
+          <Ionicons
+            name={statusLabel === 'Published' ? 'radio-button-on' : 'time-outline'}
+            size={14}
+            color={statusLabel === 'Published' ? theme.colors.success : theme.colors.warning}
+          />
+          <Text style={[styles.statusPillText, statusLabel === 'Draft' && styles.statusPillTextDraft]}>{statusLabel}</Text>
+        </View>
+      ) : null}
       <Text style={styles.centeredMeta}>{body}</Text>
-      <Big label={actionLabel} onPress={onAction} />
+      {onView && viewLabel ? (
+        <View style={styles.successButtons}>
+          <Big label={viewLabel} onPress={onView} />
+          <Btn label={actionLabel} onPress={onAction} />
+        </View>
+      ) : (
+        <>
+          {whereHint ? <Text style={styles.centeredMeta}>{whereHint}</Text> : null}
+          <Big label={actionLabel} onPress={onAction} />
+        </>
+      )}
     </Animated.View>
+  );
+}
+
+/** lib/embed.ts decides what a link is. Nothing in this screen second-guesses it. */
+const LINK_HELPERS = { embedFor: embedUrl, kindFor: fileKind };
+
+/**
+ * The confirmation after something is posted, with a "View post" button that
+ * opens exactly what was just created.
+ *
+ * The owner's words on TestFlight 36: "when posting something there should be
+ * something like view post, especially when media like I uploaded a song."
+ * A song or a video opens in the app's own player, so he hears the file he
+ * just uploaded; everything else pushes the screen that holds it. When there
+ * is nothing to open, the card says where to find it instead of offering a
+ * button that goes nowhere.
+ */
+function Posted({ posted, onPostAnother }: { posted: PostedThing; onPostAnother: () => void }) {
+  const player = useNowPlaying();
+  const confirmation = postedConfirmation(posted);
+  const action = viewPostAction(posted, LINK_HELPERS);
+
+  function open() {
+    if (action.how === 'play') {
+      player.play({
+        title: posted.title,
+        url: (posted.url || '').trim(),
+        type: action.playback,
+        kind: posted.mediaType === 'music' ? 'music' : posted.mediaType === 'video' ? 'video' : 'sermon',
+      });
+      player.expand();
+      return;
+    }
+    if (action.how === 'route') router.push(action.href as any);
+  }
+
+  return (
+    <Success
+      title={confirmation.title}
+      body={confirmation.body}
+      statusLabel={confirmation.statusLabel}
+      viewLabel={action.how === 'none' ? undefined : 'View post'}
+      onView={action.how === 'none' ? undefined : open}
+      whereHint={action.how === 'none' ? `You will find it in ${action.where}.` : undefined}
+      actionLabel="Post another"
+      onAction={onPostAnother}
+    />
   );
 }
 
@@ -2056,5 +2225,20 @@ const useStyles = createThemedStyles((t) =>
       ...t.elevation.high,
     },
     successTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle, textAlign: 'center' },
+    successButtons: { alignSelf: 'stretch', gap: 10 },
+    statusPill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      minHeight: 30,
+      paddingHorizontal: 12,
+      borderRadius: t.radius.pill,
+      backgroundColor: t.colors.successMuted,
+    },
+    statusPillDraft: { backgroundColor: t.colors.warningMuted },
+    statusPillText: { color: t.colors.success, fontWeight: '900', fontSize: t.type.meta },
+    statusPillTextDraft: { color: t.colors.warning },
+    linkVerdictRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+    linkVerdictText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta, lineHeight: 18 },
   })
 );

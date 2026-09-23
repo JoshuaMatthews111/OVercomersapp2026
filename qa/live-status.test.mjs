@@ -178,7 +178,7 @@ test('a leader\'s Go live wins, ends itself when it expires, and Facebook opens 
   const state = logic.resolveLiveState({ is_live: false, manual_override: override }, NOW);
   assert.equal(state.isLive, true);
   assert.equal(state.via, 'manual');
-  assert.deepEqual(live.watchActionFor(state), { kind: 'open', url: 'https://www.facebook.com/ogn/videos/123' });
+  assert.deepEqual(live.watchActionFor(state), { kind: 'open', url: 'https://www.facebook.com/ogn/videos/123', where: 'facebook' });
   assert.equal(logic.resolveLiveState({ is_live: false, manual_override: { ...override, expires_at: iso(-1) } }, NOW).isLive, false);
   // A stored override with a link the database would never accept is ignored.
   assert.equal(logic.resolveLiveState({ manual_override: { ...override, url: 'javascript:alert(1)' } }, NOW).isLive, false);
@@ -388,4 +388,173 @@ test('security review: live-status answers signed-in members only, not the publi
   assert.equal(logic.signedInCaller('Bearer garbage'), null);
   const index = read('supabase/functions/live-status/index.ts');
   assert.match(index, /if \(!signedInCaller\(req\.headers\.get\('Authorization'\)\)\) return json\(\{ error: 'Please sign in\.' \}, 401\);/);
+});
+
+// ---------------------------------------------------------------------------
+// "Will the live really appear in the app once streaming?" — 2026-09-23
+//
+// Checked against the real thing on 2026-09-23 before these tests were
+// written: the deployed live-status function (version 5) answered a signed-in
+// member 200 with detection "scheduled", note "an old scheduled stream that
+// never started is still waiting on YouTube", isLive false — while the same
+// parser, run here over the channel page fetched in the same minute, decided
+// exactly the same thing. The anon key got 401. What follows pins the rules
+// that answer depends on.
+// ---------------------------------------------------------------------------
+
+test('a stream YouTube will not let play in another app sends people to YouTube, not to a dead player', () => {
+  const embeddingOff = { ...autoLive, embeddable: false };
+  const state = logic.resolveLiveState(embeddingOff, NOW);
+  assert.equal(state.isLive, true);
+  assert.equal(state.embeddable, false);
+  const action = live.watchActionFor(state);
+  assert.deepEqual(action, { kind: 'open', url: 'https://www.youtube.com/watch?v=G5h7XID3Re8', where: 'youtube' });
+
+  // We only ever say so when YouTube told us. Not knowing keeps the in-app player.
+  for (const row of [autoLive, { ...autoLive, embeddable: null }, { ...autoLive, embeddable: 'maybe' }]) {
+    const unknown = logic.resolveLiveState(row, NOW);
+    assert.equal(unknown.embeddable, row.embeddable === true ? true : null);
+    assert.equal(live.watchActionFor(unknown).kind, 'in-app');
+  }
+  const allowed = logic.resolveLiveState({ ...autoLive, embeddable: true }, NOW);
+  assert.equal(live.watchActionFor(allowed).kind, 'in-app');
+  // Facebook is unchanged.
+  const fb = logic.resolveLiveState({ manual_override: { mode: 'live', source: 'facebook', url: 'https://www.facebook.com/ogn/videos/1', expires_at: iso(HOUR) } }, NOW);
+  assert.deepEqual(live.watchActionFor(fb), { kind: 'open', url: 'https://www.facebook.com/ogn/videos/1', where: 'facebook' });
+});
+
+test('the embedding answer is written only when YouTube gave one, and an unsure check never wipes it', () => {
+  const live1 = { state: 'live', videoId: 'G5h7XID3Re8', title: 'Sunday Service', channelId: logic.OGN_CHANNEL_ID, startedAt: null, reason: 'YouTube says this stream is live now', embeddable: false };
+  const cols = logic.detectionColumns(null, live1, iso(0), null);
+  assert.equal(cols.embeddable, false);
+  assert.equal(cols.is_live, true);
+
+  const unsure = { state: 'unsure', videoId: null, title: null, channelId: null, startedAt: null, reason: 'could not reach YouTube', embeddable: null };
+  assert.equal(logic.detectionColumns(cols, unsure, iso(MIN)).embeddable, false, 'one bad fetch does not forget what we knew');
+
+  const offline = { state: 'offline', videoId: null, title: null, channelId: null, startedAt: null, reason: 'the last stream has ended', embeddable: null };
+  assert.equal(logic.detectionColumns(cols, offline, iso(2 * MIN)).embeddable, null, 'a finished stream carries nothing forward');
+
+  // The edge function is the only thing that asks, and it asks YouTube's open oEmbed.
+  const index = read('supabase/functions/live-status/index.ts');
+  assert.match(index, /reply\.status === 401 \|\| reply\.status === 403/);
+  assert.match(index, /embeddable: false/);
+  assert.match(index, /embeddable: true/);
+  assert.match(index, /embeddable,manual_override/, 'the column is read back with the rest of the row');
+});
+
+test('a phone never trusts an embedding answer it did not recognise', () => {
+  const base = { isLive: true, via: 'youtube', source: 'youtube', videoId: 'G5h7XID3Re8', url: 'https://www.youtube.com/watch?v=G5h7XID3Re8', title: 'Sunday' };
+  assert.equal(logic.normalizeLiveState({ ...base, embeddable: false }).embeddable, false);
+  assert.equal(logic.normalizeLiveState({ ...base, embeddable: true }).embeddable, true);
+  assert.equal(logic.normalizeLiveState({ ...base, embeddable: 'no' }).embeddable, null);
+  assert.equal(logic.normalizeLiveState({ ...base }).embeddable, null);
+  assert.equal(logic.NOT_LIVE.embeddable, null);
+});
+
+test('"Check now" shows a leader exactly what the server last saw, with nothing blank', () => {
+  const state = logic.resolveLiveState({ ...autoLive, embeddable: true }, NOW);
+  const facts = live.liveFacts(state, NOW);
+  const byLabel = Object.fromEntries(facts.map((f) => [f.label, f.value]));
+  assert.equal(byLabel['Are we live in the app?'], 'Yes — YouTube is streaming');
+  assert.equal(byLabel['Stream title'], 'Sunday Service');
+  assert.equal(byLabel['Video id'], 'G5h7XID3Re8');
+  assert.match(byLabel['Last checked'], /30 seconds ago \(/);
+  assert.match(byLabel['What YouTube said'], /YouTube shows us live/);
+  assert.match(byLabel['Plays inside the app?'], /^Yes/);
+  for (const fact of facts) assert.ok(fact.value.trim().length > 0, `${fact.label} is never blank`);
+
+  // Not live: the reason is the point of the panel.
+  const leftover = logic.resolveLiveState(logic.detectionColumns(null, logic.parseYouTubeLivePage(NOT_LIVE_PAGE, logic.OGN_CHANNEL_ID, NOW), iso(0)), NOW);
+  const off = Object.fromEntries(live.liveFacts(leftover, NOW).map((f) => [f.label, f.value]));
+  assert.equal(off['Are we live in the app?'], 'No');
+  assert.match(off['What YouTube said'], /old scheduled stream that never started/);
+  assert.equal(off['Video id'], 'NH5dJesdcAw');
+  assert.equal(off['Stream title'], 'Prayer & Prophecy');
+
+  // Nothing known at all still reads as sentences, never "null" or "undefined".
+  for (const fact of live.liveFacts(logic.NOT_LIVE, NOW)) {
+    assert.doesNotMatch(fact.value, /null|undefined|NaN/, fact.label);
+  }
+});
+
+test('"Check now" is for leaders only, goes to the server, and keeps the one-minute cache', () => {
+  const screen = read('app/live.tsx');
+  // The whole panel is behind canManageLive, which is where Check now lives.
+  assert.match(screen, /const canManageLive = access\.canManageContent \|\| access\.canManageMedia;/);
+  assert.match(screen, /canManageLive && !loading \? \(\s*<LeaderPanel/);
+  assert.match(screen, /accessibilityLabel="Check now whether we are live"/);
+  assert.match(screen, /onCheckNow=\{checkNow\}/);
+
+  const service = read('lib/liveService.ts');
+  assert.match(service, /export async function checkLiveNow/);
+  assert.match(service, /supabase\.functions\.invoke\('live-status'/);
+  // The cache itself is untouched: one look at YouTube a minute, however many phones ask.
+  assert.equal(logic.LIVE_CACHE_MS, 60_000);
+  assert.equal(logic.rowNeedsRefresh({ checked_at: iso(-30_000) }, NOW), false);
+  assert.equal(logic.rowNeedsRefresh({ checked_at: iso(-61_000) }, NOW), true);
+  assert.equal(logic.rowNeedsRefresh(null, NOW), true);
+});
+
+test('the embeddable column is additive: members still read the row and write one column', () => {
+  const sql = read('supabase/2026-09-23-live-embeddable.sql');
+  assert.match(sql, /add column if not exists embeddable boolean/);
+  assert.doesNotMatch(sql, /\bgrant\b|\brevoke\b|drop policy|create policy/i, 'the grants and policies are not touched');
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial review, 2026-09-23. Four things the first build got wrong.
+// ---------------------------------------------------------------------------
+
+test('a flaky embedding cross-check never forgets that THIS stream may not be embedded', () => {
+  const found = { state: 'live', videoId: 'G5h7XID3Re8', title: 'Sunday Service', channelId: logic.OGN_CHANNEL_ID, startedAt: null, reason: 'YouTube says this stream is live now' };
+  // Minute 1: YouTube's oEmbed said no.
+  const first = logic.detectionColumns(null, { ...found, embeddable: false }, iso(0), null);
+  assert.equal(first.embeddable, false);
+  // Minute 2: the same stream, but the cross-check timed out, so it knows nothing.
+  const second = logic.detectionColumns(first, { ...found, embeddable: null }, iso(MIN), null);
+  assert.equal(second.embeddable, false, 'a timeout must not put the broken in-app player back');
+  assert.equal(live.watchActionFor(logic.resolveLiveState({ ...second, confirmed_at: iso(MIN) }, NOW + MIN)).kind, 'open');
+  // A clear "yes" later still wins, and so does a different stream starting.
+  assert.equal(logic.detectionColumns(second, { ...found, embeddable: true }, iso(2 * MIN), null).embeddable, true);
+  const other = logic.detectionColumns(second, { ...found, videoId: 'NH5dJesdcAw', embeddable: null }, iso(3 * MIN), null);
+  assert.equal(other.embeddable, null, 'what we knew about one stream says nothing about the next');
+});
+
+test('a leader keeps Check now and Go live even when this phone could not read the status', () => {
+  const screen = read('app/live.tsx');
+  // The panel is rendered off `!loading`, not off a state that may never arrive.
+  assert.match(screen, /canManageLive && !loading \? \(/);
+  assert.match(screen, /state=\{state \?\? NOT_LIVE\}/);
+  assert.match(screen, /unknown=\{!state\}/);
+  // And it says so rather than printing "No" as if it were a finding.
+  assert.match(screen, /This phone could not read the live status just now/);
+  assert.match(screen, /\{unknown \? null : \(/, 'the "what the server last saw" panel is hidden when nothing was read');
+  assert.match(screen, /factsOpen && !unknown \?/);
+  assert.match(read('lib/liveService.ts'), /export \{[^}]*NOT_LIVE[^}]*\} from/);
+});
+
+test("a leader's Check now is never overwritten by a poll that was already in the air", () => {
+  const service = read('lib/liveService.ts');
+  const checkNow = /const checkNow = useCallback\(async \(\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(service);
+  assert.ok(checkNow, 'checkNow is still there');
+  const awaitAt = checkNow[1].indexOf('await checkLiveNow()');
+  const numberAt = checkNow[1].indexOf('++generation.current');
+  assert.ok(awaitAt >= 0 && numberAt >= 0);
+  assert.ok(numberAt > awaitAt, 'the generation is taken AFTER the answer, so the leader\'s own check wins');
+});
+
+test('a live service is watched at the live edge — never rewound to where someone left it', () => {
+  const player = read('lib/nowPlaying.tsx');
+  // The flag exists, and both places that start a live stream set it.
+  assert.match(player, /live\?: boolean;/);
+  assert.match(player, /seconds: item\.live \? 0 : resumeStartSeconds/);
+  assert.match(player, /const resumeAt = item && item\.type === 'embed' && !item\.live \? resumeForRef\.current\.seconds : 0;/);
+  assert.match(player, /const id = item && !item\.live \? youtubeVideoId\(item\.url\) : null;/);
+  for (const rel of ['app/live.tsx', 'components/LiveBanner.tsx']) {
+    assert.match(read(rel), /type: 'embed', live: true \}\)/, `${rel} marks the live stream as live`);
+  }
+  // Nothing else claims to be live, so the resume the owner asked for still
+  // works everywhere a recording is played.
+  assert.doesNotMatch(read('app/chat-room.tsx'), /live: true/);
 });

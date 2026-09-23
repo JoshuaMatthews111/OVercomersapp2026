@@ -177,6 +177,8 @@ export default function RootLayout() {
             <Stack.Screen name="maps" />
             <Stack.Screen name="person" />
             <Stack.Screen name="prayer" />
+            {/* The More tab's own pages: app/settings/ (Account, About OGN, Saved Media, Downloads, Delete my account). */}
+            <Stack.Screen name="settings" />
             {/* 1-on-1 sessions: app/sessions/ (book, host calendar, one booking). A paid service, never in Give. */}
             <Stack.Screen name="sessions" />
             <Stack.Screen name="story-viewer" />

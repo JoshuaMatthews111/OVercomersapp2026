@@ -46,6 +46,12 @@ export type YouTubeDetection = {
   startedAt: string | null;
   /** Plain words for the log and for leaders: why we decided this. */
   reason: string;
+  /**
+   * May this stream play inside another app? false when YouTube says no
+   * (the channel turned embedding off for it). null when we did not ask or
+   * could not tell — the app then tries the in-app player, as it always has.
+   */
+  embeddable?: boolean | null;
 };
 
 /** The one row of public.live_status, as PostgREST hands it back. */
@@ -60,6 +66,8 @@ export type LiveRow = {
   checked_at?: string | null;
   confirmed_at?: string | null;
   detail?: string | null;
+  /** false when YouTube refuses to let this stream play inside another app. */
+  embeddable?: boolean | null;
   manual_override?: unknown;
 };
 
@@ -93,8 +101,23 @@ export type LiveState = {
   detectionNote: string | null;
   /** When a hand-started live switches itself off. */
   manualEndsAt: string | null;
+  /**
+   * false when YouTube will not let this stream play inside another app, so
+   * the app offers "Watch on YouTube" instead of a player that would only
+   * show YouTube's error. null means we do not know; the app tries its own
+   * player, which already has its own message if YouTube refuses.
+   */
+  embeddable: boolean | null;
   /** The stream YouTube is reporting right now, when we trust it (even if a leader has hidden it). */
   autoVideoId: string | null;
+  /**
+   * The video the last look at YouTube was about, whatever it decided —
+   * including a scheduled stream that has not started. Leaders see this on
+   * the live screen so a leftover scheduled stream can be found and deleted.
+   */
+  lastSeenVideoId: string | null;
+  /** The title that went with it, so a leader recognises the stream on the screen. */
+  lastSeenTitle: string | null;
   /** The ministry's channel, for "Open our YouTube channel". */
   channelUrl: string;
 };
@@ -111,7 +134,10 @@ export const NOT_LIVE: LiveState = Object.freeze({
   detection: null,
   detectionNote: null,
   manualEndsAt: null,
+  embeddable: null,
   autoVideoId: null,
+  lastSeenVideoId: null,
+  lastSeenTitle: null,
   channelUrl: OGN_CHANNEL_URL,
 }) as LiveState;
 
@@ -253,7 +279,7 @@ export function watchHeaderSays(html: string): 'live' | 'waiting' | null {
 }
 
 function detection(state: DetectState, reason: string, extra: Partial<YouTubeDetection> = {}): YouTubeDetection {
-  return { state, reason, videoId: null, title: null, channelId: null, startedAt: null, ...extra };
+  return { state, reason, videoId: null, title: null, channelId: null, startedAt: null, embeddable: null, ...extra };
 }
 
 /**
@@ -511,11 +537,15 @@ export function resolveLiveState(row: LiveRow | null | undefined, nowMs: number)
   const autoVideoId = validId(row.video_id);
   const autoTrusted = row.is_live === true && Boolean(autoVideoId) && confirmed !== null && nowMs - confirmed <= AUTO_TRUST_MS;
   const override = parseOverride(row.manual_override, nowMs);
+  const embeddable = row.embeddable === true ? true : row.embeddable === false ? false : null;
   const common = {
     checkedAt: isoOrNull(row.checked_at),
     detection: detectionState,
     detectionNote: note,
+    embeddable: null as boolean | null,
     autoVideoId: autoTrusted ? autoVideoId : null,
+    lastSeenVideoId: autoVideoId,
+    lastSeenTitle: str(row.title),
     channelUrl: OGN_CHANNEL_URL,
   };
 
@@ -530,6 +560,8 @@ export function resolveLiveState(row: LiveRow | null | undefined, nowMs: number)
       title: override.title || (override.videoId && override.videoId === autoVideoId ? str(row.title) : null),
       startedAt: override.setAt,
       manualEndsAt: override.expiresAt,
+      // We only know about embedding for the stream YouTube itself reported.
+      embeddable: override.videoId && override.videoId === validId(row.video_id) ? embeddable : null,
     };
   }
   const hidden = override && override.mode === 'ended' && override.videoId !== null && override.videoId === autoVideoId;
@@ -544,6 +576,7 @@ export function resolveLiveState(row: LiveRow | null | undefined, nowMs: number)
       title: str(row.title),
       startedAt: isoOrNull(row.started_at),
       manualEndsAt: null,
+      embeddable,
     };
   }
   return { ...NOT_LIVE, ...common };
@@ -571,10 +604,18 @@ export function detectionColumns(
       checked_at: nowIso,
       confirmed_at: prev?.confirmed_at ?? null,
       detail: note,
+      embeddable: prev?.embeddable ?? null,
     };
   }
   if (found.state === 'live' && found.videoId) {
     const sameStream = prev?.is_live === true && prev.video_id === found.videoId;
+    // The embedding cross-check can simply fail (a timeout, a 404, YouTube
+    // having a bad minute) and then it says NOTHING about embedding. Throwing
+    // away a clear answer from a minute ago would put the in-app player back
+    // in front of a stream YouTube refuses to show there — the owner's
+    // build-34 complaint ("the player of video in the app gave me error").
+    // So an answer already known about THIS SAME video is kept.
+    const known = prev?.video_id === found.videoId && typeof prev?.embeddable === 'boolean' ? prev.embeddable : null;
     return {
       source: 'youtube',
       video_id: found.videoId,
@@ -588,6 +629,7 @@ export function detectionColumns(
       checked_at: nowIso,
       confirmed_at: nowIso,
       detail: note,
+      embeddable: found.embeddable === true ? true : found.embeddable === false ? false : known,
     };
   }
   return {
@@ -600,6 +642,7 @@ export function detectionColumns(
     checked_at: nowIso,
     confirmed_at: nowIso,
     detail: note,
+    embeddable: null,
   };
 }
 
@@ -624,7 +667,10 @@ export function normalizeLiveState(value: unknown): LiveState | null {
     detection: v.detection === 'live' || v.detection === 'scheduled' || v.detection === 'offline' || v.detection === 'unsure' ? v.detection : null,
     detectionNote: str(v.detectionNote),
     manualEndsAt: isoOrNull(v.manualEndsAt),
+    embeddable: v.embeddable === true ? true : v.embeddable === false ? false : null,
     autoVideoId: validId(v.autoVideoId),
+    lastSeenVideoId: validId(v.lastSeenVideoId),
+    lastSeenTitle: str(v.lastSeenTitle),
     channelUrl: OGN_CHANNEL_URL,
   };
   if (state.isLive) {

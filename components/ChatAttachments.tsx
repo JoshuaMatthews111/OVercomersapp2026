@@ -65,7 +65,45 @@ async function pick(choice: Choice['key']): Promise<PickedFile | null> {
   return { uri: asset.uri, name: asset.fileName, mimeType: mime, size: asset.fileSize, kind: attachmentKindFromMime(mime), width: asset.width, height: asset.height };
 }
 
-export function AttachSheet({ visible, dark, onClose, onPicked, onSong }: { visible: boolean; dark: boolean; onClose: () => void; onPicked: (file: PickedFile) => void; /** Song choice (2026-09-22): opens the church's songs from Media. */ onSong?: () => void }) {
+/** Pictures and clips, however they are labelled. Kept beside the same list in
+ *  the database trigger (supabase/2026-09-23-chat-post-rules-review-fixes.sql). */
+const MEDIA_FILE_NAME = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|avif|mp4|mov|m4v|avi|mkv|webm|3gp)$/i;
+
+/**
+ * The words a person reads when this group does not take this kind of file,
+ * or null when it does. The same sentences the database raises, so the two
+ * never say different things.
+ */
+export function refuseByRoomRules(file: PickedFile, allowMedia: boolean, allowVoiceNotes: boolean): string | null {
+  const named = String(file.name || file.uri || '').split('?')[0];
+  const looksLikeMedia = file.kind === 'image' || file.kind === 'video'
+    || (file.kind !== 'audio' && MEDIA_FILE_NAME.test(named));
+  if (!allowMedia && looksLikeMedia) return 'Photos and videos are turned off in this group.';
+  if (!allowVoiceNotes && file.kind === 'audio') return 'Voice notes are turned off in this group.';
+  return null;
+}
+
+export function AttachSheet({ visible, dark, onClose, onPicked, onSong, allowMedia = true, allowVoiceNotes = true }: {
+  visible: boolean;
+  dark: boolean;
+  onClose: () => void;
+  onPicked: (file: PickedFile) => void;
+  /** Song choice (2026-09-22): opens the church's songs from Media. */
+  onSong?: () => void;
+  /**
+   * Group post limits (2026-09-23): false when this group has photos and
+   * videos turned off. Camera, Photos and Video are then not offered at all —
+   * the database refuses them anyway, and a choice that always fails is worse
+   * than no choice. A line in their place says why.
+   */
+  allowMedia?: boolean;
+  /**
+   * Group post limits (2026-09-23): false when this group has voice notes
+   * turned off. The microphone is already hidden; this stops a recording
+   * chosen from Files going up and then being refused.
+   */
+  allowVoiceNotes?: boolean;
+}) {
   const pendingChoice = useRef<Choice['key'] | null>(null);
   const pendingSong = useRef(false);
   const insets = useSafeAreaInsets();
@@ -83,6 +121,14 @@ export function AttachSheet({ visible, dark, onClose, onPicked, onSong }: { visi
       if (file.size && file.size > chatAttachmentLimitBytes()) {
         return Alert.alert('That file is too big to send', tooLargeMessage('chat-attachments', file.size));
       }
+      // A group's own limits, checked BEFORE the upload starts (2026-09-23).
+      // Document is still offered when photos are off, because a document is
+      // still welcome — but a picture chosen out of Files is a picture. The
+      // database refuses it either way; catching it here means nobody watches
+      // a 40 MB video upload finish and only then reads that it was never
+      // allowed, and nothing is left behind in the private bucket.
+      const refusal = refuseByRoomRules(file, allowMedia, allowVoiceNotes);
+      if (refusal) return Alert.alert('That cannot be sent here', refusal);
       onPicked(file);
     } catch (err) {
       Alert.alert('We could not open that', friendlyError(err, 'Please try choosing the file again.'));
@@ -113,8 +159,11 @@ export function AttachSheet({ visible, dark, onClose, onPicked, onSong }: { visi
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityRole="button" accessibilityLabel="Close attachment choices" />
         <View style={[styles.sheet, { marginBottom: Math.max(12, insets.bottom) }]}>
           <Text style={styles.sheetHeading}>Send something</Text>
+          {!allowMedia ? (
+            <Text style={styles.sheetNote}>Photos and videos are turned off in this group. You can still send a document or a song.</Text>
+          ) : null}
           <View style={styles.grid}>
-            {CHOICES.map((choice) => (
+            {(allowMedia ? CHOICES : CHOICES.filter((choice) => choice.key === 'document')).map((choice) => (
               <Pressable key={choice.key} accessibilityRole="button" accessibilityLabel={choice.label} onPress={() => choose(choice.key)} style={styles.choice}>
                 <View style={styles.choiceIcon}>
                   <Ionicons name={choice.icon} size={26} color={getTheme(dark).colors.textOnAccent} />
@@ -345,6 +394,8 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   backdrop: { flex: 1, minHeight: 200, justifyContent: 'flex-end', backgroundColor: t.colors.overlay },
   sheet: { margin: 12, marginBottom: 24, borderRadius: t.radius.xl, backgroundColor: t.colors.sheet, borderWidth: 1, borderColor: t.colors.borderStrong, padding: 18, ...t.elevation.high },
   sheetHeading: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle, marginBottom: 14 },
+  // Why Camera, Photos and Video are not on the sheet in this group.
+  sheetNote: { color: t.colors.textSecondary, fontWeight: '700', fontSize: t.type.meta, lineHeight: 20, marginTop: -6, marginBottom: 14 },
   grid: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-around', rowGap: 18 },
   choice: { minWidth: 76, minHeight: 96, alignItems: 'center', justifyContent: 'center', gap: 8, paddingHorizontal: 4 },
   choiceIcon: { width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center', backgroundColor: t.colors.accentSolid },

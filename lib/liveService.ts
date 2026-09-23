@@ -23,12 +23,12 @@ import { LIVE_TITLE_MAX, NOT_LIVE, OLD_SCHEDULED_REASON, classifyLiveLink, norma
 import type { LiveRow, LiveState } from '../supabase/functions/live-status/logic';
 
 export type { LiveState } from '../supabase/functions/live-status/logic';
-export { LIVE_TITLE_MAX, MANUAL_LIVE_HOURS, MANUAL_END_HOURS, classifyLiveLink } from '../supabase/functions/live-status/logic';
+export { LIVE_TITLE_MAX, MANUAL_LIVE_HOURS, MANUAL_END_HOURS, NOT_LIVE, classifyLiveLink } from '../supabase/functions/live-status/logic';
 
 /** Home and the live screen ask again this often while they are on screen. */
 export const LIVE_POLL_MS = 60_000;
 
-const LIVE_COLUMNS = 'id,source,video_id,url,title,is_live,started_at,checked_at,confirmed_at,detail,manual_override';
+const LIVE_COLUMNS = 'id,source,video_id,url,title,is_live,started_at,checked_at,confirmed_at,detail,embeddable,manual_override';
 
 /**
  * The current answer. Reads the cached row; asks the edge function only when
@@ -48,19 +48,30 @@ export async function fetchLiveState(nowMs: number = Date.now()): Promise<LiveSt
   throw new FriendlyError('We could not check whether we are live right now. Please try again in a moment.');
 }
 
-/** What pressing Watch does. `in-app` plays in the app's own player; `open` hands the link to Facebook. */
+/**
+ * What pressing Watch does. `in-app` plays in the app's own player; `open`
+ * hands the link to Facebook, or to YouTube when YouTube itself will not let
+ * the stream play anywhere else.
+ */
 export type WatchAction =
   | { kind: 'in-app'; url: string; title: string; speaker: string }
-  | { kind: 'open'; url: string };
+  | { kind: 'open'; url: string; where: 'facebook' | 'youtube' };
 
 export const LIVE_SPEAKER = 'Live now · Overcomers Global Network';
 
 export function watchActionFor(state: LiveState): WatchAction | null {
   if (!state.isLive || !state.url) return null;
   if (state.source === 'youtube' && state.videoId) {
+    // YouTube told us, when we asked about this very stream, that it may not
+    // be embedded. Opening our own player would only show YouTube's error
+    // screen, so the button says what it will really do (owner, build 34:
+    // "the player of video in the app gave me error and then hit watch on
+    // youtube"). `null` — we do not know — still tries the in-app player,
+    // which has its own message if YouTube refuses.
+    if (state.embeddable === false) return { kind: 'open', url: state.url, where: 'youtube' };
     return { kind: 'in-app', url: state.url, title: liveTitle(state), speaker: LIVE_SPEAKER };
   }
-  if (state.source === 'facebook') return { kind: 'open', url: state.url };
+  if (state.source === 'facebook') return { kind: 'open', url: state.url, where: 'facebook' };
   return null;
 }
 
@@ -116,6 +127,63 @@ export function detectionText(state: Pick<LiveState, 'detection'> & Partial<Pick
     default:
       return 'The app has not checked YouTube yet.';
   }
+}
+
+/** Whether the app would play this stream itself, in words a leader understands. */
+export function embeddableText(state: Pick<LiveState, 'embeddable' | 'isLive' | 'source'>): string {
+  if (state.source === 'facebook') return 'Facebook streams open in the Facebook app.';
+  if (state.embeddable === false) return 'No — YouTube will not let this one play inside the app, so Watch opens YouTube.';
+  if (state.embeddable === true) return 'Yes — it plays inside the app.';
+  return 'Not known yet. The app will try its own player first.';
+}
+
+export type LiveFact = { label: string; value: string };
+
+/**
+ * Exactly what the server last saw, for the leader's "Check now" panel. The
+ * owner asked to be able to prove this before a service instead of finding
+ * out during one, so every line here is a fact from the stored row — never a
+ * guess and never a blank.
+ */
+export function liveFacts(state: LiveState, nowMs: number = Date.now()): LiveFact[] {
+  const videoId = state.videoId || state.autoVideoId || state.lastSeenVideoId;
+  const checkedClock = state.checkedAt && Number.isFinite(Date.parse(state.checkedAt))
+    ? new Date(state.checkedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })
+    : null;
+  return [
+    {
+      label: 'Are we live in the app?',
+      value: state.isLive
+        ? state.via === 'manual' ? 'Yes — a leader started it by hand' : 'Yes — YouTube is streaming'
+        : 'No',
+    },
+    { label: 'What YouTube said', value: detectionText(state) },
+    { label: 'Stream title', value: state.title || state.lastSeenTitle || 'None yet' },
+    { label: 'Video id', value: videoId || 'None' },
+    {
+      label: 'Last checked',
+      value: checkedClock ? `${checkedText(state.checkedAt, nowMs)} (${checkedClock})` : checkedText(state.checkedAt, nowMs),
+    },
+    { label: 'Plays inside the app?', value: embeddableText(state) },
+  ];
+}
+
+/**
+ * Ask the server again right now (the leader's "Check now"). The server keeps
+ * its own one-minute cache, so pressing this twice in a minute gives the same
+ * answer — which is why the panel always shows when the check really happened.
+ */
+export async function checkLiveNow(): Promise<LiveState> {
+  if (!hasSupabase) return { ...NOT_LIVE };
+  const fresh = await supabase.functions.invoke('live-status', { body: {} });
+  if (fresh.error) {
+    throw new FriendlyError('We could not reach the live checker just now. Please check your connection and try again.');
+  }
+  const answer = normalizeLiveState(fresh.data);
+  if (!answer) {
+    throw new FriendlyError('The live checker gave an answer we could not read. Please try again in a moment.');
+  }
+  return answer;
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +406,27 @@ export function useLiveStatus() {
   /** After this phone changed something (Go live / End live): a new check that wins over any older one. */
   const reloadNow = useCallback(() => run(), [run]);
 
+  /**
+   * A leader's "Check now": go straight to the server rather than reading the
+   * cached row. Throws so the button can show what went wrong; the screen
+   * keeps whatever it already had.
+   */
+  const checkNow = useCallback(async () => {
+    const next = await checkLiveNow();
+    // The number is taken AFTER the answer arrives, not before: a leader's own
+    // Check now is the newest word on the matter, so it must win over a
+    // minute-timer poll that happened to land while it was in the air (that
+    // poll reads the cached row and would have put a staler answer back on
+    // screen under the panel that has just said something else).
+    const mine = ++generation.current;
+    if (alive.current && mine === generation.current) {
+      setState(next);
+      setError(null);
+      setLoading(false);
+    }
+    return next;
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       refresh();
@@ -354,5 +443,5 @@ export function useLiveStatus() {
     }, [refresh])
   );
 
-  return { state, loading, error, refresh, reloadNow };
+  return { state, loading, error, refresh, reloadNow, checkNow };
 }

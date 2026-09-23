@@ -1,5 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
-import { FunctionsHttpError, Session } from '@supabase/supabase-js';
+import { Session } from '@supabase/supabase-js';
 import * as ImagePicker from 'expo-image-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
@@ -19,35 +19,34 @@ import { UploadError, friendlyUploadError, uploadPickedAsset } from '../../lib/u
 
 type SettingsTone = 'normal' | 'danger';
 
+/**
+ * What a row actually does, so the mark on its right tells the truth:
+ *
+ *   'page'    pushes a screen in this app        → chevron-forward
+ *   'expand'  opens a panel directly underneath  → chevron-down / chevron-up
+ *   'inline'  changes something you can see here → no chevron at all
+ *   'away'    leaves the app for a web page      → the leaving arrow
+ *
+ * This is the whole of the owner's TestFlight 36 complaint. A chevron-forward
+ * is a promise of another page; when fifteen rows all drew one and two of them
+ * opened a panel rendered BELOW the entire list, the taps looked dead. Account
+ * Settings and About OGN are real pages now — and Notifications, Theme,
+ * Privacy Policy and Terms of Service stopped promising something they were
+ * never going to do.
+ */
+type SettingsKind = 'page' | 'expand' | 'inline' | 'away';
+
 type SettingsItem = {
   label: string;
   icon: keyof typeof Ionicons.glyphMap;
   value?: string;
   tone?: SettingsTone;
+  /** Defaults to 'page': the row pushes a screen. */
+  kind?: SettingsKind;
+  /** For 'expand' rows: whether the panel under this row is open right now. */
+  open?: boolean;
   action: () => void;
 };
-
-type SettingsDetail = 'account' | 'language' | 'saved' | 'downloads' | 'about' | 'delete' | null;
-
-/**
- * Deleting an account is the one thing in this app that cannot be undone, so
- * the member has to write this word out before the button will do anything.
- * A tap alone — even a destructive-red one — is too easy to do by mistake.
- */
-const DELETE_PHRASE = 'DELETE';
-
-/**
- * The three stages of a deletion, in the order they happen. The panel shows
- * all three and ticks them off, so nobody is ever watching a still screen
- * wondering whether the phone is doing anything.
- */
-const deleteStages = [
-  { key: 'checking', label: 'Checking your sign-in' },
-  { key: 'removing', label: 'Removing your account and everything saved with it' },
-  { key: 'signout', label: 'Signing this phone out' },
-] as const;
-
-type DeleteStage = (typeof deleteStages)[number]['key'];
 
 /**
  * The giving address is a setting, not a screen constant, so the ministry can
@@ -85,7 +84,6 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [sendingReset, setSendingReset] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [notice, setNotice] = useState('');
@@ -95,16 +93,10 @@ export default function ProfileScreen() {
   const [uploadFraction, setUploadFraction] = useState(0);
   const uploadAbort = useRef<AbortController | null>(null);
 
-  // Account deletion. `deleteStage` drives the ticked list in the panel,
-  // `deleteSeconds` keeps a real number moving on screen while the ministry's
-  // server works, and `deleteError` holds a sentence the member can act on.
-  const [deleteConfirmText, setDeleteConfirmText] = useState('');
-  const [deleteStage, setDeleteStage] = useState<DeleteStage>('checking');
-  const [deleteSeconds, setDeleteSeconds] = useState(0);
-  const [deleteError, setDeleteError] = useState('');
-  const [deleteUnfinished, setDeleteUnfinished] = useState(false);
+  // Account deletion lives on its own page now: app/settings/delete-account.tsx.
+  // It carries the countdown, the typed confirmation and the edge-function call
+  // exactly as they were here.
 
-  const [settingsDetail, setSettingsDetail] = useState<SettingsDetail>(null);
   const [showNotificationSettings, setShowNotificationSettings] = useState(false);
   const [savingNotificationPrefs, setSavingNotificationPrefs] = useState(false);
   const [notificationPrefs, setNotificationPrefs] = useState<NotificationPreferences>({
@@ -121,7 +113,6 @@ export default function ProfileScreen() {
   useEffect(() => {
     if (params.settings === 'notifications') {
       setShowNotificationSettings(true);
-      setSettingsDetail(null);
       router.setParams({ settings: undefined });
     }
   }, [params.settings]);
@@ -170,7 +161,6 @@ export default function ProfileScreen() {
       setSession(nextSession);
       if (!nextSession) {
         setAvatarUrl(null);
-        setSettingsDetail(null);
         setShowNotificationSettings(false);
       }
     });
@@ -186,28 +176,6 @@ export default function ProfileScreen() {
     });
     return () => { active = false; };
   }, [loadEverything]));
-
-  // An honest clock. The ministry's server does the removal in one go and
-  // cannot report a percentage back, so rather than draw an invented bar this
-  // counts the real seconds that have passed and the stage list says which
-  // part is running. Nothing on this screen ever waits in silence.
-  useEffect(() => {
-    if (!deleting) return;
-    const startedAt = Date.now();
-    setDeleteSeconds(0);
-    const timer = setInterval(() => {
-      setDeleteSeconds(Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [deleting]);
-
-  // Leaving the panel clears the typed word, so coming back always starts
-  // from a stop rather than one tap away from a deletion.
-  useEffect(() => {
-    if (settingsDetail === 'delete') return;
-    setDeleteConfirmText('');
-    setDeleteError('');
-  }, [settingsDetail]);
 
   async function onPullToRefresh() {
     setRefreshing(true);
@@ -292,149 +260,6 @@ export default function ProfileScreen() {
     }
   }
 
-  /**
-   * Account deletion, in the app, start to finish.
-   *
-   * Three things have to happen before anything is removed: open this panel,
-   * write DELETE into the box, then answer one last question. That is on
-   * purpose — there is no way back from this, so there must be no way into it
-   * by accident either.
-   */
-  function confirmAccountDeletion() {
-    if (deleting) return;
-    if (deleteConfirmText.trim().toUpperCase() !== DELETE_PHRASE) {
-      Alert.alert('Almost there', 'Write DELETE in the box first, so we know this is really what you want.');
-      return;
-    }
-    Alert.alert(
-      'Delete your account?',
-      'Your profile, your photo, your prayer requests and the files you sent will be removed for good. Messages you have written in a shared prayer room stay in the conversation, but they will no longer carry your name. This cannot be undone.',
-      [
-        { text: 'Keep my account', style: 'cancel' },
-        { text: 'Delete it', style: 'destructive', onPress: () => { void deleteAccount(); } },
-      ]
-    );
-  }
-
-  /**
-   * Calls the ministry's `delete-account` server function.
-   *
-   * Apple 5.1.1(v) and Google Play both require deletion to start AND finish
-   * inside the app, so there is no email hand-off here any more.
-   *
-   * Two states matter more than the happy path:
-   *
-   *  - The call can be cut off before an answer comes back (a weak signal, or
-   *    the app's own fifteen-second leash on ordinary requests). Losing the
-   *    answer is NOT the same as nothing happening, so instead of guessing we
-   *    ask who this phone is signed in as. If that sign-in no longer exists,
-   *    the removal did finish and we say so.
-   *  - The removal can finish and the sign-in survive it. That is the one
-   *    genuinely half-done state, and the member is told exactly that rather
-   *    than being sent away believing they are gone.
-   */
-  async function deleteAccount() {
-    setDeleting(true);
-    setDeleteStage('checking');
-    setDeleteError('');
-    setDeleteUnfinished(false);
-    setNotice('');
-    try {
-      const { data: current, error: sessionError } = await supabase.auth.getSession();
-      if (sessionError) throw sessionError;
-      if (!current.session) {
-        setDeleteError('This phone is not signed in any more, so there was nothing to remove. Sign in again if you still want to delete your account.');
-        return;
-      }
-
-      setDeleteStage('removing');
-      // The function name is written out in full here on purpose, so a reader —
-      // and the release gate — can see that deletion really is performed in app.
-      const { data, error } = await supabase.functions.invoke('delete-account', {
-        method: 'POST',
-        body: { confirm: true },
-      });
-
-      if (error) {
-        const spoken = await serverSentence(error);
-        // The server tells us when it removed the content but could not remove
-        // the sign-in. Never send somebody away believing they are gone.
-        if (spoken.dataRemoved) {
-          setDeleteUnfinished(true);
-          setDeleteError(spoken.message || 'Everything you had saved has been removed, but your sign-in is still here. Please tap Delete my account once more.');
-          return;
-        }
-        if (spoken.message) {
-          setDeleteError(spoken.message);
-          return;
-        }
-        // No answer came back at all. Find out what is actually true before
-        // saying anything to the member.
-        const settled = await accountStillExists();
-        if (settled === 'gone') {
-          await finishDeletedAccount();
-          return;
-        }
-        if (settled === 'unknown') {
-          setDeleteError('We lost the connection before we heard back, so we cannot tell you yet whether it finished. Nothing else on this phone has changed. Check your signal and open this again.');
-          return;
-        }
-        setDeleteError(friendlyError(error, 'We could not remove your account just now, so it is still here exactly as it was. Please try again in a moment.'));
-        return;
-      }
-
-      const warnings = Array.isArray((data as { warnings?: unknown })?.warnings)
-        ? ((data as { warnings: string[] }).warnings)
-        : [];
-      await finishDeletedAccount(warnings[0]);
-    } catch (err) {
-      setDeleteError(friendlyError(err, 'We could not remove your account just now, so it is still here exactly as it was. Please try again in a moment.'));
-    } finally {
-      setDeleting(false);
-    }
-  }
-
-  /** Clears this phone and shows the welcome screen, once the account really is gone. */
-  async function finishDeletedAccount(extraNote?: string) {
-    setDeleteStage('signout');
-    // A local sign-out only clears what is stored on this phone. The sign-in it
-    // would otherwise end no longer exists, and the auth library treats that as
-    // a clean sign-out rather than an error.
-    await supabase.auth.signOut({ scope: 'local' });
-    setSession(null);
-    setAvatarUrl(null);
-    setSettingsDetail(null);
-    setDeleteConfirmText('');
-    router.replace('/welcome');
-    Alert.alert(
-      'Your account is gone',
-      extraNote
-        ? `We have removed your account and the things you saved in the app. ${extraNote} You are always welcome back.`
-        : 'We have removed your account and the things you saved in the app. You are always welcome back.'
-    );
-  }
-
-  /**
-   * Asks who this phone is signed in as.
-   *
-   * 'gone' means the sign-in no longer exists, which is proof the removal
-   * finished. 'here' means it does. 'unknown' means we could not reach anyone
-   * and must say so rather than guess.
-   */
-  async function accountStillExists(): Promise<'gone' | 'here' | 'unknown'> {
-    try {
-      const { data, error } = await supabase.auth.getUser();
-      if (data?.user) return 'here';
-      const status = (error as { status?: number } | null)?.status;
-      if (status === 401 || status === 403 || status === 404) return 'gone';
-      if (!error) return 'gone';
-      return 'unknown';
-    } catch {
-      // Nothing is hidden here: the caller turns 'unknown' into a sentence
-      // that tells the member we cannot say yet, which is the honest answer.
-      return 'unknown';
-    }
-  }
 
   async function uploadPhoto() {
     if (uploading) return;
@@ -520,31 +345,8 @@ export default function ProfileScreen() {
     router.push('/(tabs)/give' as any);
   }
 
-  async function saveAccountSettings() {
-    if (!session?.user.id || loading) return;
-    const nextName = displayName.trim() || session.user.user_metadata?.display_name || access.displayName || session.user.email || 'OGN Member';
-    setLoading(true);
-    try {
-      const { error } = await supabase.from('profiles').upsert({
-        id: session.user.id,
-        display_name: nextName,
-        avatar_url: avatarUrl,
-      });
-      if (error) throw error;
-      await supabase.auth.updateUser({ data: { display_name: nextName } });
-      nameTouched.current = false;
-      Alert.alert('Saved', 'Your profile is up to date.');
-      await loadEverything();
-    } catch (err) {
-      Alert.alert('We could not save that', friendlyError(err, 'Please check your connection and try again.'));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function openSettingsDetail(detail: SettingsDetail) {
-    setSettingsDetail((current) => (current === detail ? null : detail));
-  }
+  // Saving the name lives on its own page now: app/settings/account.tsx, with
+  // the same upsert, the same fallbacks and the same "Saved" confirmation.
 
   function onChangeDisplayName(value: string) {
     nameTouched.current = true;
@@ -591,14 +393,21 @@ export default function ProfileScreen() {
   const tourUserId = access.userId;
 
   const settings: SettingsItem[] = [
-    { label: 'Account Settings', icon: 'person-outline', action: () => openSettingsDetail('account') },
-    { label: 'Notifications', icon: 'notifications-outline', action: () => setShowNotificationSettings((value) => !value) },
+    { label: 'Account Settings', icon: 'person-outline', action: () => router.push('/settings/account' as any) },
+    // Not a page: the panel opens directly under this row, in view of the tap.
+    {
+      label: 'Notifications',
+      icon: 'notifications-outline',
+      kind: 'expand',
+      open: showNotificationSettings,
+      action: () => setShowNotificationSettings((value) => !value),
+    },
     // Language is hidden until a second language ships (owner decision 2026-09-21).
-    { label: 'Theme', icon: 'contrast-outline', value: dark ? 'Dark' : 'Light', action: () => { void setThemeMode(dark ? 'light' : 'dark'); } },
+    { label: 'Theme', icon: 'contrast-outline', kind: 'inline', value: dark ? 'Dark' : 'Light', action: () => { void setThemeMode(dark ? 'light' : 'dark'); } },
     ...(access.canUseEvangelism ? [{ label: 'Evangelism Dashboard', icon: 'map-outline' as const, action: () => router.push('/evangelism' as any) }] : []),
     ...(access.canManageContent ? [{ label: 'Admin Dashboard', icon: 'shield-checkmark-outline' as const, action: () => router.push('/admin' as any) }] : []),
-    { label: 'Saved Media', icon: 'bookmark-outline', action: () => openSettingsDetail('saved') },
-    { label: 'Downloads', icon: 'download-outline', action: () => openSettingsDetail('downloads') },
+    { label: 'Saved Media', icon: 'bookmark-outline', action: () => router.push('/settings/saved' as any) },
+    { label: 'Downloads', icon: 'download-outline', action: () => router.push('/settings/downloads' as any) },
     { label: 'Prayer History', icon: 'hand-left-outline', action: () => router.push('/prayer' as any) },
     // 1-on-1 sessions (a paid service, never in Give). app/sessions/index.tsx sends the host to their own calendar.
     { label: 'Book a 1-on-1 with Prophet Joshua', icon: 'calendar-outline', action: () => router.push('/sessions' as any) },
@@ -608,11 +417,15 @@ export default function ProfileScreen() {
     ...(tourUserId ? [{ label: 'Show me around again', icon: 'compass-outline' as const, action: () => { void resetWelcomeTour(tourUserId); } }] : []),
     { label: 'Support Center', icon: 'headset-outline', action: () => router.push('/support' as any) },
     { label: 'Community Standards', icon: 'people-outline', action: () => router.push('/community-standards' as any) },
-    { label: 'About Overcomers Global Network', icon: 'information-circle-outline', action: () => openSettingsDetail('about') },
+    { label: 'About Overcomers Global Network', icon: 'information-circle-outline', action: () => router.push('/settings/about' as any) },
     // Both pages are live on the ministry site; the stores ask for them too.
-    { label: 'Privacy Policy', icon: 'shield-checkmark-outline', action: () => { void Linking.openURL(privacyUrl); } },
-    { label: 'Terms of Service', icon: 'document-text-outline', action: () => { void Linking.openURL(termsUrl); } },
-    { label: 'Delete My Account', icon: 'trash-outline', tone: 'danger', action: () => openSettingsDetail('delete') },
+    // They open the web browser, so they carry the leaving arrow, not a chevron.
+    { label: 'Privacy Policy', icon: 'shield-checkmark-outline', kind: 'away', action: () => { void Linking.openURL(privacyUrl); } },
+    { label: 'Terms of Service', icon: 'document-text-outline', kind: 'away', action: () => { void Linking.openURL(termsUrl); } },
+    // In-app deletion (Apple 5.1.1(v), Play User Data). The whole flow —
+    // the typed DELETE, the ticked stages and the delete-account edge
+    // function — moved to app/settings/delete-account.tsx unchanged.
+    { label: 'Delete My Account', icon: 'trash-outline', tone: 'danger', action: () => router.push('/settings/delete-account' as any) },
   ];
 
   const heroHeight = 232 + insets.top;
@@ -761,81 +574,76 @@ export default function ProfileScreen() {
               </View>
 
               <View style={styles.settingsCard}>
-                {settings.map((item, index) => (
-                  <Pressable
-                    key={item.label}
-                    accessibilityRole="button"
-                    accessibilityLabel={item.value ? `${item.label}, ${item.value}` : item.label}
-                    onPress={item.action}
-                    style={[styles.settingsRow, index < settings.length - 1 && styles.settingsBorder]}
-                  >
-                    <Ionicons
-                      name={item.icon}
-                      size={22}
-                      color={item.tone === 'danger' ? theme.colors.danger : theme.colors.accent}
-                    />
-                    <Text style={[styles.settingsText, item.tone === 'danger' && styles.settingsTextDanger]}>{item.label}</Text>
-                    {item.value ? <Text style={styles.settingsValue}>{item.value}</Text> : null}
-                    <Ionicons name="chevron-forward" size={17} color={theme.colors.textMuted} />
-                  </Pressable>
-                ))}
+                {settings.map((item, index) => {
+                  const kind: SettingsKind = item.kind || 'page';
+                  const last = index === settings.length - 1;
+                  // The Notifications panel opens INSIDE the card, right under
+                  // the row that was tapped — never below all fifteen rows,
+                  // which is what made these taps look dead on build 36.
+                  const panelOpen = kind === 'expand' && item.open;
+                  return (
+                    <React.Fragment key={item.label}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={item.value ? `${item.label}, ${item.value}` : item.label}
+                        accessibilityState={kind === 'expand' ? { expanded: Boolean(item.open) } : undefined}
+                        accessibilityHint={kind === 'away' ? 'Opens in your web browser' : undefined}
+                        onPress={item.action}
+                        style={[styles.settingsRow, (!last || panelOpen) && styles.settingsBorder]}
+                      >
+                        <Ionicons
+                          name={item.icon}
+                          size={22}
+                          color={item.tone === 'danger' ? theme.colors.danger : theme.colors.accent}
+                        />
+                        <Text style={[styles.settingsText, item.tone === 'danger' && styles.settingsTextDanger]}>{item.label}</Text>
+                        {item.value ? <Text style={styles.settingsValue}>{item.value}</Text> : null}
+                        {kind === 'inline' ? null : (
+                          <Ionicons
+                            name={kind === 'expand' ? (item.open ? 'chevron-up' : 'chevron-down') : kind === 'away' ? 'open-outline' : 'chevron-forward'}
+                            size={17}
+                            color={theme.colors.textMuted}
+                          />
+                        )}
+                      </Pressable>
+
+                      {panelOpen ? (
+                        <View style={[styles.settingsPanel, !last && styles.settingsBorder]}>
+                          <Text style={styles.panelTitle}>Notification Preferences</Text>
+                          <Text style={styles.panelBody}>Choose what OGN can send to this phone. You can also turn notifications off in your phone settings.</Text>
+                          {notificationRows.map((row) => (
+                            <Pressable
+                              key={row.key}
+                              accessibilityRole="switch"
+                              accessibilityLabel={row.label}
+                              accessibilityState={{ checked: notificationPrefs[row.key], disabled: savingNotificationPrefs }}
+                              disabled={savingNotificationPrefs}
+                              onPress={() => toggleNotificationPreference(row.key)}
+                              style={styles.notificationRow}
+                            >
+                              <Ionicons name={row.icon} size={20} color={theme.colors.accent} />
+                              <Text style={styles.notificationLabel}>{row.label}</Text>
+                              <View style={[styles.switchTrack, notificationPrefs[row.key] && styles.switchTrackOn]}>
+                                <View style={[styles.switchThumb, notificationPrefs[row.key] && styles.switchThumbOn]} />
+                              </View>
+                            </Pressable>
+                          ))}
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel="Turn on notifications for this phone"
+                            disabled={loading}
+                            onPress={enablePushNotifications}
+                            style={styles.goldButton}
+                          >
+                            <Ionicons name="notifications" size={18} color={theme.colors.textOnAccent} />
+                            <Text style={styles.goldButtonText}>{loading ? 'Working…' : 'Turn on for this phone'}</Text>
+                          </Pressable>
+                        </View>
+                      ) : null}
+                    </React.Fragment>
+                  );
+                })}
               </View>
-
-              {settingsDetail ? (
-                <SettingsDetailPanel
-                  detail={settingsDetail}
-                  theme={theme}
-                  styles={styles}
-                  displayName={displayName}
-                  onChangeDisplayName={onChangeDisplayName}
-                  email={session.user.email || ''}
-                  loading={loading}
-                  deleting={deleting}
-                  deleteStage={deleteStage}
-                  deleteSeconds={deleteSeconds}
-                  deleteError={deleteError}
-                  deleteUnfinished={deleteUnfinished}
-                  deleteConfirmText={deleteConfirmText}
-                  onChangeDeleteConfirmText={setDeleteConfirmText}
-                  onSaveAccount={saveAccountSettings}
-                  onDeleteAccount={confirmAccountDeletion}
-                  onClose={() => setSettingsDetail(null)}
-                />
-              ) : null}
-
-              {showNotificationSettings ? (
-                <View style={styles.panelCard}>
-                  <Text style={styles.panelTitle}>Notification Preferences</Text>
-                  <Text style={styles.panelBody}>Choose what OGN can send to this phone. You can also turn notifications off in your phone settings.</Text>
-                  {notificationRows.map((row) => (
-                    <Pressable
-                      key={row.key}
-                      accessibilityRole="switch"
-                      accessibilityLabel={row.label}
-                      accessibilityState={{ checked: notificationPrefs[row.key], disabled: savingNotificationPrefs }}
-                      disabled={savingNotificationPrefs}
-                      onPress={() => toggleNotificationPreference(row.key)}
-                      style={styles.notificationRow}
-                    >
-                      <Ionicons name={row.icon} size={20} color={theme.colors.accent} />
-                      <Text style={styles.notificationLabel}>{row.label}</Text>
-                      <View style={[styles.switchTrack, notificationPrefs[row.key] && styles.switchTrackOn]}>
-                        <View style={[styles.switchThumb, notificationPrefs[row.key] && styles.switchThumbOn]} />
-                      </View>
-                    </Pressable>
-                  ))}
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Turn on notifications for this phone"
-                    disabled={loading}
-                    onPress={enablePushNotifications}
-                    style={styles.goldButton}
-                  >
-                    <Ionicons name="notifications" size={18} color={theme.colors.textOnAccent} />
-                    <Text style={styles.goldButtonText}>{loading ? 'Working…' : 'Turn on for this phone'}</Text>
-                  </Pressable>
-                </View>
-              ) : null}
 
               <Pressable
                 accessibilityRole="button"
@@ -957,289 +765,6 @@ export default function ProfileScreen() {
 
 type Styles = ReturnType<typeof useStyles>;
 
-function SettingsDetailPanel({
-  detail,
-  theme,
-  styles,
-  displayName,
-  onChangeDisplayName,
-  email,
-  loading,
-  deleting,
-  deleteStage,
-  deleteSeconds,
-  deleteError,
-  deleteUnfinished,
-  deleteConfirmText,
-  onChangeDeleteConfirmText,
-  onSaveAccount,
-  onDeleteAccount,
-  onClose,
-}: {
-  detail: Exclude<SettingsDetail, null>;
-  theme: AppTheme;
-  styles: Styles;
-  displayName: string;
-  onChangeDisplayName: (value: string) => void;
-  email: string;
-  loading: boolean;
-  deleting: boolean;
-  deleteStage: DeleteStage;
-  deleteSeconds: number;
-  deleteError: string;
-  deleteUnfinished: boolean;
-  deleteConfirmText: string;
-  onChangeDeleteConfirmText: (value: string) => void;
-  onSaveAccount: () => void;
-  onDeleteAccount: () => void;
-  onClose: () => void;
-}) {
-  const deleteArmed = deleteConfirmText.trim().toUpperCase() === DELETE_PHRASE;
-  const titleMap: Record<Exclude<SettingsDetail, null>, string> = {
-    account: 'Account Settings',
-    language: 'Language',
-    saved: 'Saved Media',
-    downloads: 'Downloads',
-    about: 'About OGN',
-    delete: 'Delete my account',
-  };
-
-  return (
-    <View style={styles.panelCard}>
-      <View style={styles.detailHeader}>
-        <Text style={styles.panelTitle}>{titleMap[detail]}</Text>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Close this panel"
-          onPress={onClose}
-          hitSlop={8}
-          style={styles.detailClose}
-        >
-          <Ionicons name="close" size={20} color={theme.colors.textPrimary} />
-        </Pressable>
-      </View>
-
-      {detail === 'account' ? (
-        <>
-          <Text style={styles.panelBody}>Change the name other members see. Tap the pencil on your profile card to change your photo.</Text>
-          <Text style={styles.detailLabel}>Email</Text>
-          <View style={styles.readOnlyField}>
-            <Text style={styles.readOnlyText}>{email}</Text>
-          </View>
-          <Text style={styles.detailLabel}>Display Name</Text>
-          <TextInput
-            accessibilityLabel="Display name"
-            value={displayName}
-            onChangeText={onChangeDisplayName}
-            placeholder="Your display name"
-            placeholderTextColor={theme.colors.textMuted}
-            style={styles.input}
-          />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Save account settings"
-            onPress={onSaveAccount}
-            disabled={loading}
-            style={styles.goldButton}
-          >
-            {loading ? <ActivityIndicator size="small" color={theme.colors.textOnAccent} /> : null}
-            <Text style={styles.goldButtonText}>{loading ? 'Saving…' : 'Save Account Settings'}</Text>
-          </Pressable>
-        </>
-      ) : null}
-
-      {detail === 'language' ? (
-        <>
-          <Text style={styles.panelBody}>The app is in English. If the ministry adds another language, it will show up in this list.</Text>
-          <View style={styles.choiceRow}>
-            <Ionicons name="checkmark-circle" size={22} color={theme.colors.accent} />
-            <Text style={styles.choiceText}>English</Text>
-          </View>
-        </>
-      ) : null}
-
-      {detail === 'saved' ? (
-        <>
-          <Text style={styles.panelBody}>Sermons, articles, videos and music you save are kept in the Media library.</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Open the Media library"
-            onPress={() => router.push('/(tabs)/messages' as any)}
-            style={styles.goldButton}
-          >
-            <Text style={styles.goldButtonText}>Open Media Library</Text>
-          </Pressable>
-        </>
-      ) : null}
-
-      {detail === 'downloads' ? (
-        <>
-          <Text style={styles.panelBody}>Anything the ministry marks as downloadable is kept on the Media tab, ready to play without a signal.</Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Open downloads on the Media tab"
-            onPress={() => router.push({ pathname: '/(tabs)/messages', params: { tab: 'downloads' } } as any)}
-            style={styles.goldButton}
-          >
-            <Text style={styles.goldButtonText}>Open Downloads</Text>
-          </Pressable>
-        </>
-      ) : null}
-
-      {detail === 'about' ? (
-        <Text style={styles.panelBody}>Overcomers Global Network exists to educate, equip, and evolve believers into victorious relationship with Christ while impacting lives and nations through the Gospel. One Vision. Every Nation. Eternal Impact.</Text>
-      ) : null}
-
-      {detail === 'delete' ? (
-        <>
-          <Text style={styles.panelBody}>This happens right here in the app, and it cannot be undone.</Text>
-
-          <Text style={styles.detailLabel}>What is removed for good</Text>
-          <View style={styles.bulletList}>
-            <BulletLine styles={styles} theme={theme} text="Your profile, your name and your photo" />
-            <BulletLine styles={styles} theme={theme} text="Your private prayer requests, and your name on any prayer you shared openly" />
-            <BulletLine styles={styles} theme={theme} text="The photos, videos and files you sent in chat" />
-            <BulletLine styles={styles} theme={theme} text="Your own stories, your saved items and your downloads" />
-            <BulletLine styles={styles} theme={theme} text="Your sign-in, so this email can no longer open the app" />
-          </View>
-
-          <Text style={styles.detailLabel}>What stays</Text>
-          <View style={styles.bulletList}>
-            <BulletLine styles={styles} theme={theme} text="Messages you wrote in a shared prayer room stay in the conversation, so it still reads — but they no longer carry your name" />
-            <BulletLine styles={styles} theme={theme} text="A prayer other people are praying over stays on the wall with nothing left on it that names you" />
-            <BulletLine styles={styles} theme={theme} text="Anything you posted for the ministry itself, such as a sermon or a notice, stays in the library" />
-            <BulletLine styles={styles} theme={theme} text="Your giving stays in the ministry's own records, as the law requires, without your name on it" />
-          </View>
-
-          {deleting ? (
-            <DeleteProgress styles={styles} theme={theme} stage={deleteStage} seconds={deleteSeconds} />
-          ) : (
-            <>
-              <Text style={styles.detailLabel}>Write DELETE to confirm</Text>
-              <TextInput
-                accessibilityLabel="Write the word DELETE to confirm"
-                value={deleteConfirmText}
-                onChangeText={onChangeDeleteConfirmText}
-                placeholder={DELETE_PHRASE}
-                placeholderTextColor={theme.colors.textMuted}
-                autoCapitalize="characters"
-                autoCorrect={false}
-                spellCheck={false}
-                returnKeyType="done"
-                style={styles.input}
-              />
-            </>
-          )}
-
-          {deleteError ? (
-            <View style={deleteUnfinished ? styles.deleteWarnBox : styles.deleteErrorBox}>
-              <Ionicons
-                name={deleteUnfinished ? 'alert-circle-outline' : 'information-circle-outline'}
-                size={20}
-                color={theme.colors.danger}
-              />
-              <Text style={styles.deleteErrorText}>{deleteError}</Text>
-            </View>
-          ) : null}
-
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Delete my account"
-            accessibilityState={{ disabled: deleting || !deleteArmed, busy: deleting }}
-            disabled={deleting || !deleteArmed}
-            onPress={onDeleteAccount}
-            style={[styles.dangerButton, (deleting || !deleteArmed) && styles.dangerButtonIdle]}
-          >
-            {deleting
-              ? <ActivityIndicator size="small" color={theme.colors.danger} />
-              : <Ionicons name="trash-outline" size={18} color={theme.colors.danger} />}
-            <Text style={styles.dangerButtonText}>
-              {deleting ? 'Removing your account…' : deleteUnfinished ? 'Finish deleting my account' : 'Delete my account'}
-            </Text>
-          </Pressable>
-
-          {!deleting && !deleteArmed ? (
-            <Text style={styles.deleteHint}>Write DELETE above and this button comes to life.</Text>
-          ) : null}
-        </>
-      ) : null}
-    </View>
-  );
-}
-
-function BulletLine({ styles, theme, text }: { styles: Styles; theme: AppTheme; text: string }) {
-  return (
-    <View style={styles.bulletRow}>
-      <Ionicons name="remove-outline" size={16} color={theme.colors.textMuted} />
-      <Text style={styles.bulletText}>{text}</Text>
-    </View>
-  );
-}
-
-/**
- * What is happening while an account is being removed.
- *
- * Every number on here is real. The bar measures stages this phone has
- * actually finished, the spinner sits on the stage that is running right now,
- * and the seconds are counted from when the member tapped. Nothing here is a
- * made-up percentage creeping towards a finish it cannot see.
- */
-function DeleteProgress({
-  styles,
-  theme,
-  stage,
-  seconds,
-}: {
-  styles: Styles;
-  theme: AppTheme;
-  stage: DeleteStage;
-  seconds: number;
-}) {
-  const current = Math.max(0, deleteStages.findIndex((entry) => entry.key === stage));
-  const remaining = Math.max(0, deleteStages.length - current);
-
-  return (
-    <View
-      accessible
-      accessibilityRole="progressbar"
-      accessibilityLabel={`${deleteStages[current].label}. ${seconds} seconds so far.`}
-      style={styles.deleteProgressBox}
-    >
-      {/* Two flex weights rather than a percentage, so the bar measures
-          finished stages and never has to be told a made-up number. */}
-      <View style={styles.deleteTrack}>
-        <View style={[styles.deleteTrackFill, { flex: current }]} />
-        <View style={{ flex: remaining }} />
-      </View>
-
-      {deleteStages.map((entry, index) => (
-        <View key={entry.key} style={styles.deleteStageRow}>
-          {/* One fixed slot for all three glyphs, so the labels line up
-              whichever stage is running. */}
-          <View style={styles.deleteStageGlyph}>
-            {index < current ? (
-              <Ionicons name="checkmark-circle" size={18} color={theme.colors.success} />
-            ) : index === current ? (
-              <ActivityIndicator size="small" color={theme.colors.accent} />
-            ) : (
-              <Ionicons name="ellipse-outline" size={18} color={theme.colors.textMuted} />
-            )}
-          </View>
-          <Text style={[styles.deleteStageText, index === current && styles.deleteStageTextNow]}>
-            {entry.label}
-          </Text>
-        </View>
-      ))}
-
-      <Text style={styles.deleteElapsed}>
-        {seconds < 1
-          ? 'Starting…'
-          : `${seconds} ${seconds === 1 ? 'second' : 'seconds'} so far. Please keep the app open.`}
-      </Text>
-    </View>
-  );
-}
-
 /**
  * A real progress ring, drawn with plain views so it needs no drawing library.
  *
@@ -1308,35 +833,6 @@ function roleLabel(level: 'member' | 'leader' | 'super_admin') {
   if (level === 'super_admin') return 'Super Admin';
   if (level === 'leader') return 'Leader';
   return 'Member';
-}
-
-/**
- * The sentence the ministry's server wrote, pulled out of a failed call.
- *
- * When a function answers with anything other than success, supabase hands
- * back a `FunctionsHttpError` whose `context` is the untouched reply
- * (node_modules/@supabase/functions-js/dist/module/types.d.ts:22 — `context:
- * any`; the documented way to read it is `await error.context.json()`). The
- * delete-account function always replies with `{ error: '<a plain sentence>' }`
- * and, when it removed the content but could not remove the sign-in, with
- * `dataRemoved: true` beside it. Reading that is the difference between
- * telling somebody the truth and showing them a generic shrug.
- */
-async function serverSentence(error: unknown): Promise<{ message: string; dataRemoved: boolean }> {
-  const nothing = { message: '', dataRemoved: false };
-  if (!(error instanceof FunctionsHttpError)) return nothing;
-  try {
-    const body = await error.context.json() as { error?: unknown; dataRemoved?: unknown };
-    return {
-      message: typeof body?.error === 'string' ? body.error : '',
-      dataRemoved: body?.dataRemoved === true,
-    };
-  } catch {
-    // The reply was not readable. Returning nothing here is not a swallowed
-    // failure: the caller goes on to check whether the account still exists
-    // and tells the member what it found either way.
-    return nothing;
-  }
 }
 
 /** "grace.adeyemi@…" becomes "Grace Adeyemi" — a real name, never an invented one. */
@@ -1521,119 +1017,29 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   settingsText: { flex: 1, color: t.colors.textPrimary, fontSize: t.type.cardTitle, fontWeight: '800' },
   settingsTextDanger: { color: t.colors.danger },
   settingsValue: { color: t.colors.textMuted, fontWeight: '700', fontSize: t.type.meta },
+  // The Notifications panel, drawn inside the settings card under its own row.
+  // The same raised ground the panel had when it sat on its own, so the sunken
+  // switch rows inside it keep exactly the contrast they were checked at.
+  settingsPanel: { backgroundColor: t.colors.surfaceRaised, paddingHorizontal: 16, paddingVertical: 14, gap: 10 },
 
-  panelCard: {
-    marginTop: 14,
-    borderRadius: t.radius.lg,
-    backgroundColor: t.colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: t.colors.borderStrong,
-    padding: 16,
-    gap: 10,
-    ...t.elevation.medium,
-  },
-  panelTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle },
+  // (panelCard went with the settings panel: the only panel left on this tab
+  // is Notifications, and it is drawn inside the settings card as
+  // `settingsPanel`, directly under its own row.)
+  panelTitle:{ color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.sectionTitle },
   panelBody: { color: t.colors.textSecondary, lineHeight: 21, fontSize: t.type.body },
-  detailHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
-  detailClose: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: t.colors.surfaceSunken,
-    borderWidth: 1,
-    borderColor: t.colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  detailLabel: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.meta, marginTop: 4 },
-  readOnlyField: {
-    minHeight: 48,
-    borderRadius: t.radius.md,
-    backgroundColor: t.colors.surfaceSunken,
-    borderWidth: 1,
-    borderColor: t.colors.border,
-    paddingHorizontal: 13,
-    justifyContent: 'center',
-  },
-  readOnlyText: { color: t.colors.textSecondary, fontWeight: '800', fontSize: t.type.body },
 
-  bulletList: { gap: 6 },
-  bulletRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
-  bulletText: { flex: 1, color: t.colors.textSecondary, lineHeight: 21, fontSize: t.type.body },
-  dangerNote: { color: t.colors.danger, fontWeight: '900', lineHeight: 21, fontSize: t.type.body },
 
   // The fill used to be `danger` with white on top. That reads at 5.58:1 in
   // light and about 1.6:1 in dark, because dark's danger is the pale #FCA5A5 —
   // white letters on pink. The tinted plate below is the same shape the sign
   // out button already uses and the theme measures it at 5.76:1 light and
   // 8.20:1 dark, so the most serious button in the app is legible in both.
-  dangerButton: {
-    minHeight: 54,
-    paddingHorizontal: 20,
-    borderRadius: t.radius.pill,
-    backgroundColor: t.colors.dangerMuted,
-    borderWidth: 1.5,
-    borderColor: t.colors.danger,
-    alignItems: 'center',
-    justifyContent: 'center',
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 6,
-  },
   // Not greyed out to the point of vanishing: it stays readable and simply
   // does not respond until DELETE is written, which is what the hint says.
-  dangerButtonIdle: { opacity: 0.45 },
-  dangerButtonText: { color: t.colors.danger, fontWeight: '900', fontSize: t.type.body },
-  deleteHint: { color: t.colors.textMuted, fontSize: t.type.meta, textAlign: 'center', marginTop: 2 },
 
-  deleteErrorBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    marginTop: 8,
-    padding: 13,
-    borderRadius: t.radius.md,
-    backgroundColor: t.colors.dangerMuted,
-    borderWidth: 1,
-    borderColor: t.colors.danger,
-  },
   // The half-finished state gets the same plate with a heavier rule, because
   // it is the one message a member must not skim past.
-  deleteWarnBox: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 10,
-    marginTop: 8,
-    padding: 13,
-    borderRadius: t.radius.md,
-    backgroundColor: t.colors.dangerMuted,
-    borderWidth: 2,
-    borderColor: t.colors.danger,
-  },
-  deleteErrorText: { flex: 1, color: t.colors.danger, fontWeight: '700', lineHeight: 21, fontSize: t.type.body },
 
-  deleteProgressBox: {
-    marginTop: 10,
-    padding: 14,
-    borderRadius: t.radius.md,
-    backgroundColor: t.colors.surfaceSunken,
-    borderWidth: 1,
-    borderColor: t.colors.borderStrong,
-    gap: 10,
-  },
-  deleteTrack: {
-    height: 8,
-    borderRadius: t.radius.pill,
-    backgroundColor: t.colors.border,
-    flexDirection: 'row',
-    overflow: 'hidden',
-  },
-  deleteTrackFill: { backgroundColor: t.colors.accentSolid, borderRadius: t.radius.pill },
-  deleteStageRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 24 },
-  deleteStageGlyph: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center' },
-  deleteStageText: { flex: 1, color: t.colors.textMuted, lineHeight: 20, fontSize: t.type.meta },
-  deleteStageTextNow: { color: t.colors.textPrimary, fontWeight: '800' },
-  deleteElapsed: { color: t.colors.textSecondary, fontSize: t.type.meta, fontWeight: '700' },
 
   goldButton: {
     minHeight: 52,
@@ -1660,18 +1066,6 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   },
   brandButtonText: { color: t.colors.textOnBrand, fontWeight: '900', fontSize: t.type.cardTitle },
 
-  choiceRow: {
-    minHeight: 52,
-    borderRadius: t.radius.md,
-    backgroundColor: t.colors.surfaceSunken,
-    borderWidth: 1,
-    borderColor: t.colors.accentBorder,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 12,
-  },
-  choiceText: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body },
 
   notificationRow: {
     minHeight: 56,

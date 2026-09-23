@@ -6,7 +6,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Card } from '../components/Card';
 import { useAccessProfile } from '../lib/accessControl';
 import { friendlyError } from '../lib/errorMessages';
-import { LIVE_TITLE_MAX, MANUAL_LIVE_HOURS, checkedText, detectionText, endLive, fetchServiceTimes, goLive, liveBadge, liveTitle, serviceTimeText, startedText, useLiveStatus, watchActionFor } from '../lib/liveService';
+import { LIVE_TITLE_MAX, MANUAL_LIVE_HOURS, NOT_LIVE, checkedText, detectionText, endLive, fetchServiceTimes, goLive, liveBadge, liveFacts, liveTitle, serviceTimeText, startedText, useLiveStatus, watchActionFor } from '../lib/liveService';
 import type { LiveState, ServiceTime } from '../lib/liveService';
 import { useNowPlaying } from '../lib/nowPlaying';
 import { colors, createThemedStyles } from '../lib/theme';
@@ -37,7 +37,7 @@ export default function LiveScreen() {
   const params = useLocalSearchParams<{ manage?: string }>();
   const { access } = useAccessProfile();
   const canManageLive = access.canManageContent || access.canManageMedia;
-  const { state, loading, error, refresh, reloadNow } = useLiveStatus();
+  const { state, loading, error, refresh, reloadNow, checkNow } = useLiveStatus();
   const [times, setTimes] = useState<ServiceTime[] | null>(null);
   const [timesError, setTimesError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -123,8 +123,19 @@ export default function LiveScreen() {
           <NotLive state={state} times={times} timesError={timesError} onRetryTimes={loadTimes} styles={styles} theme={theme} />
         ) : null}
 
-        {canManageLive && state ? (
-          <LeaderPanel state={state} startOpen={params.manage === '1'} onChanged={reloadNow} styles={styles} theme={theme} />
+        {/* Leaders keep Check now and Go live even when this phone could not
+            read the live status — that is the very moment the owner needs
+            them. The panel says so plainly instead of pretending it knows. */}
+        {canManageLive && !loading ? (
+          <LeaderPanel
+            state={state ?? NOT_LIVE}
+            unknown={!state}
+            startOpen={params.manage === '1'}
+            onChanged={reloadNow}
+            onCheckNow={checkNow}
+            styles={styles}
+            theme={theme}
+          />
         ) : null}
       </ScrollView>
     </SafeAreaView>
@@ -136,7 +147,11 @@ function LiveNow({ state, styles, theme }: { state: LiveState; styles: Styles; t
   const action = watchActionFor(state);
   const title = liveTitle(state);
   const started = startedText(state.startedAt, Date.now());
-  const onFacebook = action?.kind === 'open';
+  const onFacebook = action?.kind === 'open' && action.where === 'facebook';
+  // YouTube itself refused to let this stream play in another app. Say so on
+  // the button rather than opening a player that can only show an error.
+  const youtubeOnly = action?.kind === 'open' && action.where === 'youtube';
+  const elsewhere = onFacebook ? 'Facebook' : 'YouTube';
 
   async function openLink(url: string, what: string) {
     try {
@@ -149,12 +164,14 @@ function LiveNow({ state, styles, theme }: { state: LiveState; styles: Styles; t
   function watch() {
     if (!action) return;
     if (action.kind === 'open') {
-      openLink(action.url, 'Facebook');
+      openLink(action.url, action.where === 'facebook' ? 'Facebook' : 'YouTube');
       return;
     }
     // play() already handles "this stream again": it resumes it if it was
-    // paused (say the screen went off) and opens the player.
-    nowPlaying.play({ title: action.title, speaker: action.speaker, url: action.url, type: 'embed' });
+    // paused (say the screen went off) and opens the player. `live: true`
+    // keeps the player at the live edge — a service is never rewound to where
+    // somebody happened to leave it.
+    nowPlaying.play({ title: action.title, speaker: action.speaker, url: action.url, type: 'embed', live: true });
   }
 
   return (
@@ -170,15 +187,21 @@ function LiveNow({ state, styles, theme }: { state: LiveState; styles: Styles; t
       </View>
       <Text style={styles.liveTitle}>{title}</Text>
       <Text style={styles.meta}>{onFacebook ? 'Streaming on Facebook' : 'Streaming on YouTube'}</Text>
+      {youtubeOnly ? (
+        <View style={styles.noteRow}>
+          <Ionicons name="information-circle-outline" size={18} color={theme.colors.textSecondary} />
+          <Text style={styles.note}>This stream is set on YouTube so it can only be watched there. Watch opens the YouTube app.</Text>
+        </View>
+      ) : null}
       {action ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={onFacebook ? `Watch ${title} on Facebook` : `Watch ${title} now`}
+          accessibilityLabel={action.kind === 'open' ? `Watch ${title} on ${elsewhere}` : `Watch ${title} now`}
           onPress={watch}
           style={({ pressed }) => [styles.primaryButton, pressed && styles.pressed]}
         >
-          <Ionicons name={onFacebook ? 'open-outline' : 'play'} size={20} color={theme.colors.textOnAccent} />
-          <Text style={styles.primaryText}>{onFacebook ? 'Watch on Facebook' : 'Watch now'}</Text>
+          <Ionicons name={action.kind === 'open' ? 'open-outline' : 'play'} size={20} color={theme.colors.textOnAccent} />
+          <Text style={styles.primaryText}>{action.kind === 'open' ? `Watch on ${elsewhere}` : 'Watch now'}</Text>
         </Pressable>
       ) : null}
       {action?.kind === 'in-app' ? (
@@ -297,14 +320,19 @@ function NotLive({
 
 function LeaderPanel({
   state,
+  unknown,
   startOpen,
   onChanged,
+  onCheckNow,
   styles,
   theme,
 }: {
   state: LiveState;
+  /** This phone could not read the live status at all, so `state` is a placeholder. */
+  unknown: boolean;
   startOpen: boolean;
   onChanged: () => Promise<void>;
+  onCheckNow: () => Promise<LiveState>;
   styles: Styles;
   theme: AppTheme;
 }) {
@@ -318,8 +346,33 @@ function LeaderPanel({
   const [done, setDone] = useState<string | null>(null);
   // A second tap before the button greys out must not send a second "We're live" to every phone.
   const working = useRef(false);
+  const [checking, setChecking] = useState(false);
+  const [factsOpen, setFactsOpen] = useState(false);
+  const [checkedNote, setCheckedNote] = useState<string | null>(null);
+  const [checkProblem, setCheckProblem] = useState<string | null>(null);
   const now = Date.now();
   const endsAt = state.manualEndsAt ? new Date(state.manualEndsAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : '';
+  const facts = liveFacts(state, now);
+
+  async function checkNow() {
+    if (checking) return;
+    setChecking(true);
+    setCheckProblem(null);
+    setCheckedNote(null);
+    try {
+      const next = await onCheckNow();
+      setFactsOpen(true);
+      setCheckedNote(
+        next.isLive
+          ? 'The app says we are live. Everyone sees the live card on Home.'
+          : 'The app says we are not live. Here is exactly what the server last saw.'
+      );
+    } catch (err) {
+      setCheckProblem(friendlyError(err, 'We could not reach the live checker just now. Please try again in a moment.'));
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function startLive() {
     if (working.current) return;
@@ -366,8 +419,63 @@ function LeaderPanel({
     <Card style={styles.card}>
       <Text accessibilityRole="header" style={styles.cardTitle}>For leaders: going live</Text>
       <Text style={styles.body}>
-        {detectionText(state)} Last checked {checkedText(state.checkedAt, now)}.
+        {unknown
+          ? 'This phone could not read the live status just now, so nothing below is known yet. Press Check now to ask the server, or start the stream by hand with a link.'
+          : `${detectionText(state)} Last checked ${checkedText(state.checkedAt, now)}.`}
       </Text>
+
+      {/* "Check now": the owner asked to be able to prove, before a service,
+          that a stream really will show up in the app. It asks the server
+          again and then shows exactly what the server saw. The server keeps
+          its own one-minute cache, so the time of the check is always shown
+          with the answer. */}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Check now whether we are live"
+        accessibilityHint="Asks the server again and shows what it found"
+        onPress={checkNow}
+        disabled={checking}
+        style={({ pressed }) => [styles.secondaryButton, checking && styles.busy, pressed && styles.pressed]}
+      >
+        {checking ? <ActivityIndicator color={theme.colors.accent} /> : <Ionicons name="search" size={20} color={theme.colors.textPrimary} />}
+        <Text style={styles.secondaryText}>{checking ? 'Checking…' : 'Check now'}</Text>
+      </Pressable>
+      {checkedNote ? (
+        <Text style={styles.body} accessibilityLiveRegion="polite">{checkedNote}</Text>
+      ) : null}
+      {checkProblem ? (
+        <View style={styles.problemRow} accessibilityLiveRegion="assertive">
+          <Ionicons name="alert-circle" size={20} color={theme.colors.danger} />
+          <Text style={styles.problemText}>{checkProblem}</Text>
+        </View>
+      ) : null}
+      {/* Nothing was read, so there is nothing the server "last saw". Showing
+          the panel here would print "No" and "not checked yet" as if they
+          were findings. Check now brings it back the moment there is one. */}
+      {unknown ? null : (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={factsOpen ? 'Hide what the server last saw' : 'Show what the server last saw'}
+          accessibilityState={{ expanded: factsOpen }}
+          onPress={() => setFactsOpen((open) => !open)}
+          style={({ pressed }) => [styles.textButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.textButtonText}>{factsOpen ? 'Hide the details' : 'What the server last saw'}</Text>
+        </Pressable>
+      )}
+      {factsOpen && !unknown ? (
+        <View style={styles.factsBox}>
+          {facts.map((fact) => (
+            <View key={fact.label} style={styles.factRow} accessible accessibilityLabel={`${fact.label}: ${fact.value}`}>
+              <Text style={styles.factLabel}>{fact.label}</Text>
+              <Text style={styles.factValue}>{fact.value}</Text>
+            </View>
+          ))}
+          <Text style={styles.meta}>
+            The app looks at YouTube once a minute, however many phones are asking. Start the stream in OBS, wait about a minute, then press Check now.
+          </Text>
+        </View>
+      ) : null}
       {state.isLive && state.via === 'manual' ? (
         <Text style={styles.body}>
           A leader started this by hand. It switches off by itself{endsAt ? ` at ${endsAt}` : ` after ${MANUAL_LIVE_HOURS} hours`}.
@@ -562,7 +670,9 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     paddingHorizontal: 18,
     ...(t.dark ? t.elevation.none : t.elevation.low),
   },
-  primaryText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
+  // flexShrink + centred: at the largest text sizes "Open our YouTube channel"
+  // and "What the server last saw" have to wrap inside the pill, not be cut off.
+  primaryText: { flexShrink: 1, textAlign: 'center', color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
   secondaryButton: {
     minHeight: 48,
     borderRadius: t.radius.pill,
@@ -575,7 +685,7 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
     paddingHorizontal: 16,
   },
-  secondaryText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
+  secondaryText: { flexShrink: 1, textAlign: 'center', color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
   flexButton: { flexGrow: 1 },
   dangerButton: {
     minHeight: 48,
@@ -589,7 +699,7 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
     paddingHorizontal: 16,
   },
-  dangerText: { color: t.colors.danger, fontWeight: '900', fontSize: t.type.body },
+  dangerText: { flexShrink: 1, textAlign: 'center', color: t.colors.danger, fontWeight: '900', fontSize: t.type.body },
   // White on red (#B42318) measures 6.5:1.
   dangerSolid: {
     flexGrow: 1,
@@ -616,8 +726,8 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   },
   liveButtonText: { color: colors.white, fontWeight: '900', fontSize: t.type.body + 1, flexShrink: 1, textAlign: 'center' },
   busy: { opacity: 0.7 },
-  textButton: { minHeight: 48, alignItems: 'center', justifyContent: 'center' },
-  textButtonText: { color: t.colors.accent, fontWeight: '800', fontSize: t.type.body },
+  textButton: { minHeight: 48, minWidth: 48, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 14 },
+  textButtonText: { flexShrink: 1, textAlign: 'center', color: t.colors.accent, fontWeight: '800', fontSize: t.type.body },
   form: { gap: 10 },
   label: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.meta + 1 },
   input: {
@@ -637,6 +747,10 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   timeRow: { minHeight: 56, flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 6 },
   timeText: { flex: 1, gap: 2 },
   timeTitle: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.cardTitle - 1 },
+  factsBox: { gap: 10, padding: 12, borderRadius: t.radius.md, backgroundColor: t.colors.surfaceSunken, borderWidth: 1, borderColor: t.colors.border },
+  factRow: { gap: 2 },
+  factLabel: { color: t.colors.textMuted, fontWeight: '800', fontSize: t.type.meta, textTransform: 'uppercase', letterSpacing: 0.5 },
+  factValue: { color: t.colors.textPrimary, fontSize: t.type.body, lineHeight: 22 },
   doneRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', padding: 10, borderRadius: t.radius.md, backgroundColor: t.colors.successMuted },
   doneText: { flex: 1, color: t.colors.success, fontWeight: '700', fontSize: t.type.body, lineHeight: 21 },
   problemRow: { flexDirection: 'row', gap: 8, alignItems: 'flex-start', padding: 10, borderRadius: t.radius.md, backgroundColor: t.colors.dangerMuted },

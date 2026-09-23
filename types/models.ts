@@ -56,6 +56,16 @@ export type ChatRoom = {
   description?: string;
   /** Anyone in the network can find and join a public group. */
   isPublic?: boolean;
+  /**
+   * Group post limits (chat_channels.post_policy / allow_media /
+   * allow_voice_notes), added 2026-09-23. The database enforces them; these
+   * are here so the room can say WHY the message box or the plus button is
+   * missing instead of failing on send. Absent means the older default:
+   * everyone posts, everything allowed.
+   */
+  postPolicy?: 'everyone' | 'leaders';
+  allowMedia?: boolean;
+  allowVoiceNotes?: boolean;
 };
 
 export type OutreachStatus = 'untapped' | 'in_progress' | 'covered' | 'follow_up_due' | 'new_believer' | 'discipled';

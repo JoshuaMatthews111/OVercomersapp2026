@@ -13,10 +13,49 @@ export type PlaybackKind = 'audio' | 'video' | 'embed';
 /** A YouTube video id is always exactly 11 of these characters. */
 const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
 
+/** Sound files the phone plays itself (so they keep going with the screen off). */
+const AUDIO_FILE = /\.(mp3|m4a|m4b|aac|wav|ogg|oga|opus|flac)$/;
+/** Video files and streams expo-video can open. Deliberately no .mkv or .avi: neither phone plays them. */
+const VIDEO_FILE = /\.(mp4|m4v|mov|m3u8|webm)$/;
+
+/**
+ * The file path inside a link, with the query string and the #fragment
+ * dropped and one round of percent-encoding undone.
+ *
+ * Why the decoding (2026-09-23): the ministry's own media lives behind links
+ * that hide the file name inside an encoded path or behind a token —
+ *   Supabase public: .../storage/v1/object/public/sermon-media/music/song.mp3
+ *   Supabase signed: .../storage/v1/object/sign/sermon-media/music/song.mp3?token=…
+ *   Firebase:        …/v0/b/<bucket>/o/music%2Fsong.mp3?alt=media&token=…
+ * — and a link copied out of a browser often carries a #fragment as well.
+ * Reading the extension off the raw string got the Firebase and fragment
+ * shapes wrong. Never throws: a link that cannot be read gives ''.
+ */
+export function mediaFilePath(url: string): string {
+  const raw = (url || '').trim();
+  if (!raw) return '';
+  const parsed = parseUrl(raw);
+  const path = parsed ? parsed.pathname : raw.split('#')[0].split('?')[0];
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // A stray "%" that is not an escape. Nobody needs telling: the link is
+    // still usable as it stands, so hand back the path exactly as written.
+    return path;
+  }
+}
+
+/** The file name a person would recognise inside a link ("song.mp3"), or null. */
+export function mediaFileName(url: string): string | null {
+  const segments = mediaFilePath(url).split('/').filter(Boolean);
+  const last = segments[segments.length - 1] || '';
+  return last && /\.[A-Za-z0-9]{1,5}$/.test(last) ? last : null;
+}
+
 export function fileKind(url: string): 'audio' | 'video' | null {
-  const clean = url.split('?')[0].toLowerCase();
-  if (/\.(mp3|m4a|aac|wav|ogg)$/.test(clean)) return 'audio';
-  if (/\.(mp4|m4v|mov|m3u8|webm)$/.test(clean)) return 'video';
+  const clean = mediaFilePath(url).toLowerCase();
+  if (AUDIO_FILE.test(clean)) return 'audio';
+  if (VIDEO_FILE.test(clean)) return 'video';
   return null;
 }
 
@@ -113,10 +152,152 @@ export function embedUrl(url: string): string | null {
 }
 
 export function playbackKind(url: string, fallback: 'audio' | 'video'): PlaybackKind {
+  // A page on YouTube, Vimeo or Facebook is that site's own player, never a
+  // file the phone can download — even when the address happens to end in
+  // ".mp4" ("facebook.com/…/videos/123/clip.mp4"). Handing such a page to the
+  // native player gives "Would not play"; it belongs in the web view
+  // (DO-NOT-BREAK #17). So the host is asked before the file ending.
+  if (embedUrl(url)) return 'embed';
   const file = fileKind(url);
   if (file) return file;
-  if (embedUrl(url)) return 'embed';
   return fallback;
+}
+
+// ─── One answer for a pasted media link (2026-09-23) ───────────────────────
+//
+// The owner: "make sure in future we can use supabase links or firebase [for
+// media]". The paste-a-link form and the player must agree about what a link
+// is, so both ask this one function. It is pure: no network, no guessing from
+// a file's contents, and it never throws.
+
+/** Where a link lives, as far as the app can tell from the address alone. */
+export type MediaHost = 'youtube' | 'vimeo' | 'facebook' | 'supabase' | 'firebase' | 'web' | null;
+
+export type MediaLink = {
+  /** Play it as sound, as video, inside a web view, or we cannot tell. */
+  kind: PlaybackKind | 'unknown';
+  /** 'file' = the phone plays it (keeps going with the screen off). 'embed' = someone else's player in a web view. */
+  how: 'file' | 'embed' | null;
+  host: MediaHost;
+  /** The tidied link to store. YouTube keeps its own shape; everything else is trimmed. */
+  url: string;
+  /** "song.mp3", when the link carries a file name. */
+  fileName: string | null;
+  /** True only for a file the phone plays itself. */
+  keepsPlayingWithScreenOff: boolean;
+  /** Set when the link cannot be used at all — plain words to show under the box. */
+  problem: string | null;
+  /** One honest sentence about what this link will do in the app. */
+  note: string;
+};
+
+const SUPABASE_STORAGE_PATH = /^\/storage\/v1\/(object|render\/image)\//;
+
+/** Which of the hosts the ministry uses this link belongs to. */
+export function mediaHost(url: string): MediaHost {
+  const parsed = parseUrl(url);
+  if (!parsed) return null;
+  const host = parsed.hostname.replace(/^www\.|^m\./, '').toLowerCase();
+  if (host === 'youtu.be' || host === 'youtube.com' || host === 'youtube-nocookie.com' || host === 'music.youtube.com') return 'youtube';
+  if (host === 'vimeo.com' || host === 'player.vimeo.com') return 'vimeo';
+  if (host === 'facebook.com' || host === 'fb.watch' || host === 'fb.com') return 'facebook';
+  if (/(^|\.)supabase\.(co|in)$/.test(host) && SUPABASE_STORAGE_PATH.test(parsed.pathname)) return 'supabase';
+  if (host === 'firebasestorage.googleapis.com' || /(^|\.)firebasestorage\.app$/.test(host) || host === 'storage.googleapis.com') return 'firebase';
+  return 'web';
+}
+
+/**
+ * What the app will do with a pasted media link.
+ *
+ * Used by the player and by the "paste a link" form, so a leader is told the
+ * truth before they save: an uploaded file plays with the screen off, a
+ * YouTube link does not.
+ */
+export function classifyMediaLink(url: string, fallback: 'audio' | 'video' | null = null): MediaLink {
+  const clean = (url || '').trim();
+  const base: MediaLink = {
+    kind: 'unknown', how: null, host: null, url: clean, fileName: null,
+    keepsPlayingWithScreenOff: false, problem: null, note: '',
+  };
+  if (!clean) return { ...base, problem: 'Paste a link first.' };
+  if (/\s/.test(clean)) return { ...base, problem: 'That link has a space in it. Copy it again and paste only the link.' };
+  const parsed = parseUrl(clean);
+  if (!parsed || !/^https?:$/.test(parsed.protocol)) {
+    return { ...base, problem: 'That does not look like a web link. It should start with https://' };
+  }
+  if (parsed.protocol === 'http:') {
+    return { ...base, host: mediaHost(clean), problem: 'That link is not secure (it starts with http://). Ask for the https:// link.' };
+  }
+
+  const host = mediaHost(clean);
+  const file = fileKind(clean);
+  const fileName = mediaFileName(clean);
+
+  // The host is asked BEFORE the file ending, exactly as playbackKind does.
+  // A Facebook or Vimeo page whose address ends ".mp4" is still a page: the
+  // old order promised a leader "keeps playing when the screen is off" for a
+  // link that would not have played at all.
+  if (embedUrl(clean)) {
+    const where = host === 'youtube' ? 'YouTube' : host === 'vimeo' ? 'Vimeo' : 'Facebook';
+    return {
+      ...base,
+      kind: 'embed',
+      how: 'embed',
+      host,
+      fileName: null,
+      keepsPlayingWithScreenOff: false,
+      note: `This plays ${where}'s own player inside the app. It pauses when the person leaves the app or the screen goes off.`,
+    };
+  }
+
+  if (file) {
+    return {
+      ...base,
+      kind: file,
+      how: 'file',
+      host,
+      fileName,
+      keepsPlayingWithScreenOff: true,
+      note: file === 'audio'
+        ? 'This is a sound file. It plays in the app and keeps playing when the screen is off.'
+        : 'This is a video file. It plays in the app and keeps playing when the screen is off.',
+    };
+  }
+
+  if (host === 'youtube') {
+    return { ...base, host, problem: 'That YouTube link does not point to one video. Open the video, tap Share, and copy that link.' };
+  }
+  if (host === 'supabase' || host === 'firebase') {
+    // A storage link we could not read an extension from (a file saved with no
+    // extension, say). It is still a direct file, so the phone can play it —
+    // the caller says whether it is sound or video.
+    if (fallback) {
+      return {
+        ...base,
+        kind: fallback,
+        how: 'file',
+        host,
+        fileName,
+        keepsPlayingWithScreenOff: true,
+        note: 'This is an uploaded file. It plays in the app and keeps playing when the screen is off.',
+      };
+    }
+    return {
+      ...base,
+      host,
+      fileName,
+      problem: 'We could not tell what kind of file that is. Upload it with its ending (.mp3, .m4a or .mp4) in the name.',
+    };
+  }
+  if (fallback) {
+    return { ...base, kind: fallback, how: 'file', host, fileName, keepsPlayingWithScreenOff: true, note: 'The app will try to play this as a file.' };
+  }
+  return {
+    ...base,
+    host,
+    fileName,
+    problem: 'We could not tell what that link is. Use a YouTube or Vimeo link, or a link that ends in .mp3, .m4a or .mp4.',
+  };
 }
 
 export type EmbedMetadata = {
@@ -214,7 +395,9 @@ export type PlayerMessage =
   | { type: 'ready' }
   | { type: 'state'; playing: boolean }
   | { type: 'error'; code: number }
-  | { type: 'timeout' };
+  | { type: 'timeout' }
+  /** Where the video has got to, sent every few seconds while it plays, so the app can come back to the same place. */
+  | { type: 'time'; seconds: number; duration: number };
 
 /** Read one message from the player page. Anything unexpected is ignored. */
 export function parsePlayerMessage(raw: string): PlayerMessage | null {
@@ -224,6 +407,10 @@ export function parsePlayerMessage(raw: string): PlayerMessage | null {
     if (value.type === 'ready') return { type: 'ready' };
     if (value.type === 'timeout') return { type: 'timeout' };
     if (value.type === 'state' && typeof value.playing === 'boolean') return { type: 'state', playing: value.playing };
+    if (value.type === 'time' && typeof value.seconds === 'number' && Number.isFinite(value.seconds) && value.seconds >= 0) {
+      const duration = typeof value.duration === 'number' && Number.isFinite(value.duration) && value.duration > 0 ? value.duration : 0;
+      return { type: 'time', seconds: Math.floor(value.seconds), duration: Math.floor(duration) };
+    }
     if (value.type === 'error' && typeof value.code === 'number' && Number.isFinite(value.code)) return { type: 'error', code: value.code };
     return null;
   } catch {
@@ -286,8 +473,13 @@ export function youtubeWatchUrl(id: string): string {
   return `https://www.youtube.com/watch?v=${id}`;
 }
 
-/** The embed address the in-app page uses. Exported so the tests can pin it. */
-export function youtubePlayerFrameUrl(id: string, origin: string = PLAYER_ORIGIN): string {
+/**
+ * The embed address the in-app page uses. Exported so the tests can pin it.
+ * `startSeconds` brings the person back to where they were (see
+ * resumeStartSeconds); 0 starts at the top.
+ */
+export function youtubePlayerFrameUrl(id: string, origin: string = PLAYER_ORIGIN, startSeconds = 0): string {
+  const start = Number.isFinite(startSeconds) && startSeconds > 0 ? Math.floor(startSeconds) : 0;
   const params = [
     'playsinline=1',
     'autoplay=1',
@@ -295,6 +487,7 @@ export function youtubePlayerFrameUrl(id: string, origin: string = PLAYER_ORIGIN
     'enablejsapi=1',
     `origin=${encodeURIComponent(origin)}`,
     `widget_referrer=${encodeURIComponent(origin)}`,
+    ...(start > 0 ? [`start=${start}`] : []),
   ].join('&');
   return `https://www.youtube.com/embed/${id}?${params}`;
 }
@@ -313,11 +506,11 @@ function safeCssColour(value: string): string {
  * code) and timeout (nothing came back in 20 seconds). It accepts two
  * commands through injected script: window.ognPlayer('play' | 'pause').
  */
-export function youtubePlayerHtml(id: string, options: { background?: string; origin?: string } = {}): string {
+export function youtubePlayerHtml(id: string, options: { background?: string; origin?: string; startSeconds?: number } = {}): string {
   if (!YOUTUBE_ID.test(id)) throw new Error('youtubePlayerHtml needs an 11-character YouTube id');
   const origin = options.origin || PLAYER_ORIGIN;
   const background = safeCssColour(options.background || 'black');
-  const frame = youtubePlayerFrameUrl(id, origin);
+  const frame = youtubePlayerFrameUrl(id, origin, options.startSeconds || 0);
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -342,10 +535,23 @@ export function youtubePlayerHtml(id: string, options: { background?: string; or
     if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(message));
   }
   var player = null;
+  // Tell the app where the video has got to, so leaving the app and coming
+  // back starts again from the same place instead of the top.
+  function sendTime() {
+    if (!player || !player.getCurrentTime) return;
+    try {
+      var seconds = player.getCurrentTime();
+      var duration = player.getDuration ? player.getDuration() : 0;
+      if (typeof seconds === 'number' && isFinite(seconds)) {
+        send({ type: 'time', seconds: seconds, duration: typeof duration === 'number' && isFinite(duration) ? duration : 0 });
+      }
+    } catch (e) {}
+  }
+  setInterval(sendTime, 5000);
   window.ognPlayer = function (command) {
     if (!player) return;
     try {
-      if (command === 'pause') player.pauseVideo();
+      if (command === 'pause') { sendTime(); player.pauseVideo(); }
       if (command === 'play') player.playVideo();
     } catch (e) {}
   };
@@ -356,7 +562,7 @@ export function youtubePlayerHtml(id: string, options: { background?: string; or
         onStateChange: function (event) {
           answered = true;
           if (event.data === 1 || event.data === 3) send({ type: 'state', playing: true });
-          if (event.data === 0 || event.data === 2) send({ type: 'state', playing: false });
+          if (event.data === 0 || event.data === 2) { sendTime(); send({ type: 'state', playing: false }); }
         },
         onError: function (event) { answered = true; send({ type: 'error', code: Number(event.data) || 0 }); }
       }
@@ -406,7 +612,7 @@ export type EmbedSource =
   | { kind: 'youtube'; id: string; html: string; baseUrl: string; watchUrl: string }
   | { kind: 'page'; uri: string };
 
-export function embedSource(url: string, options: { background?: string } = {}): EmbedSource | null {
+export function embedSource(url: string, options: { background?: string; startSeconds?: number } = {}): EmbedSource | null {
   const id = youtubeVideoId(url);
   if (id) {
     return { kind: 'youtube', id, html: youtubePlayerHtml(id, options), baseUrl: PLAYER_ORIGIN, watchUrl: youtubeWatchUrl(id) };
@@ -481,6 +687,97 @@ export const YOUTUBE_SCREEN_OFF_NOTICE = 'Videos from YouTube pause when your sc
 
 /** Where the app keeps "we have already told this person once". */
 export const YOUTUBE_SCREEN_OFF_NOTICE_KEY = 'ogn.media.youtubeScreenOffNotice.v1';
+
+/**
+ * The second sentence, added 2026-09-23 at the owner's asking ("youtube
+ * definitely stops playing once i leave the app, fix this"). It is only ever
+ * shown when this teaching really does have a Listen version, so it never
+ * sends anyone looking for a button that is not there.
+ */
+export const YOUTUBE_LISTEN_HINT = 'Tap Listen for the audio version.';
+
+/** What the full player says about a YouTube video that stopped. */
+export function screenOffNoticeText(hasListen: boolean): string {
+  return hasListen ? `${YOUTUBE_SCREEN_OFF_NOTICE}. ${YOUTUBE_LISTEN_HINT}` : `${YOUTUBE_SCREEN_OFF_NOTICE}.`;
+}
+
+// ─── Coming back to the same place in a YouTube video (2026-09-23) ──────────
+//
+// YouTube pauses its own player when the app is not in front, and the app must
+// not pretend otherwise (DO-NOT-BREAK #17 and #24). What it CAN do is put the
+// person back where they were. The page reports its position every few
+// seconds (type 'time'); these rules decide what is worth keeping.
+
+/** Where the positions live on the phone. */
+export const YOUTUBE_RESUME_KEY = 'ogn.media.youtubeResume.v1';
+/** Below this, starting again from the top is kinder than a "resume" that saves two seconds. */
+export const RESUME_MIN_SECONDS = 20;
+/** This close to the end, the video is finished: start it again from the top. */
+export const RESUME_TAIL_SECONDS = 25;
+/** How many videos are remembered. The oldest drops off. */
+export const RESUME_MAX = 12;
+
+/** video id -> whole seconds. */
+export type ResumePositions = Record<string, number>;
+
+/** Reads the stored positions. Anything unreadable is treated as nothing stored. */
+export function parseResumePositions(raw: string | null | undefined): ResumePositions {
+  if (!raw) return {};
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const out: ResumePositions = {};
+    for (const [id, seconds] of Object.entries(value)) {
+      if (YOUTUBE_ID.test(id) && typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0) {
+        out[id] = Math.floor(seconds);
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Remember where a video got to. A position too near the start or the end is
+ * not worth keeping, and clears any older one for that video, so a finished
+ * video plays from the top next time. Keeps at most RESUME_MAX videos, the
+ * newest first.
+ */
+export function rememberPosition(positions: ResumePositions, id: string, seconds: number, duration = 0): ResumePositions {
+  if (!YOUTUBE_ID.test(id || '')) return positions;
+  const whole = Number.isFinite(seconds) ? Math.floor(seconds) : 0;
+  const tooLate = duration > 0 && whole >= duration - RESUME_TAIL_SECONDS;
+  const next: ResumePositions = {};
+  if (whole >= RESUME_MIN_SECONDS && !tooLate) next[id] = whole;
+  let kept = Object.keys(next).length;
+  for (const [key, value] of Object.entries(positions)) {
+    if (key === id || kept >= RESUME_MAX) continue;
+    next[key] = value;
+    kept += 1;
+  }
+  return next;
+}
+
+/** Where to start this video: the remembered position, or 0 for the top. */
+export function resumeStartSeconds(positions: ResumePositions, id: string | null | undefined): number {
+  if (!id || !YOUTUBE_ID.test(id)) return 0;
+  const seconds = positions[id];
+  return typeof seconds === 'number' && seconds >= RESUME_MIN_SECONDS ? Math.floor(seconds) : 0;
+}
+
+/** "from 4:05" — what the player says when it puts someone back where they were. */
+export function resumeText(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < RESUME_MIN_SECONDS) return '';
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const secs = whole % 60;
+  const clock = hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    : `${minutes}:${String(secs).padStart(2, '0')}`;
+  return `Carrying on from ${clock}`;
+}
 
 /**
  * What a teaching can offer: Watch (its video link) and, when a separate

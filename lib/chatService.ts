@@ -740,6 +740,138 @@ function normalizeRoomType(type?: string): ChatRoom['type'] {
   return 'global';
 }
 
+/* ---------------------------------------------------------------------------
+ * Group post limits (owner's TestFlight 36 note, 2026-09-23)
+ *
+ * "We should have a feature that restricts some posts and pictures in the
+ *  group." There was none, so every group let every member post anything.
+ *
+ * Three settings per group, on chat_channels:
+ *   post_policy 'everyone' | 'leaders', allow_media, allow_voice_notes.
+ *
+ * THE DATABASE IS WHAT ENFORCES THEM — a BEFORE INSERT trigger on
+ * chat_messages (supabase/2026-09-23-chat-group-post-rules.sql), so the rule
+ * holds for anything that talks to the API, not only this app. Everything in
+ * this file is about saying so KINDLY and early: the room shows why the
+ * message box is missing instead of letting somebody type a paragraph and
+ * then refusing it.
+ *
+ * A room whose backend has not got the columns yet reads as the old default —
+ * everyone posts, everything allowed — so an older build cannot lock a room by
+ * accident.
+ * ------------------------------------------------------------------------- */
+
+export type GroupPostRules = {
+  postPolicy: 'everyone' | 'leaders';
+  allowMedia: boolean;
+  allowVoiceNotes: boolean;
+};
+
+/** The settings as they stand, with the old behaviour as the default. */
+export function groupPostRules(room?: Partial<ChatRoom> | null): GroupPostRules {
+  return {
+    postPolicy: room?.postPolicy === 'leaders' ? 'leaders' : 'everyone',
+    allowMedia: room?.allowMedia !== false,
+    allowVoiceNotes: room?.allowVoiceNotes !== false,
+  };
+}
+
+/** The room roles the database counts as a leader IN a room (chat_members.role). */
+const ROOM_LEADER_ROLES = ['moderator', 'staff', 'leader', 'admin', 'super_admin'];
+
+/**
+ * Does this person count as a leader in this room? The same three ways the
+ * database's chat_channel_leader() counts them: a ministry role that
+ * is_chat_moderator() covers (canModerateChat), the person who started the
+ * group, or a room role above plain member.
+ */
+export function isRoomLeader(input: {
+  room?: Partial<ChatRoom> | null;
+  userId?: string | null;
+  canModerateChat?: boolean;
+  myRoomRole?: string | null;
+}): boolean {
+  if (input.canModerateChat) return true;
+  if (input.userId && input.room?.createdBy && input.room.createdBy === input.userId) return true;
+  const role = String(input.myRoomRole || '').toLowerCase();
+  return ROOM_LEADER_ROLES.includes(role);
+}
+
+export type PostingRights = {
+  canPost: boolean;
+  canSendMedia: boolean;
+  canSendVoiceNote: boolean;
+  /** Why the message box is not there. Shown in its place, in plain words. */
+  reason?: string;
+  /** The one line under the room's name, for everybody. Empty when nothing is limited. */
+  roomNote?: string;
+};
+
+/** What this person may do in this room, and the words for what they may not. */
+export function postingRights(input: {
+  room?: Partial<ChatRoom> | null;
+  isLeader: boolean;
+}): PostingRights {
+  const rules = groupPostRules(input.room);
+  const leadersOnly = rules.postPolicy === 'leaders';
+  const canPost = !leadersOnly || input.isLeader;
+  const notes: string[] = [];
+  if (leadersOnly) notes.push('Only leaders can post');
+  if (!rules.allowMedia) notes.push('Photos and videos are off');
+  if (!rules.allowVoiceNotes) notes.push('Voice notes are off');
+  return {
+    canPost,
+    // The switches are for everybody, leaders included, so the label on the
+    // group info screen cannot say "Off" while a photo appears in the room.
+    canSendMedia: canPost && rules.allowMedia,
+    canSendVoiceNote: canPost && rules.allowVoiceNotes,
+    reason: canPost ? undefined : 'Only leaders can post in this group. You can still read everything here.',
+    roomNote: notes.length ? notes.join(' • ') : undefined,
+  };
+}
+
+/** The words the group info screen shows for the current state, at a glance. */
+export function postRuleSummary(room?: Partial<ChatRoom> | null): { who: string; media: string; voice: string } {
+  const rules = groupPostRules(room);
+  return {
+    who: rules.postPolicy === 'leaders' ? 'Admins and leaders only' : 'Everyone in the group',
+    media: rules.allowMedia ? 'Allowed' : 'Off',
+    voice: rules.allowVoiceNotes ? 'Allowed' : 'Off',
+  };
+}
+
+/**
+ * Change a group's post limits. Only a chat moderator (moderator, staff,
+ * leader, admin, super_admin) gets past the chat_channels row-security policy;
+ * a plain member's update simply changes nothing, so that is said plainly
+ * rather than reported as success.
+ */
+export async function updateGroupPostRules(channelId: string, changes: Partial<GroupPostRules>): Promise<GroupPostRules> {
+  if (!hasSupabase) throw new FriendlyError('Group settings are not switched on in this version of the app yet.');
+  if (!channelId) throw new FriendlyError('That group could not be found.');
+  const patch: Record<string, unknown> = {};
+  if (changes.postPolicy) patch.post_policy = changes.postPolicy === 'leaders' ? 'leaders' : 'everyone';
+  if (typeof changes.allowMedia === 'boolean') patch.allow_media = changes.allowMedia;
+  if (typeof changes.allowVoiceNotes === 'boolean') patch.allow_voice_notes = changes.allowVoiceNotes;
+  // Never answer "everything is allowed" to a question nobody asked: a caller
+  // that spread this reply back over the room would quietly unlock it on the
+  // screen while the database still had it locked.
+  if (!Object.keys(patch).length) throw new FriendlyError('Nothing was changed.');
+  const { data, error } = await supabase
+    .from('chat_channels')
+    .update(patch)
+    .eq('id', channelId)
+    .select('post_policy, allow_media, allow_voice_notes');
+  if (error) throw permissionWords(error, 'Only a leader can change who may post in this group.');
+  if (!data || !data.length) throw new FriendlyError('Only a leader can change who may post in this group.');
+  const row = data[0] as any;
+  return groupPostRules({
+    postPolicy: row.post_policy === 'leaders' ? 'leaders' : 'everyone',
+    allowMedia: row.allow_media !== false,
+    allowVoiceNotes: row.allow_voice_notes !== false,
+  });
+}
+
 function roomFromRow(row: any): ChatRoom {
   const type = normalizeRoomType(row.channel_type);
   return {
@@ -756,6 +888,11 @@ function roomFromRow(row: any): ChatRoom {
     // never shown to anybody.
     description: type === 'direct' ? undefined : (row.description || undefined),
     isPublic: typeof row.is_public === 'boolean' ? row.is_public : undefined,
+    // Group post limits, 2026-09-23. A row from a backend without the columns
+    // reads as the old default: everyone posts, everything allowed.
+    postPolicy: row.post_policy === 'leaders' ? 'leaders' : 'everyone',
+    allowMedia: row.allow_media !== false,
+    allowVoiceNotes: row.allow_voice_notes !== false,
   };
 }
 
@@ -770,6 +907,21 @@ export async function getChatRooms(): Promise<ChatRoom[]> {
   // reached them. Senders see two ticks. At most once a minute, never awaited.
   void markChatDeliveredEverywhere();
   return data.map(roomFromRow);
+}
+
+/**
+ * One room, read again on its own.
+ *
+ * A room's post limits can be changed by a leader while somebody else is
+ * standing in it, so the room screen asks for this row again on every
+ * pull-to-refresh instead of trusting what it read when it opened. Row
+ * security answers for a room this person cannot see, and that reads as null.
+ */
+export async function getChatRoom(channelId: string): Promise<ChatRoom | null> {
+  if (!hasSupabase || !channelId) return null;
+  const { data, error } = await supabase.from('chat_channels').select('*').eq('id', channelId).maybeSingle();
+  if (error || !data) return null;
+  return roomFromRow(data);
 }
 
 /* ---------------------------------------------------------------------------
@@ -1121,6 +1273,11 @@ export async function sendChatMessage(
     if (String((error as { code?: unknown }).code ?? '') === '22023' && /same chat/i.test(String(error.message || ''))) {
       throw new FriendlyError('That reply could not be linked to the message you picked. Please send it again without the reply.');
     }
+    // A group's own post limits (2026-09-23). The trigger raises the exact
+    // sentence the person should read — "Only leaders can post in this group."
+    // — so it is shown as it is rather than as a permissions error.
+    const limited = permissionWords(error, 'That could not be posted in this group. Please ask a leader.');
+    if (limited instanceof FriendlyError) throw limited;
     throw error;
   }
   return {
@@ -1441,7 +1598,7 @@ export async function createChatGroup(input: {
       is_mandatory: false,
       created_by: me,
     })
-    .select('id, name, region, channel_type, description, is_public, created_by, avatar_url')
+    .select('id, name, region, channel_type, description, is_public, created_by, avatar_url, post_policy, allow_media, allow_voice_notes')
     .single();
   if (error) {
     if (refusedToCreate(error)) throw new FriendlyError('Your account is not allowed to start a group. Please ask an admin.');

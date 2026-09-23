@@ -60,7 +60,11 @@ function LiveCard({ state, styles, theme }: { state: LiveState; styles: Styles; 
   const action = watchActionFor(state);
   const title = liveTitle(state);
   const started = startedText(state.startedAt, Date.now());
-  const onFacebook = action?.kind === 'open';
+  const onFacebook = action?.kind === 'open' && action.where === 'facebook';
+  // Either Facebook, or a YouTube stream YouTube itself will not let play
+  // anywhere but YouTube. The button says which, so nobody taps into an error.
+  const elsewhere = onFacebook ? 'Facebook' : 'YouTube';
+  const opensOut = action?.kind === 'open';
 
   async function watch() {
     if (!action) {
@@ -69,14 +73,19 @@ function LiveCard({ state, styles, theme }: { state: LiveState; styles: Styles; 
     }
     if (action.kind === 'in-app') {
       // play() resumes the same stream if it was paused and opens the player.
-      nowPlaying.play({ title: action.title, speaker: action.speaker, url: action.url, type: 'embed' });
+      // `live: true`: a service is watched at the live edge, never rewound to
+      // where somebody left it (lib/nowPlaying.tsx).
+      nowPlaying.play({ title: action.title, speaker: action.speaker, url: action.url, type: 'embed', live: true });
       return;
     }
     setOpening(true);
     try {
       await Linking.openURL(action.url);
     } catch {
-      Alert.alert('We could not open Facebook', 'Please try again, or open the Overcomers Global Network page in the Facebook app.');
+      Alert.alert(
+        `We could not open ${elsewhere}`,
+        `Please try again, or open the Overcomers Global Network page in the ${elsewhere} app.`
+      );
     } finally {
       setOpening(false);
     }
@@ -94,17 +103,23 @@ function LiveCard({ state, styles, theme }: { state: LiveState; styles: Styles; 
         {started ? <Text style={styles.meta}>{started}</Text> : null}
       </View>
       <Text style={styles.title}>{title}</Text>
-      <Text style={styles.meta}>{onFacebook ? 'Streaming on Facebook' : 'Streaming now. Watch it right here in the app.'}</Text>
+      <Text style={styles.meta}>
+        {onFacebook
+          ? 'Streaming on Facebook'
+          : opensOut
+            ? 'Streaming on YouTube. This one can only be watched on YouTube.'
+            : 'Streaming now. Watch it right here in the app.'}
+      </Text>
       <View style={styles.actions}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={onFacebook ? `Watch ${title} on Facebook` : `Watch ${title} now`}
+          accessibilityLabel={opensOut ? `Watch ${title} on ${elsewhere}` : `Watch ${title} now`}
           onPress={watch}
           disabled={opening}
           style={({ pressed }) => [styles.watch, pressed && styles.pressed]}
         >
-          <Ionicons name={onFacebook ? 'open-outline' : 'play'} size={20} color={theme.colors.textOnAccent} />
-          <Text style={styles.watchText}>{onFacebook ? 'Watch on Facebook' : 'Watch now'}</Text>
+          <Ionicons name={opensOut ? 'open-outline' : 'play'} size={20} color={theme.colors.textOnAccent} />
+          <Text style={styles.watchText}>{opensOut ? `Watch on ${elsewhere}` : 'Watch now'}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
@@ -159,7 +174,8 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     gap: 8,
     paddingHorizontal: 18,
   },
-  watchText: { color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
+  // At the largest text sizes "Watch on YouTube" has to wrap inside the pill.
+  watchText: { flexShrink: 1, textAlign: 'center', color: t.colors.textOnAccent, fontWeight: '900', fontSize: t.type.body + 1 },
   more: {
     minHeight: 48,
     borderRadius: t.radius.pill,
@@ -170,7 +186,7 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 18,
   },
-  moreText: { color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
+  moreText: { flexShrink: 1, textAlign: 'center', color: t.colors.textPrimary, fontWeight: '800', fontSize: t.type.body },
   pressed: { opacity: 0.86 },
   slim: {
     minHeight: 48,
@@ -189,5 +205,5 @@ const useStyles = createThemedStyles((t) => StyleSheet.create({
   },
   slimText: { flex: 1, color: t.colors.textSecondary, fontSize: t.type.meta + 1, fontWeight: '700' },
   slimAction: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  slimActionText: { color: t.colors.accent, fontWeight: '900', fontSize: t.type.body },
+  slimActionText: { flexShrink: 1, color: t.colors.accent, fontWeight: '900', fontSize: t.type.body },
 }));

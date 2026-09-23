@@ -221,6 +221,17 @@ export default function CommunityScreen() {
                           ? roomLabel(room.type)
                           : room.description || `${roomLabel(room.type)} • ${room.region || 'Global'}`}
                       </Text>
+                      {/*
+                        Group post limits, 2026-09-23. An announcement-style
+                        group says so in the list, so nobody opens it expecting
+                        a message box and finds none.
+                      */}
+                      {room.type !== 'direct' && room.postPolicy === 'leaders' ? (
+                        <View style={styles.roomRuleLine}>
+                          <Ionicons name="lock-closed" size={11} color={theme.colors.accent} />
+                          <Text numberOfLines={1} style={styles.roomRuleText}>Only leaders can post</Text>
+                        </View>
+                      ) : null}
                     </View>
                     <Ionicons name="chevron-forward" size={18} color={theme.colors.accent} />
                   </Pressable>
@@ -802,6 +813,9 @@ const useStyles = createThemedStyles((t: AppTheme) => StyleSheet.create({
   avatarLeader: { backgroundColor: t.colors.brandSolid, borderWidth: 2, borderColor: t.colors.accentSolid },
   roomName: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.body },
   roomPreview: { color: t.colors.textSecondary, marginTop: 3, fontSize: t.type.meta },
+  // "Only leaders can post" under a group's name in the list (2026-09-23).
+  roomRuleLine: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 2 },
+  roomRuleText: { flex: 1, color: t.colors.accent, fontWeight: '800', fontSize: t.type.overline },
   emptyState: { alignItems: 'center', padding: 24, gap: 8 },
   emptyTitle: { color: t.colors.textPrimary, fontWeight: '900', fontSize: t.type.cardTitle },
   emptyBody: { color: t.colors.textSecondary, textAlign: 'center', lineHeight: 20, fontSize: t.type.body },
