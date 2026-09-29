@@ -102,7 +102,9 @@ test('paragraphs, headings and callouts are the PDF text verbatim, with nothing 
     for (const block of chapter.blocks) {
       assert.ok(!block.text.includes('•'), `${chapter.label}: an ornament leaked into the text`);
       assert.ok(block.text.trim().length > 0, `${chapter.label}: empty block`);
-      if (!pdfText.includes(normalise(block.text))) misses.push(`${chapter.label}: ${block.text.slice(0, 60)}`);
+      // The owner corrected one PDF typo (2026-09-29): "DEGREE AND DECLARE" is "DECREE AND DECLARE".
+      const asPrinted = block.text.replaceAll('DECREE AND DECLARE', 'DEGREE AND DECLARE');
+      if (!pdfText.includes(normalise(asPrinted))) misses.push(`${chapter.label}: ${block.text.slice(0, 60)}`);
     }
   }
   // The single allowed difference: the PDF breaks the compound word
