@@ -142,6 +142,22 @@ export function friendlyError(error: unknown, fallback: string = MESSAGES.generi
 
   if (!message && !code && status === null) return fallback;
 
+  // --- Sign-up with an email that already has an account. People tap
+  // "Create account" again after the first try worked; tell them to sign in.
+  if (haystack.includes('already registered') || haystack.includes('user_already_exists') || haystack.includes('already been registered')) {
+    return 'You already have an account with this email. Tap Sign in and use your password.';
+  }
+
+  // --- Too many emails sent. Ask them to wait instead of a vague retry.
+  if (haystack.includes('rate limit') || status === 429) {
+    return 'Too many tries right now. Please wait a minute, then tap Sign in.';
+  }
+
+  // --- Email typed wrong.
+  if (haystack.includes('invalid format') || haystack.includes('validate email')) {
+    return 'That email address does not look right. Check it and try again.';
+  }
+
   // --- Took too long. The app aborts a stalled request itself, and the
   // AbortError that comes back used to be reported as a permissions problem.
   if (
